@@ -32,7 +32,7 @@ jobs:
       - name: Check built application and migration graph
         run: |
           IMAGE="center-messenger:gitverse-$(git -C source rev-parse --short=12 HEAD)"
-          docker run --rm --entrypoint python "$IMAGE" -m compileall -q /app/backend/src /app/backend/migrations
+          docker run --rm -e PYTHONPYCACHEPREFIX=/tmp/pycache --entrypoint python "$IMAGE" -m compileall -q /app/backend/src /app/backend/migrations
           docker run --rm --entrypoint alembic "$IMAGE" -c /app/alembic.ini history
       - name: Create release bundle
         run: |
