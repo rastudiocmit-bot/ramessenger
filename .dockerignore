@@ -1,0 +1,13 @@
+.git
+.gitverse
+.github
+__pycache__
+*.py[cod]
+*.tar
+*.tar.gz
+image.tar.gz
+node_modules
+venv
+.env
+.secrets
+checksums.sha256

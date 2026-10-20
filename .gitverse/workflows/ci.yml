@@ -1,0 +1,42 @@
+name: Center Messenger CI and deployment
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  verify-build-deploy:
+    name: Verify, build and deploy production
+    if: ${{ gitverse.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - name: Fetch this exact GitVerse commit over SSH
+        env:
+          SOURCE_SHA: ${{ gitverse.sha }}
+        run: |
+          rm -rf source
+          export GIT_SSH_COMMAND='ssh -i /home/cm-gitverse/.ssh/gitverse_center_messenger -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes'
+          git clone --no-checkout git@gitverse.ru:olegsheff/center-messenger.git source
+          git -C source fetch origin main
+          git -C source cat-file -e "$SOURCE_SHA^{commit}"
+          git -C source checkout --detach "$SOURCE_SHA"
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+      - name: Check Python syntax
+        run: python3 -m compileall -q source/app/backend/src source/app/backend/migrations source/scripts
+      - name: Build production image
+        run: |
+          IMAGE="center-messenger:gitverse-$(git -C source rev-parse --short=12 HEAD)"
+          docker build --platform linux/amd64 -t "$IMAGE" -f source/Dockerfile source
+      - name: Check built application and migration graph
+        run: |
+          IMAGE="center-messenger:gitverse-$(git -C source rev-parse --short=12 HEAD)"
+          docker run --rm --entrypoint python "$IMAGE" -m compileall -q /app/backend/src /app/backend/migrations
+          docker run --rm --entrypoint alembic "$IMAGE" -c /app/alembic.ini history
+      - name: Create release bundle
+        run: |
+          IMAGE="center-messenger:gitverse-$(git -C source rev-parse --short=12 HEAD)"
+          python3 source/scripts/build_release.py --image "$IMAGE" --output /var/lib/center-messenger-runner/release
+      - name: Deploy through verified controller
+        run: sudo /usr/local/sbin/center-messenger-gitverse-deploy "$(git -C source rev-parse HEAD)"
