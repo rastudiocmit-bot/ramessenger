@@ -10,11 +10,49 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def run(*args):
     return subprocess.run(args, check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+
+
+def saved_config_digest(path: Path, image: str) -> str:
+    """Return the digest of the image config stored in Docker's saved archive."""
+    with tarfile.open(path, "r:*") as archive:
+        members = {}
+        for member in archive.getmembers():
+            name = str(PurePosixPath(member.name))
+            if name in members:
+                raise SystemExit("Docker image archive contains duplicate paths")
+            members[name] = member
+
+        manifest_member = members.get("manifest.json")
+        if manifest_member is None or not manifest_member.isfile():
+            raise SystemExit("Docker image archive has no manifest.json")
+        with archive.extractfile(manifest_member) as stream:
+            manifest = json.load(stream)
+
+        matches = [
+            entry
+            for entry in manifest
+            if isinstance(entry, dict) and image in (entry.get("RepoTags") or [])
+        ]
+        if len(matches) != 1:
+            raise SystemExit("Docker image archive does not contain exactly one expected image")
+
+        config_path = PurePosixPath(matches[0]["Config"])
+        if config_path.is_absolute() or ".." in config_path.parts:
+            raise SystemExit("Docker image archive contains an invalid config path")
+        config_member = members.get(str(config_path))
+        if config_member is None or not config_member.isfile() or config_member.size > 8 * 1024 * 1024:
+            raise SystemExit("Docker image config is missing or too large")
+        with archive.extractfile(config_member) as stream:
+            config = json.load(stream)
+        if (config.get("os"), config.get("architecture")) != ("linux", "amd64"):
+            raise SystemExit("Saved image config is not linux/amd64")
+        with archive.extractfile(config_member) as stream:
+            return "sha256:" + hashlib.sha256(stream.read()).hexdigest()
 
 
 def main():
@@ -69,6 +107,13 @@ def main():
         with raw.open("rb") as source, (output / "image.tar.gz").open("wb") as target:
             with gzip.GzipFile(fileobj=target, mode="wb", compresslevel=1, mtime=0) as compressed:
                 shutil.copyfileobj(source, compressed)
+
+    # Docker's .Id differs between image-store implementations. Record the
+    # config digest from the exact archive that the deploy controller verifies.
+    config_digest = saved_config_digest(output / "image.tar.gz", image)
+    metadata["image_id"] = config_digest
+    metadata["image_config_digest"] = config_digest
+    (output / "release.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
     entries = []
     for name in ("compose.yaml", "image.tar.gz", "release.json"):
