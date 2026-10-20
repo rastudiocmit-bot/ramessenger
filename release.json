@@ -1,0 +1,13 @@
+{
+  "source_commit": "2afd6c58aeb8574102624c1cead3c8169eb7b3e9",
+  "run_url": "https://github.com/capitalbtl-lab/center-messenger/actions/runs/39238208047",
+  "image": "center-messenger:ci-39238208047-1",
+  "image_id": "sha256:6887e063ceea25d93c8f5cdd7993d7f2ed399553391ddb6d205e7a61db886228",
+  "image_config_digest": "sha256:6887e063ceea25d93c8f5cdd7993d7f2ed399553391ddb6d205e7a61db886228",
+  "platform": "linux/amd64",
+  "postgres": "postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
+  "stage": "message_unread",
+  "version": "0.8.1",
+  "schema_revision": "0011_crm_family_details",
+  "deployment_format": 1
+}

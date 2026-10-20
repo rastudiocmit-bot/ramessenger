@@ -1,0 +1,106 @@
+name: center-messenger
+
+services:
+  db:
+    image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: center_messenger
+      POSTGRES_USER: cm_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_owner_password
+    secrets:
+      - db_owner_password
+      - db_app_password
+    volumes:
+      - database:/var/lib/postgresql/data
+      - ./infra/postgres/010-runtime-role.sh:/docker-entrypoint-initdb.d/010-runtime-role.sh:ro
+    networks: [private]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cm_owner -d center_messenger"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    command: ["postgres", "-c", "max_connections=30", "-c", "shared_buffers=128MB", "-c", "work_mem=4MB", "-c", "maintenance_work_mem=64MB", "-c", "max_wal_size=1GB"]
+    mem_limit: 1024m
+    cpus: 1.0
+    pids_limit: 200
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  api:
+    image: ${CM_IMAGE:-center-messenger:local}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      CM_ENVIRONMENT: production
+      CM_DB_HOST: db
+      CM_DB_NAME: center_messenger
+      CM_DB_USER: cm_app
+      CM_EXPECTED_DB_ROLE: cm_app
+      CM_DB_PASSWORD_FILE: /run/secrets/db_app_password
+      CM_PUBLIC_URL: ${CM_PUBLIC_URL:-https://messenger.rastudio.org}
+      CM_BOOTSTRAP_TOKEN_FILE: /run/secrets/owner_bootstrap_token
+      CM_CONNECTION_MASTER_KEY_FILE: /run/secrets/connection_master_key
+      # Safe only with the loopback-published port and Nginx overwriting X-Real-IP.
+      CM_TRUST_PROXY_IP: 'true'
+      CM_CRM_SYNC_WORKER: 'true'
+      CM_MAX_WORKER: 'true'
+    secrets: [db_app_password, owner_bootstrap_token, connection_master_key]
+    ports: ["127.0.0.1:8100:8000"]
+    networks: [private]
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=256m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1536m
+    cpus: 1.25
+    pids_limit: 192
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  migrate:
+    image: ${CM_IMAGE:-center-messenger:local}
+    profiles: [tools]
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      CM_DB_HOST: db
+      CM_DB_NAME: center_messenger
+      CM_DB_USER: cm_owner
+      CM_DB_PASSWORD_FILE: /run/secrets/db_owner_password
+    secrets: [db_owner_password]
+    networks: [private]
+    depends_on:
+      db: {condition: service_healthy}
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+
+networks:
+  private: {}
+
+volumes:
+  database: {}
+
+secrets:
+  db_owner_password:
+    file: ./.secrets/db_owner_password
+  db_app_password:
+    file: ./.secrets/db_app_password
+  owner_bootstrap_token:
+    file: ./.secrets/owner_bootstrap_token
+  connection_master_key:
+    file: ${CM_KEY_DIR:-/opt/center-messenger-keys}/connection_master_key
