@@ -17,9 +17,9 @@ RUN /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r requ
     && /opt/venv/bin/playwright install chromium \
     && rm -rf /var/lib/apt/lists/*
 
-COPY app/backend/src ./backend/src
-COPY app/backend/migrations ./backend/migrations
-COPY app/alembic.ini ./alembic.ini
+COPY --chown=10001:10001 app/backend/src ./backend/src
+COPY --chown=10001:10001 app/backend/migrations ./backend/migrations
+COPY --chown=10001:10001 app/alembic.ini ./alembic.ini
 
 USER 10001:10001
 EXPOSE 8000
