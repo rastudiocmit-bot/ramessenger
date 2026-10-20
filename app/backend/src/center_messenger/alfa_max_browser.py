@@ -434,6 +434,34 @@ def _log_compose_failure(phase, reason, *, status=None, raw=None, exception=None
     )
 
 
+def _explicit_max_recipient_error(*values):
+    """Classify only an explicit AlfaCRM statement that the recipient has no MAX account."""
+    parts = []
+
+    def collect(value, depth=0):
+        if depth > 5 or len(parts) >= 64:
+            return
+        if isinstance(value, str):
+            parts.append(value[:5000])
+        elif isinstance(value, dict):
+            for nested in list(value.values())[:32]:
+                collect(nested, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for nested in value[:32]:
+                collect(nested, depth + 1)
+
+    for value in values:
+        collect(value)
+    text = " ".join(parts).lower().replace("ё", "е")
+    if not text:
+        return None
+    patterns = (
+        r"(?:max|макс).{0,100}(?:не найден|не зарегистр|не подключ|отсутств|not found|not registered|not linked|does not exist)",
+        r"(?:не найден|не зарегистр|не подключ|отсутств|not found|not registered|not linked|does not exist).{0,100}(?:max|макс)",
+    )
+    return "max_recipient_missing" if any(re.search(pattern, text, re.I | re.S) for pattern in patterns) else None
+
+
 def _json_envelope(raw):
     try:
         value = json.loads(raw)
@@ -449,9 +477,14 @@ def _json_envelope(raw):
         break
     if not isinstance(value, dict):
         return {"html": raw} if isinstance(value, str) else {"empty": True}
-    error = value.get("toastr_error") or value.get("errorMessage") or value.get("error_message")
+    error = (
+        value.get("toastr_error")
+        or value.get("errorMessage")
+        or value.get("error_message")
+        or value.get("errors")
+    )
     if error:
-        raise AlfaBrowserError("crm_rejected")
+        raise AlfaBrowserError(_explicit_max_recipient_error(error) or "crm_rejected")
     for key in ("form", "html", "content", "body", "data", "result"):
         markup = _find_form_markup(value.get(key))
         if markup:
@@ -606,7 +639,7 @@ def parse_compose_form(html, *, origin, branch, customer):
             "branch_id": branch,
             "max_length": min(int(max_length), 8192),
         }
-    raise AlfaBrowserError("form_unavailable")
+    raise AlfaBrowserError(_explicit_max_recipient_error(markup) or "form_unavailable")
 
 
 class AlfaMaxBrowser:
@@ -837,6 +870,7 @@ class AlfaMaxBrowser:
         response_body = None
 
         def get_form_response(page, address, *, ajax):
+            nonlocal response_status, response_body
             result = page.evaluate(
                 """async ({url, ajax, maxBytes}) => {
                   const controller = new AbortController();
@@ -868,7 +902,19 @@ class AlfaMaxBrowser:
             ):
                 raise AlfaBrowserError("form_unavailable")
             status = result.get("status")
+            response_status = status if isinstance(status, int) else None
+            response_body = body
             if not isinstance(status, int) or not 200 <= status < 300:
+                if status == 401:
+                    raise AlfaBrowserError("reauth_required")
+                if status == 403:
+                    raise AlfaBrowserError("crm_access_denied")
+                if status == 404:
+                    raise AlfaBrowserError("max_form_missing")
+                if status == 429:
+                    raise AlfaBrowserError("crm_rate_limited")
+                if isinstance(status, int) and status >= 500:
+                    raise AlfaBrowserError("crm_unavailable")
                 raise AlfaBrowserError("form_unavailable")
             return status, body
 
@@ -880,6 +926,12 @@ class AlfaMaxBrowser:
             self._check_origin(page, origin)
             response_status = card_response.status if card_response is not None else None
             if card_response is None or card_response.status != 200:
+                if response_status == 401:
+                    raise AlfaBrowserError("reauth_required")
+                if response_status == 403:
+                    raise AlfaBrowserError("crm_access_denied")
+                if response_status == 404:
+                    raise AlfaBrowserError("crm_customer_missing")
                 raise AlfaBrowserError("form_unavailable")
             card_markup = page.content()
             form_url = _customer_card_compose_url(
@@ -975,14 +1027,21 @@ class AlfaMaxBrowser:
                 data = {}
             errors = data.get("errors")
             if data.get("toastr_error") or errors:
-                raise AlfaBrowserError("crm_rejected")
+                raise AlfaBrowserError(
+                    _explicit_max_recipient_error(data.get("toastr_error"), errors)
+                    or "crm_rejected"
+                )
             if not (200 <= int(result.get("status", 0)) < 300) or not (
                 data.get("toastr_success") or data.get("success") is True
             ):
                 raise AlfaBrowserError("send_unknown")
             return {"accepted": True, "branch_id": int(branch), "text_length": len(text)}
         except AlfaBrowserError as error:
-            if error.code in {"form_unavailable", "recipient_missing", "csrf_missing"}:
+            if error.code in {
+                "form_unavailable", "max_form_missing", "max_recipient_missing",
+                "crm_customer_missing", "crm_access_denied", "crm_rate_limited",
+                "recipient_missing", "csrf_missing", "crm_rejected",
+            }:
                 _log_compose_failure(
                     phase,
                     error.code,
