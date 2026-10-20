@@ -1,0 +1,24 @@
+# Секреты и локальная конфигурация
+.secrets/
+.env
+
+# Локальный dev-оверрайд (не для прод)
+compose.override.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Артефакты сборки и релиза
+image.tar.gz
+checksums.sha256
+*.tar
+*.tar.gz
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
