@@ -848,6 +848,39 @@ class AlfaMaxBrowser:
         finally:
             self._close(manager, browser, context)
 
+    def read_sms_templates(self, origin, state, branch):
+        origin = normalize_origin(origin)
+        if not re.fullmatch(r"[1-9][0-9]{0,18}", str(branch)):
+            raise AlfaBrowserError("invalid_response")
+        manager = browser = context = None
+        try:
+            manager, browser, context, page = self._open(origin, state)
+            page.goto(
+                f"{origin}/settings/{branch}/sms-template/index",
+                wait_until="domcontentloaded",
+                timeout=20000,
+            )
+            self._check_origin(page, origin)
+            page.wait_for_timeout(2000)
+            soup = BeautifulSoup(page.content(), "html.parser")
+            templates = []
+            for item in soup.select(".sortable1-item[data-id]"):
+                raw_id = item.get("data-id", "")
+                name_el = item.select_one(".sms-title small")
+                text_el = item.select_one(".sms-text small")
+                if not re.fullmatch(r"[1-9][0-9]{0,18}", raw_id) or name_el is None:
+                    continue
+                name = re.sub(r"\s*\[ID\s+[0-9]+\]\s*$", "", name_el.get_text(" ", strip=True))
+                body = text_el.get_text("\n", strip=True) if text_el else ""
+                templates.append({"id": int(raw_id), "name": name, "body": body})
+            return templates
+        except AlfaBrowserError:
+            raise
+        except Exception:
+            raise AlfaBrowserError("crm_unavailable") from None
+        finally:
+            self._close(manager, browser, context)
+
     def send(self, origin, state, branch, customer, text):
         origin = normalize_origin(origin)
         if (

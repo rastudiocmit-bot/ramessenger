@@ -246,6 +246,25 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     for (const message of messages) {
       const label = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(new Date(message.occurred_at));
       if (label !== day) { history.append(node("div", label, "chat-day")); day = label; }
+      if (message.actor_type === "automation") {
+        const bubble = node("div", undefined, "chat-bubble system"); bubble.dataset.id = message.id;
+        const body = node("p", message.text || "", "system-body");
+        body.hidden = true;
+        const toggle = button("+", "system-toggle", () => {
+          const opening = body.hidden;
+          body.hidden = !opening;
+          toggle.textContent = opening ? "−" : "+";
+          toggle.setAttribute("aria-expanded", String(opening));
+        });
+        toggle.type = "button"; toggle.setAttribute("aria-expanded", "false");
+        const meta = node("div", undefined, "chat-bubble-meta system-meta");
+        if (dayKey(message.occurred_at) !== todayKey) meta.append(node("time", shortDate(message.occurred_at), "chat-date"));
+        meta.append(node("time", time(message.occurred_at)), toggle);
+        bubble.append(node("span", `Системное сообщение: ${message.template_name || "Системное сообщение"}`, "system-label"), meta, body);
+        if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
+        history.append(bubble);
+        continue;
+      }
       const bubble = node("div", undefined, `chat-bubble ${message.direction === "out" ? "outgoing" : "incoming"}`); bubble.dataset.id = message.id;
       if (message.forwarded) bubble.append(node("small", "Пересланное сообщение", "chat-forwarded"));
       bubble.append(node("p", message.deleted ? "Сообщение удалено" : message.text || (message.forwarded ? "Пересланное содержимое пока недоступно" : message.attachments.length ? "" : "Содержимое сообщения недоступно"), message.deleted ? "muted" : ""));

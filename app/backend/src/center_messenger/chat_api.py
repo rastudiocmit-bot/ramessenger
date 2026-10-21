@@ -227,6 +227,7 @@ class ChatReader:
             "state": row["send_state"] or "received",
             "error": ERRORS.get(row["last_error_code"]),
             "request_id": row["client_request_id"],
+            "template_name": payload.get("template_name"),
         }
 
     @staticmethod

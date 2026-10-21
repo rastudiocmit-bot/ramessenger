@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -75,6 +76,40 @@ class AlfaMaxConnections:
     def __init__(self, alfa, browser=None):
         self.alfa, self.accounts, self.vault = alfa, alfa.accounts, alfa.vault
         self.browser = browser or AlfaMaxBrowser()
+        self._sms_templates = []
+        self._sms_templates_at = None
+
+    @staticmethod
+    def _match_sms_template(text, templates):
+        if not text or not templates:
+            return None
+        message = " ".join(text.split())
+        best, best_len = None, -1
+        for template in templates:
+            parts = [" ".join(p.split()) for p in re.split(r"\{[^{}]*\}", template["body"])]
+            parts = [p for p in parts if p]
+            if not parts:
+                continue
+            pattern = ".*?".join(re.escape(p) for p in parts)
+            if re.search(pattern, message, flags=re.IGNORECASE | re.DOTALL) and len(pattern) > best_len:
+                best, best_len = template, len(pattern)
+        return best["name"] if best else None
+
+    def sms_templates(self, origin, state, branch):
+        now = datetime.now(UTC)
+        if (
+            self._sms_templates
+            and self._sms_templates_at
+            and now - self._sms_templates_at < timedelta(hours=1)
+        ):
+            return self._sms_templates
+        try:
+            self._sms_templates = self.browser.read_sms_templates(origin, state, branch)
+            self._sms_templates_at = now
+        except AlfaBrowserError:
+            # Keep the previous cache when the CRM is briefly unavailable.
+            pass
+        return self._sms_templates
 
     @contextmanager
     def _transaction(self, actor, workspace, *, lock=False):
@@ -503,6 +538,10 @@ class AlfaMaxConnections:
                     "failed": item["failed"],
                     "crm_status": customer.get("status") if customer else "unknown",
                 }
+                if item["actor_type"] == "automation":
+                    template_name = self._match_sms_template(item["text"], self._sms_templates)
+                    if template_name:
+                        payload["template_name"] = template_name
                 if existing is None and item["direction"] == "out" and customer:
                     matches = list(
                         db.execute(
@@ -870,6 +909,7 @@ class AlfaMaxWorker:
                     page_results, next_page = _history_page_batch(current, target_page, older)
                     updates.extend((branch, page["messages"]) for page in page_results)
                     cursor[f"{branch}:{direction}"] = next_page
+            self.service.sms_templates(origin, session, branches[0])
             phase = "persist_history"
             encrypted = self.service.vault.seal_browser_state(workspace, connection, session)
             with self._transaction(workspace, connection, lease) as db:
