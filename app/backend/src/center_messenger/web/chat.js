@@ -38,7 +38,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     show($("#chat-empty")); show($("#chat-more"), false); show($("#chat-retry"), false); show($("#chat-handled"), false); show($("#chat-details"), false); show($("#chat-unread-count"), false);
     $("#chat-visible-count").textContent = ""; $("#chat-sync-state").textContent = "История на сервере";
     show($("#chat-blank")); show($("#chat-stream"), false); show($("#chat-compose"), false);
-    show($("#chat-link"), false);
     $("#chat-person").replaceChildren(node("strong", "Выберите диалог"), node("small", "Новые сообщения и ваши ответы"));
     document.querySelectorAll("[data-chat-view]").forEach(el => el.classList.toggle("active", el.dataset.chatView === view));
     for (const id of ["max-token-dialog", "chat-link-dialog", "chat-settings-dialog", "chat-details-dialog"]) if ($(`#${id}`).open) $(`#${id}`).close();
@@ -216,7 +215,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     show($("#chat-handled"), Boolean(data.meta?.unread));
     show($("#chat-details"), Boolean(data.meta));
     $("#chat-handled").disabled = actionBusy;
-    show($("#chat-link"), Boolean(data.meta)); $("#chat-link").textContent = data.meta?.contact_id ? "Дети и CRM" : "Связать с CRM";
     const unavailable = !data.meta?.can_send;
     $("#chat-input").disabled = unavailable || Boolean(data.pending);
     $("#chat-send").disabled = unavailable || historyBusy;
@@ -373,7 +371,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     listSeq += 1; selectionSeq += 1; clearTimeout(searchTimer); notice("", $("#chat-error"));
     $("#chat-layout").classList.remove("has-selection"); $("#chat-input").value = "";
     $("#chat-history").replaceChildren(); show($("#chat-stream"), false); show($("#chat-compose"), false); show($("#chat-blank"));
-    show($("#chat-link"), false);
     $("#chat-person").replaceChildren(node("strong", "Выберите диалог"));
     loadList().catch(error => fail(error));
   }
@@ -569,7 +566,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       } catch (error) { if (valid(epoch, gen) && seq === linkSeq) fail(error, $("#chat-link-error")); }
     }
   }
-  $("#chat-link").addEventListener("click", () => openLink(selected));
   $("#chat-link-search").addEventListener("input", () => {
     clearTimeout(linkTimer); const seq = ++linkSeq, epoch = state.epoch, gen = generation;
     linkTimer = setTimeout(async () => {
