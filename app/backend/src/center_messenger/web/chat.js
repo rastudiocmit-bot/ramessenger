@@ -257,10 +257,15 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
           toggle.setAttribute("aria-expanded", String(opening));
         });
         toggle.type = "button"; toggle.setAttribute("aria-expanded", "false");
-        const meta = node("div", undefined, "chat-bubble-meta system-meta");
-        if (dayKey(message.occurred_at) !== todayKey) meta.append(node("time", shortDate(message.occurred_at), "chat-date"));
-        meta.append(node("time", time(message.occurred_at)), toggle);
-        bubble.append(node("span", `Системное сообщение: ${message.template_name || "Системное сообщение"}`, "system-label"), meta, body);
+        const when = (dayKey(message.occurred_at) !== todayKey ? shortDate(message.occurred_at) + " " : "") + time(message.occurred_at);
+        const row = node("div", undefined, "system-row");
+        const right = node("span", undefined, "system-right");
+        right.append(node("time", when, "system-time"), toggle);
+        row.append(
+          node("span", `Системное сообщение: ${message.template_name || "Системное сообщение"}`, "system-label"),
+          right
+        );
+        bubble.append(row, body);
         if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
         history.append(bubble);
         continue;
