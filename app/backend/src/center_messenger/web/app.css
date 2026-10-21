@@ -151,7 +151,7 @@ body:has(dialog[open]){overflow:hidden}
 .chat-row .status-unlinked{--status-ink:#fff;--status-bg:#9aa7b0;--status-bold:#85939d}
 .chat-row .contact-avatar:hover,.chat-row .contact-avatar:focus-visible{box-shadow:none}
 .chat-date{color:#5f8374;font-weight:600}
-.chat-bubble.system{max-width:min(88%,560px);background:transparent;border:1px solid #e1e8e4;box-shadow:none;border-radius:10px;align-self:flex-end;padding:5px 12px}
+.chat-bubble.system{max-width:min(88%,560px);background:rgba(255,255,255,0.6);-webkit-backdrop-filter:blur(12px) saturate(150%);backdrop-filter:blur(12px) saturate(150%);border:1px solid #cfd9d3;box-shadow:0 4px 16px rgba(25,45,36,0.12);border-radius:12px;align-self:flex-end;padding:6px 12px}
 .system-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .system-label{font-size:11px;font-weight:600;color:#6f857c;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .system-right{display:flex;align-items:center;gap:6px;flex:none}
