@@ -641,18 +641,20 @@ class AlfaMaxConnections:
                         )
                         changed(db, workspace, conversation_id, existing["id"])
                     continue
-                if item["direction"] == "in":
-                    # A parent's message appears in every branch's history page with a
-                    # different per-branch row key. Deduplicate by content.
+                if item["direction"] in ("in", "out"):
+                    # A single CRM message can appear in several history rows with
+                    # different row keys (one per branch or per linked card).
+                    # Deduplicate by content.
                     duplicate = db.execute(
                         text(
                             "SELECT m.id FROM messages m WHERE m.workspace_id=:w AND "
-                            "m.conversation_id=:conv AND m.direction='in' AND "
+                            "m.conversation_id=:conv AND m.direction=:dir AND "
                             "m.occurred_at=:at AND m.text IS NOT DISTINCT FROM :text LIMIT 1"
                         ),
                         {
                             "w": workspace,
                             "conv": conversation_id,
+                            "dir": item["direction"],
                             "at": item["occurred_at"],
                             "text": item["text"] or None,
                         },
