@@ -55,16 +55,8 @@ def _failure(code, status=502):
     return AuthError(status, ERRORS.get(code, ERRORS["internal"]))
 
 
-def _customer_group(customer):
-    if customer and customer.get("contact_id"):
-        return f"contact:{customer['contact_id']}"
-    if customer:
-        return f"card:{customer['branch_id']}:{customer['customer_id']}"
-    return "unlinked"
-
-
-def _source_record_id(item, group):
-    return f"{item['direction']}:{item['record_id']}:{group}:{item['occurred_at'].isoformat()}"
+def _source_record_id(item, branch):
+    return f"{item['direction']}:{branch}:{item['record_id']}"
 
 
 def _history_page_batch(current, target_page, older=None):
@@ -415,17 +407,14 @@ class AlfaMaxConnections:
             )
 
     @staticmethod
-    def _message_identity(connection, customer, branch, row):
-        contact = None
-        if customer:
-            # Filled by the caller, which already has the tenant-scoped DB connection.
-            contact = customer.get("contact_id")
+    def _message_identity(connection, customer, branch):
+        contact = customer.get("contact_id") if customer else None
         if contact:
             identity = f"alfa-contact:{contact}"
         elif customer:
-            identity = f"alfa-customer:{customer['branch_id']}:{customer['customer_id']}"
+            identity = f"alfa-customer:{customer['customer_id']}"
         else:
-            identity = f"alfa-unlinked:{branch}:{row['record_id']}"
+            identity = f"alfa-unlinked:{branch}"
         conversation_id = uuid5(connection, identity)
         display = customer["name"] if customer and customer.get("name") else "Клиент не определён"
         return identity, conversation_id, display
@@ -441,32 +430,28 @@ class AlfaMaxConnections:
                     customer["contact_id"] = db.execute(
                         text(
                             "SELECT contact_id FROM alfa_customers WHERE workspace_id=:w "
-                            "AND run_id=:r AND branch_id=:b AND external_id=:id"
+                            "AND run_id=:r AND external_id=:id AND contact_id IS NOT NULL "
+                            "LIMIT 1"
                         ),
-                        {
-                            "w": workspace,
-                            "r": snapshot["run"],
-                            "b": customer["branch_id"],
-                            "id": customer["customer_id"],
-                        },
+                        {"w": workspace, "r": snapshot["run"], "id": customer["customer_id"]},
                     ).scalar_one_or_none()
-                group = _customer_group(customer)
-                customers.setdefault(group, []).append(customer)
+                customers.setdefault("single", []).append(customer)
             if not customers:
-                customers["unlinked"] = [None]
+                customers["single"] = [None]
             for group, records in customers.items():
-                # Project once per parent even when AlfaCRM associates several child cards.
+                # One conversation per parent: prefer a linked card, else the same branch.
                 customer = min(
                     records,
                     key=lambda value: (
                         value is None,
+                        (value.get("contact_id") is None) if value else True,
                         value["branch_id"] != int(branch) if value else True,
                         value["branch_id"] if value else 0,
                         value["customer_id"] if value else 0,
                     ),
                 )
                 identity, conversation_id, display = self._message_identity(
-                    UUID(str(channel)), customer, branch, item
+                    UUID(str(channel)), customer, branch
                 )
                 touched.add(conversation_id)
                 external = identity
@@ -490,7 +475,7 @@ class AlfaMaxConnections:
                         "name": display,
                     },
                 )
-                source_id = _source_record_id(item, group)
+                source_id = _source_record_id(item, branch)
                 existing = (
                     db.execute(
                         text(
@@ -590,9 +575,13 @@ class AlfaMaxConnections:
                         changed(db, workspace, conversation_id, matches[0]["id"])
                         continue
                 if existing:
+                    merged = dict(payload)
+                    for key in ("branch_id", "customer_branch_id", "customer_id", "crm_order"):
+                        if key in existing["payload"]:
+                            merged[key] = existing["payload"][key]
                     if (
                         existing["text"] != item["text"]
-                        or existing["payload"] != payload
+                        or existing["payload"] != merged
                         or existing["actor_type"] != item["actor_type"]
                         or existing["occurred_at"] != item["occurred_at"]
                     ):
@@ -607,12 +596,44 @@ class AlfaMaxConnections:
                                 "id": existing["id"],
                                 "text": item["text"],
                                 "actor": item["actor_type"],
-                                "payload": json.dumps(payload, ensure_ascii=False),
+                                "payload": json.dumps(merged, ensure_ascii=False),
                                 "at": item["occurred_at"],
                             },
                         )
                         changed(db, workspace, conversation_id, existing["id"])
                     continue
+                if item["direction"] == "in":
+                    # A parent's message appears in every branch's history page with a
+                    # different per-branch row key. Deduplicate by content.
+                    duplicate = db.execute(
+                        text(
+                            "SELECT m.id FROM messages m WHERE m.workspace_id=:w AND "
+                            "m.conversation_id=:conv AND m.direction='in' AND "
+                            "m.occurred_at=:at AND m.text IS NOT DISTINCT FROM :text LIMIT 1"
+                        ),
+                        {
+                            "w": workspace,
+                            "conv": conversation_id,
+                            "at": item["occurred_at"],
+                            "text": item["text"] or None,
+                        },
+                    ).scalar_one_or_none()
+                    if duplicate is not None:
+                        db.execute(
+                            text(
+                                "INSERT INTO source_records(workspace_id,id,connection_id,"
+                                "message_id,namespace,external_record_id) "
+                                "VALUES (:w,:id,:c,:m,'alfa_max',:source)"
+                            ),
+                            {
+                                "w": workspace,
+                                "id": uuid4(),
+                                "c": channel,
+                                "m": duplicate,
+                                "source": source_id,
+                            },
+                        )
+                        continue
                 message_id = uuid4()
                 provider_id = f"alfa:{source_id}"
                 db.execute(
