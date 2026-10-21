@@ -463,15 +463,33 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     detail.append(node("h3", student.name));
     const branches = [...new Set((student.cards || []).map(card => card.branch_name))];
     const subs = activeSubscriptions(student.cards || []);
+    const subscriptions = node("div", undefined, "family-subscriptions");
+    subscriptions.hidden = true;
+    for (const item of subs) subscriptions.append(node("div", `${item.name || `Абонемент №${item.tariff_id}`} · ${item.branch_name} · ${item.balance === null ? "остаток не указан" : familyMoney(item.balance)}${item.end ? ` · до ${familyDate(item.end)}` : ""}`));
+    let subscriptionsTile;
+    if (subs.length) {
+      subscriptionsTile = familyMetric("Абонементы", String(subs.length));
+      subscriptionsTile.classList.add("family-metric-button");
+      subscriptionsTile.setAttribute("role", "button");
+      subscriptionsTile.setAttribute("tabindex", "0");
+      subscriptionsTile.setAttribute("aria-pressed", "false");
+      const toggleSubscriptions = () => {
+        const opening = subscriptions.hidden;
+        subscriptions.hidden = !opening;
+        subscriptionsTile.classList.toggle("open", opening);
+        subscriptionsTile.setAttribute("aria-pressed", String(opening));
+      };
+      subscriptionsTile.addEventListener("click", toggleSubscriptions);
+      subscriptionsTile.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleSubscriptions(); } });
+    } else {
+      subscriptionsTile = familyMetric("Абонементы", "0");
+    }
     const metrics = node("div", undefined, "family-metrics");
-    metrics.append(familyMetric("Возраст", familyAge(student.dob)), familyMetric("Абонементы", `${subs.length} активных`), familyMetric("Баланс счёта", familyBalance(student)), familyMetric("Филиалы", branches.map(shortBranch).join(", ") || "Филиал не указан", branches.join(", "))); detail.append(metrics);
+    metrics.append(familyMetric("Возраст", familyAge(student.dob)), subscriptionsTile, familyMetric("Баланс счёта", familyBalance(student)), familyMetric("Филиалы", branches.map(shortBranch).join(", ") || "Филиал не указан", branches.join(", ")));
+    detail.append(metrics);
     const paid = (student.cards || []).filter(card => card.paid_lesson_count !== null && card.paid_lesson_count !== undefined);
     if (paid.length) detail.append(node("p", `Остаток занятий: ${paid.map(card => `${card.branch_name} — ${card.paid_lesson_count}`).join(" · ")}`, "family-summary"));
-    if (subs.length) {
-      const container = node("div", undefined, "family-subscriptions");
-      for (const item of subs) container.append(node("div", `${item.name || `Абонемент №${item.tariff_id}`} · ${item.branch_name} · ${item.balance === null ? "остаток не указан" : familyMoney(item.balance)}${item.end ? ` · до ${familyDate(item.end)}` : ""}`));
-      detail.append(container);
-    }
+    if (subs.length) detail.append(subscriptions);
     detail.append(node("h4", "Группы и абонементы"));
     const groups = student.groups || [];
     if (!groups.length) { detail.append(node("span", "ГРУППА НЕ ОПРЕДЕЛЕНА", "family-unknown")); return; }
