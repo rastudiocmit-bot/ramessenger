@@ -149,6 +149,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function time(value) {
     const d = new Date(value); return Number.isNaN(d.getTime()) ? "" : new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(d);
   }
+  const dayKey = value => {
+    const d = new Date(value); if (Number.isNaN(d.getTime())) return "";
+    return new Intl.DateTimeFormat("en-CA", { timeZone: state.workspace?.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+  };
+  const shortDate = value => {
+    const d = new Date(value); if (Number.isNaN(d.getTime())) return "";
+    return new Intl.DateTimeFormat("en-GB", { timeZone: state.workspace?.timezone, day: "2-digit", month: "2-digit" }).format(d).replace("/", ".");
+  };
   function mergeMeta(meta) {
     const item = items.find(item => item.id === meta.id); if (item) Object.assign(item, meta);
   }
@@ -228,6 +236,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const stream = $("#chat-stream"), previousHeight = stream.scrollHeight, previousTop = stream.scrollTop;
     const nearBottom = previousHeight - previousTop - stream.clientHeight < 100;
     const history = $("#chat-history"); history.replaceChildren(); let day = "";
+    const todayKey = dayKey(new Date());
     const messages = [...data.messages.values()].sort((a, b) => {
       const timeOrder = new Date(a.occurred_at) - new Date(b.occurred_at);
       if (timeOrder) return timeOrder;
@@ -246,6 +255,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }
       const meta = node("div", undefined, "chat-bubble-meta");
       if (message.edited && !message.deleted) meta.append(node("span", "изменено"));
+      if (dayKey(message.occurred_at) !== todayKey) meta.append(node("time", shortDate(message.occurred_at), "chat-date"));
       meta.append(node("time", time(message.occurred_at)));
       if (message.direction === "out") meta.append(node("span", sendLabels[message.state] || "", `send-state state-${message.state}`));
       bubble.append(meta);

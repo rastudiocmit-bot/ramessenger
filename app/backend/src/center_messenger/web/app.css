@@ -150,4 +150,5 @@ body:has(dialog[open]){overflow:hidden}
 .chat-row .status-archive{--status-ink:#fff;--status-bg:#e0555b;--status-bold:#c8454b}
 .chat-row .status-unlinked{--status-ink:#fff;--status-bg:#9aa7b0;--status-bold:#85939d}
 .chat-row .contact-avatar:hover,.chat-row .contact-avatar:focus-visible{box-shadow:none}
+.chat-date{color:#5f8374;font-weight:600}
 
