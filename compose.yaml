@@ -31,6 +31,7 @@ services:
   api:
     image: ${CM_IMAGE:-center-messenger:local}
     restart: unless-stopped
+    init: true
     stop_grace_period: 30s
     environment:
       CM_ENVIRONMENT: production
