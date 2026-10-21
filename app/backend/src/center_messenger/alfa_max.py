@@ -453,9 +453,8 @@ class AlfaMaxConnections:
                 identity, conversation_id, display = self._message_identity(
                     UUID(str(channel)), customer, branch
                 )
-                touched.add(conversation_id)
                 external = identity
-                db.execute(
+                conversation_id = db.execute(
                     text(
                         "INSERT INTO conversations(workspace_id,id,connection_id,contact_id,"
                         "external_chat_id,peer_name) VALUES (:w,:id,:c,:contact,:external,:name) "
@@ -464,7 +463,7 @@ class AlfaMaxConnections:
                         "DO UPDATE SET contact_id=coalesce("
                         "EXCLUDED.contact_id,conversations.contact_id),"
                         "peer_name=CASE WHEN EXCLUDED.peer_name<>'' THEN EXCLUDED.peer_name "
-                        "ELSE conversations.peer_name END"
+                        "ELSE conversations.peer_name END RETURNING id"
                     ),
                     {
                         "w": workspace,
@@ -474,7 +473,8 @@ class AlfaMaxConnections:
                         "external": external,
                         "name": display,
                     },
-                )
+                ).scalar_one()
+                touched.add(conversation_id)
                 source_id = _source_record_id(item, branch)
                 existing = (
                     db.execute(
