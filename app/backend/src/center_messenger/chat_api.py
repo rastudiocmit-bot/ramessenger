@@ -63,7 +63,7 @@ class ChatReader:
         self.alfa_max = messaging.alfa_max
 
     def updates(self, actor, workspace, after=None):
-        with self.max.transaction(actor, workspace) as db:
+        with self.max.chat_transaction(actor, workspace) as db:
             # Every projector/send takes the workspace lock before allocating a
             # change sequence. The read lock prevents skipping an uncommitted one.
             db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR SHARE"), {"w": workspace})
@@ -256,7 +256,7 @@ class ChatReader:
         status=None,
         page=0,
     ):
-        with self.max.transaction(actor, workspace) as db:
+        with self.max.chat_transaction(actor, workspace) as db:
             snapshot = DirectoryReader._published(db, workspace)
             params = {
                 "w": workspace,
@@ -465,7 +465,7 @@ class ChatReader:
     def history(
         self, actor, workspace, conversation, *, before_time=None, before_id=None, after_seq=None
     ):
-        with self.max.transaction(actor, workspace) as db:
+        with self.max.chat_transaction(actor, workspace) as db:
             row = self._conversation(db, workspace, conversation)
             params = {"w": workspace, "c": conversation}
             end = db.execute(
@@ -521,7 +521,7 @@ class ChatReader:
         self.max.accounts.throttle(f"chat-send:{workspace}:{actor.user_id}", limit=60, minutes=1)
         payload = {"text": model.text, "conversation_id": str(conversation)}
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        with self.max.transaction(actor, workspace, lock=True) as db:
+        with self.max.chat_transaction(actor, workspace, lock=True) as db:
             old = (
                 db.execute(
                     text(
@@ -608,7 +608,7 @@ class ChatReader:
         return {"command_id": str(command), "state": "queued", "request_id": str(model.request_id)}
 
     def link(self, actor, workspace, conversation, model):
-        with self.max.transaction(actor, workspace, lock=True) as db:
+        with self.max.chat_transaction(actor, workspace, lock=True) as db:
             self._conversation(db, workspace, conversation, lock="UPDATE")
             if model.contact_id:
                 snapshot = DirectoryReader._published(db, workspace)
@@ -640,7 +640,7 @@ class ChatReader:
             )
 
     def handle(self, actor, workspace, conversation):
-        with self.max.transaction(actor, workspace, lock=True) as db:
+        with self.max.chat_transaction(actor, workspace, lock=True) as db:
             row = self._conversation(db, workspace, conversation, lock="UPDATE")
             inbound_id = row["latest_inbound_id"]
             if not row["needs_reply"] or inbound_id is None:

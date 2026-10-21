@@ -124,23 +124,56 @@
     await renderPane(state.pane);
   }
   async function refreshSession() { await enter(await api("/auth/session")); }
+  function grantedSections() {
+    const workspace = state.workspace;
+    const none = { overview: false, team: false, messages: false, clients: false, connections: false, security: true };
+    if (!workspace) return none;
+    if (["owner", "admin"].includes(workspace.role)) return { overview: true, team: true, messages: true, clients: true, connections: true, security: true };
+    const granted = new Set(workspace.sections && workspace.sections.length ? workspace.sections : ["overview", "security"]);
+    return { overview: granted.has("overview"), team: false, messages: granted.has("messages"), clients: false, connections: false, security: granted.has("security") };
+  }
+  function messagesOnly() {
+    const workspace = state.workspace;
+    return Boolean(workspace && !["owner", "admin"].includes(workspace.role) && Array.isArray(workspace.sections) && workspace.sections.length === 1 && workspace.sections[0] === "messages");
+  }
+  function renderChatUserCard() {
+    const card = node("div", undefined, "chat-user-card");
+    card.append(node("span", initials(state.user.display_name), "avatar"));
+    const text = node("div", undefined, "chat-user-text");
+    text.append(node("strong", state.user.display_name), node("small", state.user.email));
+    const out = node("button", "Выйти", "secondary compact");
+    out.type = "button"; out.addEventListener("click", () => $("#logout").click());
+    card.append(text, out);
+    return card;
+  }
   async function renderPane(pane) {
     state.pane = pane;
-    const manage = state.workspace && ["owner", "admin"].includes(state.workspace.role);
-    if (["team", "connections", "clients", "messages"].includes(pane) && !manage) state.pane = "overview";
-    show($("#team-tab"), Boolean(manage)); show($("#connections-tab"), Boolean(manage)); show($("#clients-tab"), Boolean(manage)); show($("#messages-tab"), Boolean(manage));
+    const sections = grantedSections();
+    if (!sections[state.pane]) state.pane = sections.messages ? "messages" : "overview";
+    show($("#overview-tab"), sections.overview); show($("#team-tab"), sections.team); show($("#messages-tab"), sections.messages); show($("#clients-tab"), sections.clients); show($("#connections-tab"), sections.connections); show($("#security-tab"), sections.security);
     if (state.pane !== "clients") directory.leave();
     if (state.pane !== "messages") chat.leave();
+    const only = messagesOnly();
     $("#cabinet").classList.toggle("chat-mode", state.pane === "messages");
+    $("#cabinet").classList.toggle("messages-only", only);
     show($("#no-workspaces"), !state.workspace && state.pane !== "security");
     document.querySelectorAll(".pane").forEach(element => show(element, (Boolean(state.workspace) || state.pane === "security") && element.id === `pane-${state.pane}`));
     const heading = (state.workspace || state.pane === "security") ? pageHeadings.get(state.pane) : null;
     const topbarContext = $("#topbar-context"), activeHeading = $(".page-heading", topbarContext);
+    const chatHeader = $("#chat-list-header");
     if (activeHeading && activeHeading !== heading) $("#page-heading-storage").append(activeHeading);
-    topbarContext.replaceChildren(...(heading ? [heading] : []));
+    if (only) {
+      topbarContext.replaceChildren();
+      chatHeader.replaceChildren(...(heading ? [heading] : []), renderChatUserCard());
+      show(chatHeader);
+    } else {
+      show(chatHeader, false);
+      topbarContext.replaceChildren(...(heading ? [heading] : []));
+    }
     document.querySelectorAll("[data-pane]").forEach(button => button.classList.toggle("active", button.dataset.pane === state.pane));
     chat.watch();
     if (!state.workspace) { if (state.pane === "security") await loadSessions(); return; }
+    const manage = Boolean(state.workspace && ["owner", "admin"].includes(state.workspace.role));
     $("#workspace-role").textContent = roles[state.workspace.role] || "Сотрудник";
     $("#workspace-timezone").textContent = state.workspace.timezone === "Europe/Moscow" ? "Москва · UTC+3" : state.workspace.timezone;
     const form = $("#workspace-form");
@@ -153,6 +186,26 @@
     if (state.pane === "clients") await directory.enter();
     if (state.pane === "team") await loadMembers();
     if (state.pane === "security") await loadSessions();
+  }
+  const sectionLabels = { overview: "Организация", messages: "Сообщения", security: "Безопасность" };
+  function memberSectionControls(member, workspace) {
+    const wrap = node("div", undefined, "member-sections");
+    const checks = ["overview", "messages", "security"].map(key => {
+      const label = node("label", undefined, "check-label");
+      const input = node("input"); input.type = "checkbox"; input.dataset.section = key;
+      input.checked = (member.sections && member.sections.length ? member.sections : ["overview", "security"]).includes(key);
+      label.append(input, node("span", sectionLabels[key]));
+      return label;
+    });
+    wrap.append(...checks);
+    const save = node("button", "Сохранить", "secondary compact"); save.type = "button";
+    save.addEventListener("click", () => busy(wrap, async () => {
+      const selected = checks.map(check => $("input", check)).filter(input => input.checked).map(input => input.dataset.section);
+      await api(`/workspaces/${workspace.id}/members/${member.user_id}/sections`, { method: "POST", data: { sections: selected } });
+      toast("Права сотрудника сохранены."); await loadMembers();
+    }));
+    wrap.append(save);
+    return wrap;
   }
   async function loadMembers() {
     const workspace = state.workspace;
@@ -174,6 +227,7 @@
         });
         row.append(button);
       }
+      if (!["owner", "admin"].includes(member.role)) row.append(memberSectionControls(member, workspace));
       list.append(row);
     });
     show($("#team-empty"), payload.members.length === 0);

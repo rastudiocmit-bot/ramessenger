@@ -15,6 +15,8 @@ from center_messenger.auth_security import (
     Identity,
     InvitationInput,
     LoginInput,
+    MEMBER_SECTIONS,
+    MemberSectionsInput,
     PasswordInput,
     Passwords,
     digest,
@@ -302,7 +304,7 @@ class Accounts:
             rows = (
                 db.execute(
                     text(
-                        "SELECT w.id, w.name, w.timezone, m.role FROM workspace_memberships m "
+                        "SELECT w.id, w.name, w.timezone, m.role, m.sections FROM workspace_memberships m "
                         "JOIN workspaces w ON w.id=m.workspace_id "
                         "WHERE m.user_id=:u AND m.active ORDER BY w.name, w.id"
                     ),
@@ -317,7 +319,7 @@ class Accounts:
         row = (
             db.execute(
                 text(
-                    "SELECT w.id, w.name, w.timezone, m.role FROM workspace_memberships m "
+                    "SELECT w.id, w.name, w.timezone, m.role, m.sections FROM workspace_memberships m "
                     "JOIN workspaces w ON w.id=m.workspace_id "
                     "WHERE m.user_id=:u AND m.workspace_id=:w AND m.active"
                 ),
@@ -330,6 +332,30 @@ class Accounts:
             raise AuthError(404, "Организация недоступна.")
         if manage and row["role"] not in {"owner", "admin"}:
             raise AuthError(403, "Для этого действия нужны права администратора.")
+        context(
+            db,
+            workspace_id=workspace_id,
+            membership_admin="true" if row["role"] in {"owner", "admin"} else "false",
+        )
+        return row
+
+    def _workspace_chat(self, db, identity: Identity, workspace_id: UUID):
+        row = (
+            db.execute(
+                text(
+                    "SELECT w.id, w.name, w.timezone, m.role, m.sections FROM workspace_memberships m "
+                    "JOIN workspaces w ON w.id=m.workspace_id "
+                    "WHERE m.user_id=:u AND m.workspace_id=:w AND m.active"
+                ),
+                {"u": identity.user_id, "w": workspace_id},
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            raise AuthError(404, "Организация недоступна.")
+        if row["role"] not in {"owner", "admin"} and "messages" not in (row["sections"] or []):
+            raise AuthError(403, "Для этого действия нужен доступ к разделу «Сообщения».")
         context(
             db,
             workspace_id=workspace_id,
@@ -415,7 +441,7 @@ class Accounts:
             rows = (
                 db.execute(
                     text(
-                        "SELECT m.user_id, m.role, m.created_at, u.email, u.display_name "
+                        "SELECT m.user_id, m.role, m.sections, m.created_at, u.email, u.display_name "
                         "FROM workspace_memberships m JOIN auth_users u ON u.id=m.user_id "
                         "WHERE m.workspace_id=:w AND m.active ORDER BY m.created_at, m.user_id"
                     ),
@@ -586,6 +612,37 @@ class Accounts:
                 subject_id=current["id"],
             )
             return self._issue(db, user, device)
+
+    def set_member_sections(
+        self, identity: Identity, workspace_id: UUID, user_id: UUID, model: MemberSectionsInput
+    ):
+        with self.transaction(identity) as db:
+            self._workspace(db, identity, workspace_id, manage=True)
+            target = db.execute(
+                text(
+                    "SELECT role FROM workspace_memberships "
+                    "WHERE workspace_id=:w AND user_id=:u AND active FOR UPDATE"
+                ),
+                {"w": workspace_id, "u": user_id},
+            ).scalar_one_or_none()
+            if target is None:
+                raise AuthError(404, "Сотрудник недоступен.")
+            if target in {"owner", "admin"}:
+                raise AuthError(403, "Права этого сотрудника не настраиваются.")
+            db.execute(
+                text(
+                    "UPDATE workspace_memberships SET sections=:s "
+                    "WHERE workspace_id=:w AND user_id=:u AND active"
+                ),
+                {"s": model.sections, "w": workspace_id, "u": user_id},
+            )
+            audit(
+                db,
+                "member_sections_updated",
+                user_id=identity.user_id,
+                workspace_id=workspace_id,
+                subject_id=user_id,
+            )
 
     def remove_member(self, identity: Identity, workspace_id: UUID, user_id: UUID):
         with self.transaction(identity) as db:

@@ -151,6 +151,22 @@ class WorkspaceInput(InputModel):
         return value.strip()
 
 
+# Sidebar sections that a non-admin member may be granted.
+MEMBER_SECTIONS = ("overview", "security", "messages")
+
+
+class MemberSectionsInput(InputModel):
+    sections: list[str] = Field(max_length=len(MEMBER_SECTIONS))
+
+    @field_validator("sections")
+    @classmethod
+    def allowed_sections(cls, value):
+        cleaned = sorted(set(value))
+        if any(section not in MEMBER_SECTIONS for section in cleaned):
+            raise ValueError("Unknown section")
+        return cleaned
+
+
 class InvitationInput(InputModel):
     email: EmailStr
     role: str

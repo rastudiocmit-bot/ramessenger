@@ -31,6 +31,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     ["#chat-list", "#chat-history", "#chat-link-results", "#max-channels"].forEach(id => $(id).replaceChildren());
     ["#chat-error", "#max-error", "#max-token-error", "#chat-link-error"].forEach(id => notice("", $(id)));
     $("#chat-input").value = ""; $("#chat-search").value = ""; $("#chat-link-search").value = "";
+    $("#chat-send").classList.remove("is-retry"); $("#chat-send").setAttribute("aria-label", "Отправить"); $("#chat-send").title = "Отправить";
+    $("#chat-send-hint").hidden = true; $("#chat-send-hint").textContent = ""; resizeCompose();
     $("#chat-branch").replaceChildren(new Option("Все филиалы", ""));
     $("#chat-channel").replaceChildren(new Option("Все каналы MAX", "")); $("#chat-status").value = "";
     $("#max-form").reset(); $("#max-token-form").reset();
@@ -224,9 +226,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-handled").disabled = actionBusy;
     const unavailable = !data.meta?.can_send;
     $("#chat-input").disabled = unavailable || Boolean(data.pending);
-    $("#chat-send").disabled = unavailable || historyBusy;
-    $("#chat-send").textContent = data.pending ? "Проверить отправку" : "Отправить ↑";
-    $("#chat-send-hint").textContent = unavailable ? "Проверьте подключение MAX, чтобы отправить ответ." : data.pending ? "Связь прервалась. Кнопка проверит тот же запрос без повторного сообщения." : "Enter — отправить · Shift+Enter — новая строка";
+    const send = $("#chat-send");
+    send.disabled = unavailable || historyBusy;
+    send.classList.toggle("is-retry", Boolean(data.pending));
+    send.setAttribute("aria-label", data.pending ? "Проверить отправку" : "Отправить");
+    send.title = data.pending ? "Проверить отправку" : "Отправить";
+    const hint = $("#chat-send-hint");
+    hint.hidden = !unavailable && !data.pending;
+    hint.textContent = unavailable ? "Проверьте подключение MAX, чтобы отправить ответ." : data.pending ? "Связь прервалась. Кнопка проверит тот же запрос без повторного сообщения." : "";
   }
   function renderMessages(id, { bottom = false, older = false } = {}) {
     const data = cache.get(id); if (id !== selected || !data) return;
@@ -243,7 +250,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (a.branch_id && a.branch_id === b.branch_id && Number.isSafeInteger(a.crm_order) && Number.isSafeInteger(b.crm_order)) return a.crm_order - b.crm_order;
       return a.id.localeCompare(b.id);
     });
-    for (const message of messages) {
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i];
       const label = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(new Date(message.occurred_at));
       if (label !== day) { history.append(node("div", label, "chat-day")); day = label; }
       if (message.actor_type === "automation") {
@@ -272,7 +280,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         history.append(bubble);
         continue;
       }
-      const bubble = node("div", undefined, `chat-bubble ${message.direction === "out" ? "outgoing" : "incoming"}`); bubble.dataset.id = message.id;
+      const next = messages[i + 1];
+      const grouped = Boolean(next && next.actor_type !== "automation" && next.direction === message.direction
+        && new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" }).format(new Date(next.occurred_at)) === label);
+      const bubble = node("div", undefined, `chat-bubble ${message.direction === "out" ? "outgoing" : "incoming"}${grouped ? "" : " has-tail"}`); bubble.dataset.id = message.id;
       if (message.forwarded) bubble.append(node("small", "Пересланное сообщение", "chat-forwarded"));
       bubble.append(node("p", message.deleted ? "Сообщение удалено" : message.text || (message.forwarded ? "Пересланное содержимое пока недоступно" : message.attachments.length ? "" : "Содержимое сообщения недоступно"), message.deleted ? "muted" : ""));
       if (!message.deleted) for (const type of message.attachments) {
@@ -296,7 +307,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function reconcilePending(data) {
     if (!data.pending) return;
     const canonical = [...data.messages.values()].find(m => m.request_id === data.pending.request_id);
-    if (canonical) { data.pending = null; data.draft = ""; if (cache.get(selected) === data) $("#chat-input").value = ""; }
+    if (canonical) { data.pending = null; data.draft = ""; if (cache.get(selected) === data) { $("#chat-input").value = ""; resizeCompose(); } }
   }
   async function loadHistory(id, mode = "delta") {
     const epoch = state.epoch, gen = generation, choice = selectionSeq, data = entry(id);
@@ -326,7 +337,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
     selectionSeq += 1; selected = id; const data = entry(id); historyBusy = false;
     if (mobile) $("#chat-layout").classList.add("has-selection");
-    $("#chat-input").value = data.draft;
+    $("#chat-input").value = data.draft; resizeCompose();
     renderList(); notice("", $("#chat-error"));
     if (data.loaded) renderMessages(id, { bottom: true });
     else {
@@ -379,18 +390,23 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     try {
       await api(`${chatPath(id)}/messages`, { method: "POST", data: payload });
       if (!valid(epoch, gen)) return;
-      acknowledged = true; data.pending = null; data.draft = ""; if (selected === id) $("#chat-input").value = "";
+      acknowledged = true; data.pending = null; data.draft = ""; if (selected === id) { $("#chat-input").value = ""; resizeCompose(); }
       await loadHistory(id); if (selected === id) renderMessages(id, { bottom: true }); await loadList();
     } catch (error) {
       if (!valid(epoch, gen)) return;
       // HTTP rejection is definite; loss of the HTTP response keeps the same UUID.
       if (!acknowledged && error.status && error.status < 500 && error.status !== 408) { data.pending = null; data.draft = payload.text; }
-      if (selected === id) { $("#chat-input").value = data.draft; fail(error); }
+      if (selected === id) { $("#chat-input").value = data.draft; resizeCompose(); fail(error); }
       if (!acknowledged && error.status === 409) { try { await loadHistory(id); } catch (_) { /* Preserve the draft and error. */ } }
     } finally { if (valid(epoch, gen)) { historyBusy = false; renderHeader(); } }
   }
+  function resizeCompose() {
+    const input = $("#chat-input");
+    input.style.height = "auto";
+    input.style.height = `${Math.min(Math.max(input.scrollHeight, 44), 160)}px`;
+  }
   $("#chat-compose").addEventListener("submit", event => { event.preventDefault(); submit(); });
-  $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; unlockSound(); });
+  $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; resizeCompose(); unlockSound(); });
   $("#chat-input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(min-width: 761px)").matches) { event.preventDefault(); submit(); } });
   $("#chat-stream").addEventListener("scroll", () => {
     if (historyBusy || !selected || !active()) return;

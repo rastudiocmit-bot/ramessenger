@@ -26,6 +26,16 @@ class AlfaConnections:
                 )
             yield db
 
+    @contextmanager
+    def chat_transaction(self, actor, workspace, *, lock=False):
+        with self.accounts.transaction(actor) as db:
+            self.accounts._workspace_chat(db, actor, workspace)
+            if lock:
+                db.execute(
+                    text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace}
+                )
+            yield db
+
     @staticmethod
     def _row(db, workspace):
         return (

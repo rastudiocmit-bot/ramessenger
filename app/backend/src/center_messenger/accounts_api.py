@@ -12,6 +12,7 @@ from center_messenger.auth_security import (
     Identity,
     InvitationInput,
     LoginInput,
+    MemberSectionsInput,
     PasswordInput,
     WorkspaceInput,
     csrf_token,
@@ -169,6 +170,15 @@ def invite(workspace_id: UUID, model: InvitationInput, request: Request):
 @router.post("/workspaces/{workspace_id}/members/{user_id}/remove", status_code=204)
 def remove_member(workspace_id: UUID, user_id: UUID, request: Request):
     service(request).remove_member(identity(request, mutation=True), workspace_id, user_id)
+
+
+@router.post("/workspaces/{workspace_id}/members/{user_id}/sections", status_code=204)
+def set_member_sections(
+    workspace_id: UUID, user_id: UUID, model: MemberSectionsInput, request: Request
+):
+    service(request).set_member_sections(
+        identity(request, mutation=True), workspace_id, user_id, model
+    )
 
 
 @router.post("/invitations/preview")

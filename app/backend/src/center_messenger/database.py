@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0011_crm_family_details"
+SCHEMA_REVISION = "0012_member_sections"
 
 
 def make_engine(settings: Settings) -> Engine:
