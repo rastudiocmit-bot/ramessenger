@@ -252,7 +252,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
       history.append(bubble);
     }
-    show($("#chat-older"), data.more); $("#chat-older").disabled = historyBusy;
     show($("#chat-blank"), false); show(stream); show($("#chat-compose"));
     if (older) stream.scrollTop = previousTop + stream.scrollHeight - previousHeight;
     else if (bottom || nearBottom) stream.scrollTop = stream.scrollHeight;
@@ -296,7 +295,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (data.loaded) renderMessages(id, { bottom: true });
     else {
       show($("#chat-blank"), false); show($("#chat-stream")); show($("#chat-compose"), false);
-      $("#chat-history").replaceChildren(node("p", "Открываем переписку…", "empty")); show($("#chat-older"), false);
+      $("#chat-history").replaceChildren(node("p", "Открываем переписку…", "empty"));
       $("#chat-person").replaceChildren(node("strong", currentItem()?.name || "MAX"));
     }
     try { await loadHistory(id, data.loaded ? "delta" : "initial"); }
@@ -357,12 +356,17 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-compose").addEventListener("submit", event => { event.preventDefault(); submit(); });
   $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; unlockSound(); });
   $("#chat-input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(min-width: 761px)").matches) { event.preventDefault(); submit(); } });
-  $("#chat-older").addEventListener("click", async () => {
-    if (historyBusy || !selected) return; const epoch = state.epoch, gen = generation;
-    historyBusy = true; $("#chat-older").disabled = true;
-    try { await loadHistory(selected, "older"); } catch (error) { if (valid(epoch, gen)) fail(error); }
-    finally { if (valid(epoch, gen)) { historyBusy = false; $("#chat-older").disabled = false; } }
-  });
+  $("#chat-stream").addEventListener("scroll", () => {
+    if (historyBusy || !selected || !active()) return;
+    const stream = $("#chat-stream");
+    if (stream.scrollTop > 180) return;
+    const data = cache.get(selected);
+    if (!data || !data.more) return;
+    const epoch = state.epoch, gen = generation;
+    historyBusy = true;
+    loadHistory(selected, "older").catch(error => { if (valid(epoch, gen)) fail(error); })
+      .finally(() => { if (valid(epoch, gen)) historyBusy = false; });
+  }, { passive: true });
   function filtersChanged() {
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
     selected = null; historyBusy = false; listLoading = false; listRetryRequired = false; hasMore = false; page = 0;

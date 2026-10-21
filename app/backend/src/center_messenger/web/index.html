@@ -7,7 +7,7 @@
   <title>Личный кабинет · Center Messenger</title>
   <link rel="stylesheet" href="/assets/app.css?v=0.8.16">
   <script src="/assets/directory.js?v=0.8.2" defer></script>
-  <script src="/assets/chat.js?v=0.8.9" defer></script>
+  <script src="/assets/chat.js?v=0.8.10" defer></script>
   <script src="/assets/app.js?v=0.8.2" defer></script>
 </head>
 <body>
@@ -128,7 +128,7 @@
             <div id="chat-resizer" class="directory-resizer" role="separator" aria-label="Ширина списка диалогов" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="640" aria-valuenow="450" tabindex="0"></div>
             <article class="chat-conversation" aria-label="Переписка"><header class="chat-header"><button id="chat-list-toggle" type="button" class="icon-button" aria-label="Свернуть или раскрыть список диалогов" title="Список диалогов">☷</button><div id="chat-person" class="chat-person"><strong>Выберите диалог</strong><small>Новые сообщения и ваши ответы</small></div><button id="chat-details" type="button" class="chat-details" hidden>Подробнее</button><button id="chat-handled" type="button" class="chat-handled" hidden>Обработана</button></header>
               <div id="chat-blank" class="detail-placeholder"><span class="detail-placeholder-icon" aria-hidden="true">▤</span><h2>Диалог начинается здесь</h2><p>Одна переписка с родителем, даже если дети занимаются в разных филиалах.</p><button id="chat-go-connections" class="secondary" type="button">Подключить MAX-бота</button></div>
-              <div id="chat-stream" class="chat-stream" role="region" aria-label="Сообщения диалога" hidden><button id="chat-older" class="chat-older" type="button" hidden>Загрузить предыдущие сообщения</button><div id="chat-history"></div><p id="chat-history-note" class="chat-history-note">История сохраняется с момента подключения бота.</p></div>
+              <div id="chat-stream" class="chat-stream" role="region" aria-label="Сообщения диалога" hidden><div id="chat-history"></div><p id="chat-history-note" class="chat-history-note">История сохраняется с момента подключения бота.</p></div>
               <form id="chat-compose" class="chat-compose" hidden><label><span class="sr-only">Текст сообщения</span><textarea id="chat-input" name="text" rows="2" maxlength="4000" placeholder="Написать сообщение…" required></textarea></label><div class="chat-compose-bottom"><span id="chat-send-hint">Enter — отправить · Shift+Enter — новая строка</span><button id="chat-send" type="submit" class="primary">Отправить ↑</button></div></form>
             </article>
           </div><p class="directory-footnote">Приём продолжается на сервере при закрытой АльфаCRM. Ответ сотрудника в MAX или AlfaCRM снимает отметку «Нужен ответ»; системные и автоматические сообщения её не снимают.</p>
