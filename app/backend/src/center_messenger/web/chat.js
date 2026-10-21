@@ -140,8 +140,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (item.students.length) body.append(node("span", item.students.join(", "), "contact-students"));
       body.append(node("span", item.preview || "Вложение или начало диалога", "chat-preview"));
       const meta = node("span", undefined, "contact-meta");
-      if (item.unread) meta.append(node("span", "Нужен ответ", "unread-badge"));
-      else meta.append(node("span", statuses[item.status], `status-label status-${item.status}`));
       if (channels.length > 1) meta.append(node("small", item.channel_name, "muted"));
       body.append(meta); row.append(avatar, body); list.append(row);
     }

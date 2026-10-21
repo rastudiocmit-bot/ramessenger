@@ -143,4 +143,11 @@ body:has(dialog[open]){overflow:hidden}
   .chat-mode .content{padding-top:14px}
   .chat-mode .chat-layout{height:calc(100dvh - 300px)}
 }
+.chat-row .contact-avatar{min-width:22px;width:22px;height:22px;min-height:22px;font-size:10px}
+.chat-row .avatar-open{font-size:12px}
+.chat-row .status-client{--status-ink:#fff;--status-bg:#22a06b;--status-bold:#1b8a5a}
+.chat-row .status-lead{--status-ink:#fff;--status-bg:#3b82f6;--status-bold:#2f6fdd}
+.chat-row .status-archive{--status-ink:#fff;--status-bg:#e0555b;--status-bold:#c8454b}
+.chat-row .status-unlinked{--status-ink:#fff;--status-bg:#9aa7b0;--status-bold:#85939d}
+.chat-row .contact-avatar:hover,.chat-row .contact-avatar:focus-visible{box-shadow:none}
 
