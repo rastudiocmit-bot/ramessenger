@@ -350,6 +350,28 @@ class ChatReader:
                         + " AS effective_unread,"
                         + LATEST_INBOUND_ID
                         + " AS latest_inbound_id,"
+                        "(SELECT count(*) FROM messages i WHERE i.workspace_id=c.workspace_id "
+                        "AND i.conversation_id=c.id AND i.direction='in' "
+                        "AND i.actor_type='contact' "
+                        "AND coalesce(i.payload->>'deleted','false')<>'true' "
+                        "AND (c.handled_inbound_id IS NULL OR i.occurred_at > "
+                        "(SELECT h.occurred_at FROM messages h WHERE h.workspace_id=c.workspace_id "
+                        "AND h.id=c.handled_inbound_id)) "
+                        "AND NOT EXISTS (SELECT 1 FROM messages r LEFT JOIN send_commands s ON "
+                        "s.workspace_id=r.workspace_id AND s.id=r.send_command_id "
+                        "WHERE r.workspace_id=i.workspace_id AND r.conversation_id=i.conversation_id "
+                        "AND r.direction='out' AND r.actor_type='human' "
+                        "AND coalesce(r.payload->>'deleted','false')<>'true' "
+                        "AND coalesce(r.payload->>'failed','false')<>'true' "
+                        "AND (r.send_command_id IS NULL OR s.state IN "
+                        "('accepted','delivered','read')) "
+                        "AND (r.occurred_at>i.occurred_at OR (r.occurred_at=i.occurred_at "
+                        "AND i.payload->>'branch_id' IS NOT NULL "
+                        "AND i.payload->>'branch_id'=r.payload->>'branch_id' "
+                        "AND CASE WHEN r.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
+                        "AND i.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
+                        "THEN (r.payload->>'crm_order')::numeric"
+                        ">(i.payload->>'crm_order')::numeric ELSE false END)))) AS unread_count,"
                         "coalesce((SELECT m.text FROM messages m WHERE c.needs_reply AND "
                         "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
                         "AND m.direction='in' AND m.actor_type='contact' AND "
@@ -422,6 +444,7 @@ class ChatReader:
                         "preview": (row["preview"] or "")[:180],
                         "students": family.get("names", []),
                         "unread": row["effective_unread"],
+                        "unread_count": row["unread_count"],
                         "handled": row["handled_inbound_id"] == row["latest_inbound_id"]
                         and bool(row["needs_reply"]),
                         "status": {3: "client", 2: "lead", 1: "archive"}.get(
