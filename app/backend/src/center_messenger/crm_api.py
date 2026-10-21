@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from center_messenger.accounts_api import identity, service
 from center_messenger.alfa_client import AlfaError
-from center_messenger.alfa_family import fetch_family_card, group_facts, student_balance
+from center_messenger.alfa_family import fetch_family_card, group_facts, subscriptions_balance
 from center_messenger.alfa_sync import SyncOptions
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_directory import normalized_name, phone_number
@@ -394,7 +394,7 @@ class DirectoryReader:
                     elif str(row["customer_id"]) not in existing["customer_ids"]:
                         existing["customer_ids"].append(str(row["customer_id"]))
             for person in people.values():
-                person["balance"] = student_balance(person["cards"])
+                person["balance"] = subscriptions_balance(person["cards"])
                 group_facts(person["groups"], person["cards"], today=snapshot["today"])
             return {
                 "id": str(contact_id),

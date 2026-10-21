@@ -1,7 +1,6 @@
 """Read bounded customer finance and lessons from documented AlfaCRM v2api endpoints."""
 
 from datetime import date, timedelta
-from decimal import Decimal
 
 from center_messenger.alfa_client import AlfaError
 from center_messenger.crm_directory import (
@@ -168,20 +167,18 @@ def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=
     }
 
 
-def student_balance(cards):
-    """Sum distinct CRM customer accounts, never copies of one account in branches."""
-    accounts = {}
+def subscriptions_balance(cards):
+    """Sum remaining balance across a student's non-archived subscriptions."""
+    total = None
     for card in cards:
-        identifier = str(card["id"])
-        amount = source_balance(card.get("balance"))
-        previous = accounts.get(identifier)
-        if previous is not None and amount is not None and previous != amount:
-            # Conflicting snapshots cannot safely be treated as separate accounts.
-            return None
-        accounts[identifier] = amount if amount is not None else previous
-    if not accounts or any(value is None for value in accounts.values()):
-        return None
-    return str(sum(accounts.values(), Decimal("0")))
+        for item in card.get("subscriptions", []):
+            if item.get("archived"):
+                continue
+            amount = source_balance(item.get("balance"))
+            if amount is None:
+                continue
+            total = amount if total is None else total + amount
+    return str(total) if total is not None else None
 
 
 def group_facts(groups, cards, *, today=None):

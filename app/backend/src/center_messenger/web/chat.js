@@ -485,7 +485,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       subscriptionsTile = familyMetric("Абонементы", "0");
     }
     const metrics = node("div", undefined, "family-metrics");
-    metrics.append(familyMetric("Возраст", familyAge(student.dob)), subscriptionsTile, familyMetric("Баланс счёта", familyBalance(student)), familyMetric("Филиалы", branches.map(shortBranch).join(", ") || "Филиал не указан", branches.join(", ")));
+    metrics.append(familyMetric("Возраст", familyAge(student.dob)), subscriptionsTile, familyMetric("Общий баланс", familyBalance(student)), familyMetric("Филиалы", branches.map(shortBranch).join(", ") || "Филиал не указан", branches.join(", ")));
     detail.append(metrics);
     const paid = (student.cards || []).filter(card => card.paid_lesson_count !== null && card.paid_lesson_count !== undefined);
     if (paid.length) detail.append(node("p", `Остаток занятий: ${paid.map(card => `${card.branch_name} — ${card.paid_lesson_count}`).join(" · ")}`, "family-summary"));
