@@ -421,9 +421,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const link = node("a", "↗", className); link.href = href; link.target = "center-messenger-crm"; link.rel = "noopener noreferrer"; link.title = title; link.setAttribute("aria-label", title);
     return link;
   }
-  function familyMetric(label, value) {
-    const cell = node("div", undefined, "family-metric"); cell.append(node("span", label), node("strong", value)); return cell;
+  function familyMetric(label, value, title) {
+    const cell = node("div", undefined, "family-metric");
+    const strong = node("strong", value);
+    if (title) strong.title = title;
+    cell.append(node("span", label), strong); return cell;
   }
+  const shortBranch = name => name.length > 20 ? name.slice(0, 20).trimEnd() + "…" : name;
   const familyNumber = value => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(Number(value));
   const familyMoney = value => `${familyNumber(value)} руб`;
   const familyDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value || "") ? value.split("-").reverse().join(".") : null;
@@ -460,7 +464,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const branches = [...new Set((student.cards || []).map(card => card.branch_name))];
     const subs = activeSubscriptions(student.cards || []);
     const metrics = node("div", undefined, "family-metrics");
-    metrics.append(familyMetric("Возраст", familyAge(student.dob)), familyMetric("Абонементы", `${subs.length} активных`), familyMetric("Баланс счёта", familyBalance(student)), familyMetric("Филиалы", branches.join(", ") || "Филиал не указан")); detail.append(metrics);
+    metrics.append(familyMetric("Возраст", familyAge(student.dob)), familyMetric("Абонементы", `${subs.length} активных`), familyMetric("Баланс счёта", familyBalance(student)), familyMetric("Филиалы", branches.map(shortBranch).join(", ") || "Филиал не указан", branches.join(", "))); detail.append(metrics);
     const paid = (student.cards || []).filter(card => card.paid_lesson_count !== null && card.paid_lesson_count !== undefined);
     if (paid.length) detail.append(node("p", `Остаток занятий: ${paid.map(card => `${card.branch_name} — ${card.paid_lesson_count}`).join(" · ")}`, "family-summary"));
     if (subs.length) {

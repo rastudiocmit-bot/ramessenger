@@ -96,9 +96,10 @@ dialog{border:1px solid var(--line);border-radius:20px;box-shadow:0 25px 90px #1
 .family-group-heading strong,.family-group-heading small{display:block}
 .family-group-heading strong{font-size:14px;line-height:1.35;font-weight:650}
 .family-group-heading small{color:#6d827c;font-size:12px;margin-top:4px;line-height:1.4}
-.family-group-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:14px}
-.family-group-facts .family-metric{padding:10px 12px}
-.family-group-facts .family-metric strong{white-space:pre-line}
+.family-group-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:14px}
+.family-group-facts .family-metric{padding:8px 9px}
+.family-group-facts .family-metric span{font-size:10px}
+.family-group-facts .family-metric strong{font-size:12px;white-space:pre-line}
 .family-unknown{display:inline-flex;border-radius:99px;background:#fff0d6;color:#97631a;padding:6px 10px;font-size:12px;font-weight:700}
 .family-summary{margin:12px 0 0;color:#5e746c;font-size:13px;line-height:1.45}
 .family-subscriptions{display:grid;gap:8px;margin-top:12px;color:#3f5c50;font-size:13px;line-height:1.45}
