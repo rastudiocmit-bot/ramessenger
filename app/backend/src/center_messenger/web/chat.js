@@ -250,12 +250,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         const bubble = node("div", undefined, "chat-bubble system"); bubble.dataset.id = message.id;
         const body = node("p", message.text || "", "system-body");
         body.hidden = true;
-        const toggle = button("+", "system-toggle", () => {
+        const glyph = node("span", "+", "system-toggle-glyph");
+        const toggle = button("", "system-toggle", () => {
           const opening = body.hidden;
           body.hidden = !opening;
-          toggle.textContent = opening ? "−" : "+";
+          glyph.textContent = opening ? "−" : "+";
           toggle.setAttribute("aria-expanded", String(opening));
         });
+        toggle.append(glyph);
         toggle.type = "button"; toggle.setAttribute("aria-expanded", "false");
         const when = (dayKey(message.occurred_at) !== todayKey ? shortDate(message.occurred_at) + " " : "") + time(message.occurred_at);
         const row = node("div", undefined, "system-row");

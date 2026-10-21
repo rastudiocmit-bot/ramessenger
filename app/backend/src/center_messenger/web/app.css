@@ -157,6 +157,7 @@ body:has(dialog[open]){overflow:hidden}
 .system-right{display:flex;align-items:center;gap:6px;flex:none}
 .system-time{font-size:10px;color:#9aa8a0;white-space:nowrap}
 .system-toggle{flex:none;width:17px;height:17px;min-width:17px;min-height:17px;border-radius:50%;border:1px solid #c3cdc8;background:transparent;color:#6f857c;font-size:14px;line-height:1;cursor:pointer;padding:0;display:grid;place-items:center}
+.system-toggle-glyph{transform:translateY(-1px)}
 .system-toggle:hover{background:#e4ece7}
 .system-body{margin:6px 0 0;font-size:12px;line-height:1.5;color:#54685f;white-space:pre-wrap}
 .system-body[hidden]{display:none}
