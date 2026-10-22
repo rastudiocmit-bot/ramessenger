@@ -187,25 +187,33 @@
     if (state.pane === "team") await loadMembers();
     if (state.pane === "security") await loadSessions();
   }
-  const sectionLabels = { overview: "Организация", messages: "Сообщения", security: "Безопасность" };
-  function memberSectionControls(member, workspace) {
-    const wrap = node("div", undefined, "member-sections");
-    const checks = ["overview", "messages", "security"].map(key => {
-      const label = node("label", undefined, "check-label");
-      const input = node("input"); input.type = "checkbox"; input.dataset.section = key;
+  const sectionMeta = {
+    overview: { icon: "◈", title: "Организация", hint: "Название центра и общая информация" },
+    messages: { icon: "▤", title: "Сообщения", hint: "Переписка с клиентами в MAX" },
+    security: { icon: "◇", title: "Безопасность", hint: "Пароль и сессии сотрудника" },
+  };
+  let sectionsMember = null;
+  function openMemberSections(member) {
+    sectionsMember = member;
+    $("#member-sections-avatar").textContent = initials(member.display_name);
+    $("#member-sections-name").textContent = member.display_name;
+    $("#member-sections-role").textContent = `${roles[member.role] || "Сотрудник"} · ${member.email}`;
+    const box = $("#member-sections-checks"); box.replaceChildren();
+    ["overview", "messages", "security"].forEach(key => {
+      const meta = sectionMeta[key];
+      const row = node("div", undefined, "section-option");
+      const icon = node("span", meta.icon, "section-option-icon");
+      const text = node("div", undefined, "section-option-text");
+      text.append(node("strong", meta.title), node("small", meta.hint));
+      const label = node("label", undefined, "switch");
+      const input = node("input"); input.type = "checkbox"; input.value = key;
       input.checked = (member.sections && member.sections.length ? member.sections : ["overview", "security"]).includes(key);
-      label.append(input, node("span", sectionLabels[key]));
-      return label;
+      label.append(input, node("span", undefined, "switch-slider"));
+      row.append(icon, text, label);
+      box.append(row);
     });
-    wrap.append(...checks);
-    const save = node("button", "Сохранить", "secondary compact"); save.type = "button";
-    save.addEventListener("click", () => busy(wrap, async () => {
-      const selected = checks.map(check => $("input", check)).filter(input => input.checked).map(input => input.dataset.section);
-      await api(`/workspaces/${workspace.id}/members/${member.user_id}/sections`, { method: "POST", data: { sections: selected } });
-      toast("Права сотрудника сохранены."); await loadMembers();
-    }));
-    wrap.append(save);
-    return wrap;
+    notice("", $("#member-sections-error"));
+    $("#member-sections-dialog").showModal();
   }
   async function loadMembers() {
     const workspace = state.workspace;
@@ -217,7 +225,18 @@
       const info = node("div", undefined, "member-info");
       const details = node("div"); details.append(node("strong", member.display_name), node("small", member.email));
       info.append(node("span", initials(member.display_name), "avatar"), details);
-      row.append(info, node("span", roles[member.role] || "Сотрудник", "role-badge"));
+      row.append(info);
+      const rolesWrap = node("div", undefined, "member-roles");
+      ["owner", "admin", "branch_manager", "operator", "observer"].forEach(key => {
+        rolesWrap.append(node("span", roles[key], `role-chip${member.role === key ? " active" : ""}`));
+      });
+      row.append(rolesWrap);
+      const actions = node("div", undefined, "member-actions");
+      if (!["owner", "admin"].includes(member.role)) {
+        const permissions = node("button", "Права", "secondary compact"); permissions.type = "button";
+        permissions.addEventListener("click", () => openMemberSections(member));
+        actions.append(permissions);
+      }
       if (member.role !== "owner" && (workspace.role === "owner" || member.role !== "admin")) {
         const button = node("button", "×", "icon-button remove-member"); button.type = "button";
         button.setAttribute("aria-label", `Отозвать доступ: ${member.display_name}`);
@@ -225,9 +244,9 @@
           if (!await confirm("Отозвать доступ?", `${member.display_name} потеряет доступ к этому центру.`, "Отозвать доступ")) return;
           await busy(row, async () => { await api(`/workspaces/${workspace.id}/members/${member.user_id}/remove`, { method: "POST" }); toast("Доступ сотрудника отозван."); await loadMembers(); });
         });
-        row.append(button);
+        actions.append(button);
       }
-      if (!["owner", "admin"].includes(member.role)) row.append(memberSectionControls(member, workspace));
+      if (actions.children.length) row.append(actions);
       list.append(row);
     });
     show($("#team-empty"), payload.members.length === 0);
@@ -338,6 +357,15 @@
     try { await api("/auth/logout-all", { method: "POST" }); clearSession("Все сессии завершены."); } catch (error) { if (error.name !== "AbortError") toast(error.message, true); }
   });
   $("#members-refresh").addEventListener("click", () => loadMembers().catch(error => { if (error.name !== "AbortError") toast(error.message, true); }));
+  $("#member-sections-form").addEventListener("submit", event => {
+    event.preventDefault(); const form = event.currentTarget, member = sectionsMember, workspace = state.workspace;
+    if (!member) return;
+    const selected = [...$("#member-sections-checks").querySelectorAll("input")].filter(input => input.checked).map(input => input.value);
+    busy(form, async () => {
+      await api(`/workspaces/${workspace.id}/members/${member.user_id}/sections`, { method: "POST", data: { sections: selected } });
+      $("#member-sections-dialog").close(); toast("Права сотрудника сохранены."); await loadMembers();
+    }, $("#member-sections-error"));
+  });
   $("#sessions-refresh").addEventListener("click", () => loadSessions().catch(error => { if (error.name !== "AbortError") toast(error.message, true); }));
   $("#access-refresh").addEventListener("click", () => refreshSession().catch(error => { if (error.name !== "AbortError") toast(error.message, true); }));
   $("#invite-open").addEventListener("click", () => {
