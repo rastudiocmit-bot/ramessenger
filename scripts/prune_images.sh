@@ -14,6 +14,14 @@ KEEP_RECENT=2
 # wiped: pruning it fully would make the next build download Chromium deps again.
 KEEP_CACHE=8GB
 
+# A running build owns the cache mounts and the images it has just produced;
+# removing either of them under it makes the build fail for no reason. Nightly
+# runs then simply skip and wait for the next one.
+if pgrep -f 'docker build' >/dev/null 2>&1; then
+    echo "docker build is running, skipping prune"
+    exit 0
+fi
+
 active=$(docker inspect --format '{{.Config.Image}}' center-messenger-api-1 || true)
 
 recent=$(docker image ls --format '{{.CreatedAt}}\t{{.Repository}}:{{.Tag}}' \
