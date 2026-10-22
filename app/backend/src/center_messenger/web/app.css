@@ -173,10 +173,10 @@ body:has(dialog[open]){overflow:hidden}
 
 
 .messages-only .sidebar,.messages-only .topbar{display:none}
-.messages-only .app-shell{grid-template-columns:minmax(0,1fr)}
+.messages-only{grid-template-columns:minmax(0,1fr)}
 .messages-only .main-column{min-height:100dvh}
 .messages-only .content{padding:0}
-.messages-only .chat-mode .chat-layout{height:100dvh;min-height:100dvh;max-height:none;border-radius:0;padding:8px}
+.messages-only.chat-mode .chat-layout{height:100dvh;min-height:100dvh;max-height:none;border-radius:0;padding:8px}
 .chat-list-header{display:flex;flex-direction:column;gap:10px;padding:12px 14px;border-bottom:1px solid #edf1ee;background:#fff}
 .chat-list-header[hidden]{display:none}
 .chat-list-header .chat-page-heading{margin:0;align-items:center;gap:10px}

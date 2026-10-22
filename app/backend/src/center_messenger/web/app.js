@@ -153,7 +153,7 @@
     show($("#overview-tab"), sections.overview); show($("#team-tab"), sections.team); show($("#messages-tab"), sections.messages); show($("#clients-tab"), sections.clients); show($("#connections-tab"), sections.connections); show($("#security-tab"), sections.security);
     if (state.pane !== "clients") directory.leave();
     if (state.pane !== "messages") chat.leave();
-    const only = messagesOnly();
+    const only = messagesOnly() || (state.pane === "messages" && matchMedia("(max-width: 760px)").matches);
     $("#cabinet").classList.toggle("chat-mode", state.pane === "messages");
     $("#cabinet").classList.toggle("messages-only", only);
     show($("#no-workspaces"), !state.workspace && state.pane !== "security");
