@@ -787,9 +787,9 @@ class AlfaMaxConnections:
             refresh_unread(db, workspace, conversation_id)
 
         logging.getLogger(__name__).debug(
-            "AlfaCRM MAX history projected workspace=%s branch_count=%d touched_convs=%d",
+            "AlfaCRM MAX history projected workspace=%s rows=%d touched_convs=%d",
             workspace,
-            len({r[0] for r in updates}) if updates else 0,
+            len(rows),
             len(touched),
         )
 
