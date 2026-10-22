@@ -1055,6 +1055,7 @@ class AlfaMaxWorker:
             except Exception:
                 pass
         except Exception as error:
+            import traceback
             code, delay = "internal", 120
             try:
                 with self._transaction(workspace, connection, lease) as db:
@@ -1068,11 +1069,13 @@ class AlfaMaxWorker:
                     self._release(db, workspace, connection, lease, delay)
             except Exception:
                 pass
-            logging.getLogger(__name__).warning(
-                "AlfaCRM MAX history sync failed phase=%s exception=%s delay=%d",
+            tb = traceback.format_exc()
+            logging.getLogger(__name__).error(
+                "AlfaCRM MAX history sync failed phase=%s exception=%s delay=%d\n%s",
                 phase,
                 type(error).__name__,
                 delay,
+                tb,
             )
         duration = time.monotonic() - sync_start
         logging.getLogger(__name__).info(
