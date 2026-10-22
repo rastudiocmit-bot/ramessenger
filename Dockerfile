@@ -14,15 +14,18 @@ WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 
-# Chromium's runtime libraries come from apt, and that download is the least
-# reliable part of the build. The apt lists and deb cache live in BuildKit cache
-# mounts, so they stay out of the image and a rebuild reuses them instead of
-# hitting the mirror again. Force IPv4 and bound the timeouts so a broken
-# mirror path fails the step instead of hanging it forever. Playwright must be
-# installed already, hence this step runs after pip.
+# Chromium's runtime libraries come from apt. The public Debian mirror is not
+# usable at this speed from the production host (deb.debian.org stalls on files
+# of a few megabytes), so the build points apt at a mirror that responds in
+# fractions of a second. The apt lists and deb cache live in BuildKit cache
+# mounts: they stay out of the image, and a rebuild reuses them instead of
+# downloading again. Force IPv4 and bound the timeouts so a broken mirror fails
+# the step instead of hanging it. Playwright must already be installed, hence
+# this step comes after pip.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
-    printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' \
+    sed -i 's|http://deb.debian.org|http://mirror.yandex.ru|g' /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' \
         > /etc/apt/apt.conf.d/99-network \
     && /opt/venv/bin/playwright install-deps chromium
 
