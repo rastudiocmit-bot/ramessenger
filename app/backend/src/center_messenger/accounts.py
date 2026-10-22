@@ -16,6 +16,7 @@ from center_messenger.auth_security import (
     InvitationInput,
     LoginInput,
     MEMBER_SECTIONS,
+    MemberRoleInput,
     MemberSectionsInput,
     PasswordInput,
     Passwords,
@@ -612,6 +613,39 @@ class Accounts:
                 subject_id=current["id"],
             )
             return self._issue(db, user, device)
+
+    def set_member_role(self, identity: Identity, workspace_id: UUID, user_id: UUID, model: MemberRoleInput):
+        with self.transaction(identity) as db:
+            actor = self._workspace(db, identity, workspace_id, manage=True)
+            target = db.execute(
+                text(
+                    "SELECT role FROM workspace_memberships "
+                    "WHERE workspace_id=:w AND user_id=:u AND active FOR UPDATE"
+                ),
+                {"w": workspace_id, "u": user_id},
+            ).scalar_one_or_none()
+            if target is None:
+                raise AuthError(404, "Сотрудник недоступен.")
+            if target == "owner" or model.role == "owner":
+                raise AuthError(403, "Роль владельца не изменяется.")
+            if target == "admin" and actor["role"] != "owner":
+                raise AuthError(403, "Роль администратора может менять только владелец.")
+            if model.role == "admin" and actor["role"] != "owner":
+                raise AuthError(403, "Назначить администратора может только владелец.")
+            db.execute(
+                text(
+                    "UPDATE workspace_memberships SET role=:r "
+                    "WHERE workspace_id=:w AND user_id=:u AND active"
+                ),
+                {"r": model.role, "w": workspace_id, "u": user_id},
+            )
+            audit(
+                db,
+                "member_role_updated",
+                user_id=identity.user_id,
+                workspace_id=workspace_id,
+                subject_id=user_id,
+            )
 
     def set_member_sections(
         self, identity: Identity, workspace_id: UUID, user_id: UUID, model: MemberSectionsInput

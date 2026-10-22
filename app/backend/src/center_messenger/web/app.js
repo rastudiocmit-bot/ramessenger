@@ -215,6 +215,13 @@
     notice("", $("#member-sections-error"));
     $("#member-sections-dialog").showModal();
   }
+  async function setMemberRole(member, role) {
+    const workspace = state.workspace;
+    await busy($("#members-list"), async () => {
+      await api(`/workspaces/${workspace.id}/members/${member.user_id}/role`, { method: "POST", data: { role } });
+      toast("Роль сотрудника обновлена."); await loadMembers();
+    });
+  }
   async function loadMembers() {
     const workspace = state.workspace;
     const payload = await api(`/workspaces/${workspace.id}/members`);
@@ -228,7 +235,11 @@
       row.append(info);
       const rolesWrap = node("div", undefined, "member-roles");
       ["owner", "admin", "branch_manager", "operator", "observer"].forEach(key => {
-        rolesWrap.append(node("span", roles[key], `role-chip${member.role === key ? " active" : ""}`));
+        const chip = node("button", roles[key], `role-chip${member.role === key ? " active" : ""}`);
+        chip.type = "button";
+        chip.disabled = member.role === "owner" || key === "owner" || member.role === key;
+        if (!chip.disabled) chip.addEventListener("click", () => setMemberRole(member, key).catch(error => { if (error.name !== "AbortError") toast(error.message, true); }));
+        rolesWrap.append(chip);
       });
       row.append(rolesWrap);
       const actions = node("div", undefined, "member-actions");

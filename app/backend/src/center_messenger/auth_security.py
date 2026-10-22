@@ -167,6 +167,17 @@ class MemberSectionsInput(InputModel):
         return cleaned
 
 
+class MemberRoleInput(InputModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def assignable_role(cls, value):
+        if value not in {"admin", "branch_manager", "operator", "observer"}:
+            raise ValueError("Invalid member role")
+        return value
+
+
 class InvitationInput(InputModel):
     email: EmailStr
     role: str

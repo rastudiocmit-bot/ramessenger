@@ -194,7 +194,9 @@ body:has(dialog[open]){overflow:hidden}
 
 .member-actions{display:flex;gap:8px;justify-content:flex-end;align-items:center}
 .member-roles{display:flex;flex-direction:column;align-items:flex-start;gap:5px;justify-self:start}
-.role-chip{font-size:10px;font-weight:600;padding:5px 9px;border-radius:7px;background:#f1f4f6;color:#98a4b0;white-space:nowrap}
+.role-chip{font-size:10px;font-weight:600;padding:5px 9px;border-radius:7px;background:#f1f4f6;color:#98a4b0;white-space:nowrap;min-height:0;line-height:1.4;border:0;cursor:pointer;transition:background .15s,color .15s}
+.role-chip:not(:disabled):hover{background:#e2e8ed;color:#57616c}
+.role-chip:disabled{opacity:1;cursor:default}
 .role-chip.active{background:#38424d;color:#fff}
 .member-actions .secondary{padding:7px 12px;min-height:34px}
 .member-head{gap:12px}
