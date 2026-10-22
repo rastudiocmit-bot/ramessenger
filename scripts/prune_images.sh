@@ -42,5 +42,13 @@ for img in $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -F 'cent
 done
 
 docker image prune -f >/dev/null
+
+# Pull request verification images are disposable: the workflow removes its own,
+# and a leftover from an interrupted run is collected here.
+for img in $(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -F 'center-messenger:pr-'); do
+    echo "remove  $img"
+    docker image rm "$img" >/dev/null 2>&1 || echo "skipped $img (in use)"
+done
+
 docker builder prune -f --keep-storage "$KEEP_CACHE" >/dev/null
 echo "prune finished"

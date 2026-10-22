@@ -4,12 +4,56 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
   workflow_dispatch:
 
 jobs:
+  verify-pull-request:
+    name: Verify pull request
+    if: ${{ gitverse.event_name == 'pull_request' }}
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - name: Fetch the pull request head over SSH
+        env:
+          SOURCE_SHA: ${{ gitverse.sha }}
+          PR_NUMBER: ${{ gitverse.event.pull_request.number }}
+        run: |
+          rm -rf source
+          export GIT_SSH_COMMAND='ssh -i /home/cm-gitverse/.ssh/gitverse_center_messenger -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes'
+          git clone --no-checkout git@gitverse.ru:olegsheff/center-messenger.git source
+          if [ -n "${PR_NUMBER:-}" ]; then
+            git -C source fetch origin "refs/pull/$PR_NUMBER/head"
+            TARGET=$(git -C source rev-parse FETCH_HEAD)
+          else
+            TARGET="$SOURCE_SHA"
+          fi
+          echo "Verifying $TARGET"
+          git -C source cat-file -e "$TARGET^{commit}"
+          git -C source checkout --detach "$TARGET"
+          test "$(git -C source rev-parse HEAD)" = "$TARGET"
+      - name: Check Python syntax
+        run: python3 -m compileall -q source/app/backend/src source/app/backend/migrations source/scripts
+      - name: Build verification image
+        run: |
+          IMAGE="center-messenger:pr-$(git -C source rev-parse --short=12 HEAD)"
+          docker build --platform linux/amd64 -t "$IMAGE" -f source/Dockerfile source
+      - name: Check built application and migration graph
+        run: |
+          IMAGE="center-messenger:pr-$(git -C source rev-parse --short=12 HEAD)"
+          docker run --rm -e PYTHONPYCACHEPREFIX=/tmp/pycache --entrypoint python "$IMAGE" -m compileall -q /app/backend/src /app/backend/migrations
+          docker run --rm --entrypoint alembic "$IMAGE" -c /app/alembic.ini history
+      - name: Remove the verification image
+        if: ${{ always() }}
+        run: |
+          docker image rm "center-messenger:pr-$(git -C source rev-parse --short=12 HEAD)" || true
+
   verify-build-deploy:
     name: Verify, build and deploy production
-    if: ${{ gitverse.ref == 'refs/heads/main' }}
+    if: ${{ gitverse.event_name != 'pull_request' && gitverse.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64]
     steps:
       - name: Fetch this exact GitVerse commit over SSH
