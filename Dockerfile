@@ -12,7 +12,13 @@ RUN groupadd --gid 10001 messenger \
 
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
-RUN /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r requirements.txt \
+
+# The Debian mirrors publish AAAA records, but the build network has no IPv6
+# route: apt resolves to IPv6 and then stalls mid-download. Force IPv4 and
+# bound the retries so a slow mirror fails the build instead of hanging it.
+RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "3";\nAcquire::http::Timeout "30";\n' \
+        > /etc/apt/apt.conf.d/99-network \
+    && /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r requirements.txt \
     && /opt/venv/bin/playwright install-deps chromium \
     && /opt/venv/bin/playwright install chromium \
     && rm -rf /var/lib/apt/lists/*
