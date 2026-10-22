@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Личный кабинет · Center Messenger</title>
+  <title>Личный кабинет · РазвивайсяMessenger</title>
   <link rel="stylesheet" href="/assets/app.css?v=0.8.29">
   <script src="/assets/directory.js?v=0.8.2" defer></script>
   <script src="/assets/chat.js?v=0.8.14" defer></script>
@@ -14,7 +14,7 @@
   <div id="loading" class="loading" role="status"><span class="spinner"></span>Открываем кабинет…</div>
   <main id="auth" class="auth-layout" hidden>
     <aside class="welcome">
-      <a class="wordmark" href="/">Center<span>Messenger</span></a>
+      <a class="wordmark" href="/">Развивайся<span>Messenger</span></a>
       <div class="welcome-copy"><span class="eyebrow">Личный кабинет</span><h1>Ваш центр.<br>Ваша команда.</h1><p>Одно рабочее пространство.<br>Понятный доступ для каждого сотрудника.</p></div>
       <div class="welcome-art" aria-hidden="true"><div class="orbit orbit-a"></div><div class="orbit orbit-b"></div><div class="art-card card-a"><span class="art-dot"></span>Организация</div><div class="art-card card-b"><span class="art-dot blue"></span>Команда</div><div class="art-card card-c"><span class="art-dot amber"></span>Безопасность</div></div>
       <p class="welcome-foot">Порядок начинается с простого.</p>
@@ -47,13 +47,13 @@
           <button class="text-button full" type="button" id="invite-login">У меня уже есть аккаунт</button>
           <button class="text-button full" type="button" id="invite-cancel">Отмена</button>
         </form>
-        <p class="auth-foot">Center Messenger · Доступ к рабочему пространству</p>
+        <p class="auth-foot">РазвивайсяMessenger · Доступ к рабочему пространству</p>
       </div>
     </section>
   </main>
   <div id="cabinet" class="app-shell" hidden>
     <aside class="sidebar">
-      <a class="wordmark" href="/">Center<span>Messenger</span></a>
+      <a class="wordmark" href="/">Развивайся<span>Messenger</span></a>
       <div class="workspace-control"><label for="workspace-select">Ваш центр</label><select id="workspace-select" aria-label="Организация"></select></div>
       <nav aria-label="Разделы кабинета"><button class="nav-item active" data-pane="overview" id="overview-tab" type="button"><span aria-hidden="true">◈</span>Организация</button><button class="nav-item" data-pane="team" id="team-tab" type="button"><span aria-hidden="true">♧</span>Сотрудники</button><button class="nav-item" data-pane="messages" id="messages-tab" type="button"><span aria-hidden="true">▤</span>Сообщения</button><button class="nav-item" data-pane="clients" id="clients-tab" type="button"><span aria-hidden="true">☷</span>Клиенты</button><button class="nav-item" data-pane="connections" id="connections-tab" type="button"><span aria-hidden="true">⌘</span>Подключения</button><button class="nav-item" data-pane="security" id="security-tab" type="button"><span aria-hidden="true">◇</span>Безопасность</button></nav>
       <div class="sidebar-foot"><span class="connection-dot"></span>Личный кабинет</div>
@@ -135,7 +135,7 @@
         </section>
         <section id="no-workspaces" class="settings-card empty" hidden><h2>Доступ к центру пока не предоставлен</h2><p>Попросите владельца организации прислать приглашение.</p><button class="secondary" id="access-refresh" type="button">Проверить доступ</button></section>
       </main>
-      <footer class="app-footer">Center Messenger <span>Личный кабинет</span></footer>
+      <footer class="app-footer">РазвивайсяMessenger <span>Личный кабинет</span></footer>
     </div>
   </div>
   <dialog id="invitation-dialog"><div class="dialog-heading"><h2>Пригласить сотрудника</h2><button class="icon-button" data-close="invitation-dialog" aria-label="Закрыть" type="button">×</button></div><p class="muted">Сотрудник получит доступ только к выбранному центру.</p><p class="notice error" id="invite-error" role="alert" hidden></p><form id="create-invite-form"><label>Электронная почта<input type="email" name="email" required maxlength="254" autocomplete="off"></label><label>Роль<select name="role"><option value="operator">Оператор</option><option value="observer">Наблюдатель</option><option value="branch_manager">Руководитель филиала</option><option value="admin" id="admin-role-option">Администратор</option></select></label><p class="form-note">Настройки доступа к филиалам и каналам задаются отдельно при их подключении.</p><button class="primary full" type="submit">Создать приглашение</button></form><div id="invite-result" hidden><p class="notice success">Приглашение готово</p><label>Ссылка для сотрудника<input id="invite-url" readonly autocomplete="off" spellcheck="false"></label><button class="primary full" id="invite-copy" type="button">Скопировать ссылку</button><p class="form-note">Отправьте ссылку сотруднику лично. Она действует 48 часов и используется один раз.</p></div></dialog>
