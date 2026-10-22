@@ -65,6 +65,14 @@ docker run --rm --entrypoint alembic <image> -c /app/alembic.ini history
 руководствуется совместимостью схемы: `docker compose down --volumes` в
 production запрещён.
 
+## Обслуживание сервера
+
+На VPS ежедневно в 04:17 запускается `/usr/local/sbin/center-messenger-prune-images`
+из `scripts/prune_images.sh`: он удаляет устаревшие образы `center-messenger:gitverse-*`,
+оставляя активный и предыдущий, снимает образы проверок запросов на слияние и
+ограничивает кэш сборщика. Если в этот момент идёт сборка, шаг пропускается.
+Контейнеры, том базы, `.secrets` и каталоги релизов контроллера скрипт не трогает.
+
 ## Документация
 
 - [Размещение](docs/deployment.md)
