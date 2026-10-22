@@ -12,16 +12,21 @@ RUN groupadd --gid 10001 messenger \
 
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
+RUN /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 
-# The Debian mirrors publish AAAA records, but the build network has no IPv6
-# route: apt resolves to IPv6 and then stalls mid-download. Force IPv4 and
-# bound the retries so a slow mirror fails the build instead of hanging it.
-RUN printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "3";\nAcquire::http::Timeout "30";\n' \
+# Chromium's runtime libraries come from apt, and that download is the least
+# reliable part of the build. The apt lists and deb cache live in BuildKit cache
+# mounts, so they stay out of the image and a rebuild reuses them instead of
+# hitting the mirror again. Force IPv4 and bound the timeouts so a broken
+# mirror path fails the step instead of hanging it forever. Playwright must be
+# installed already, hence this step runs after pip.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' \
         > /etc/apt/apt.conf.d/99-network \
-    && /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check -r requirements.txt \
-    && /opt/venv/bin/playwright install-deps chromium \
-    && /opt/venv/bin/playwright install chromium \
-    && rm -rf /var/lib/apt/lists/*
+    && /opt/venv/bin/playwright install-deps chromium
+
+RUN /opt/venv/bin/playwright install chromium
 
 COPY --chown=10001:10001 app/backend/src ./backend/src
 COPY --chown=10001:10001 app/backend/migrations ./backend/migrations
