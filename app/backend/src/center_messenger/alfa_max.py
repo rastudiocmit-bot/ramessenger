@@ -68,7 +68,10 @@ def _history_page_batch(current, target_page, older=None):
         if older is None:
             raise ValueError("Older page result is required")
         pages.append(older)
-        next_page = target_page + 1 if older["has_more"] else 0
+        # Only advance cursor from older page if it has more — don't downgrade
+        # to next_page=0 when current has_more=true.
+        if older["has_more"] and not current.get("_cursor_frozen"):
+            next_page = target_page + 1
     return pages, next_page
 
 
@@ -100,7 +103,7 @@ class AlfaMaxConnections:
         if (
             self._sms_templates
             and self._sms_templates_at
-            and now - self._sms_templates_at < timedelta(hours=1)
+            and now - self._sms_templates_at < timedelta(minutes=10)
         ):
             return self._sms_templates
         try:
@@ -445,9 +448,9 @@ class AlfaMaxConnections:
     def _message_identity(connection, customer, branch):
         contact = customer.get("contact_id") if customer else None
         if contact:
-            identity = f"alfa-contact:{contact}"
+            identity = f"alfa-contact:{branch}:{contact}"
         elif customer:
-            identity = f"alfa-customer:{customer['customer_id']}"
+            identity = f"alfa-customer:{branch}:{customer['customer_id']}"
         else:
             identity = f"alfa-unlinked:{branch}"
         conversation_id = uuid5(connection, identity)
@@ -511,6 +514,19 @@ class AlfaMaxConnections:
                 ).scalar_one()
                 touched.add(conversation_id)
                 source_id = _source_record_id(item, branch)
+                # Migrate duplicate source_records from old conversation (pre branch-aware identity).
+                duplicate_row = db.execute(
+                    text("""
+                    SELECT m.conversation_id, m.id FROM source_records s
+                    JOIN messages m ON m.workspace_id=s.workspace_id AND m.id=s.message_id
+                    WHERE s.workspace_id=:w AND s.connection_id=:c
+                      AND s.namespace='alfa_max' AND s.external_record_id=:id
+                      AND m.conversation_id != :conv
+                    LIMIT 1
+                    """),
+                    {"w": workspace, "c": channel, "id": source_id, "conv": conversation_id},
+                ).mappings().one_or_none()
+
                 existing = (
                     db.execute(
                         text(
@@ -525,6 +541,32 @@ class AlfaMaxConnections:
                     .mappings()
                     .one_or_none()
                 )
+
+                if duplicate_row:
+                    # Переносим source_record на новую (branch-aware) conversation.
+                    db.execute(
+                        text("""
+                        INSERT INTO source_records(workspace_id, id, connection_id, message_id,
+                              namespace, external_record_id)
+                        SELECT :w, uuid_generate_v4(), :c, :mid, 'alfa_max', :src
+                        FROM source_records
+                        WHERE workspace_id=:w AND connection_id=:c
+                          AND namespace='alfa_max' AND external_record_id=:src
+                        ON CONFLICT (workspace_id, connection_id, namespace, external_record_id) DO NOTHING
+                        """),
+                        {"w": workspace, "c": channel, "mid": duplicate_row["message_id"], "src": source_id},
+                    )
+                    db.execute(
+                        text("""
+                        DELETE FROM source_records
+                        WHERE workspace_id=:w AND connection_id=:c
+                          AND namespace='alfa_max' AND external_record_id=:id
+                          AND message_id != :mid
+                        """),
+                        {"w": workspace, "c": channel, "id": source_id, "mid": duplicate_row["message_id"]},
+                    )
+                    changed(db, workspace, duplicate_row["conversation_id"], duplicate_row["message_id"])
+                    existing = duplicate_row  # reuse as existing for later logic
                 payload = {
                     "source": "alfa_max",
                     "branch_id": branch,
@@ -543,6 +585,10 @@ class AlfaMaxConnections:
                     if template_name:
                         payload["template_name"] = template_name
                 if existing is None and item["direction"] == "out" and customer:
+                    corr_actor = item.get("actor_id")
+                    actor_filter = (
+                        " AND m.payload->>'actor_id'= :actor " if corr_actor else ""
+                    )
                     matches = list(
                         db.execute(
                             text(
@@ -554,11 +600,12 @@ class AlfaMaxConnections:
                                 "AND s.state IN ('accepted','delivered','read') "
                                 "AND m.text=:text AND m.payload->>'crm_branch'=:branch "
                                 "AND m.payload->>'customer_id'=:customer "
+                                + actor_filter + " "
                                 "AND abs(extract(epoch FROM (m.occurred_at-:at)))<=300 "
                                 "AND NOT EXISTS (SELECT 1 FROM source_records x WHERE "
                                 "x.workspace_id=m.workspace_id AND x.connection_id=:c "
                                 "AND x.namespace='alfa_max' AND x.external_record_id=:source) "
-                                "ORDER BY abs(extract(epoch FROM (m.occurred_at-:at))) LIMIT 2"
+                                "ORDER BY abs(extract(epoch FROM (m.occurred_at-:at)))"
                             ),
                             {
                                 "w": workspace,
@@ -569,17 +616,24 @@ class AlfaMaxConnections:
                                 "at": item["occurred_at"],
                                 "c": channel,
                                 "source": source_id,
+                                "actor": corr_actor,
                             },
                         ).mappings()
                     )
-                    if len(matches) == 1:
-                        matched_payload = dict(matches[0]["payload"])
+                    if matches:
+                        best = matches[0]
+                        if len(matches) > 1 and corr_actor:
+                            best = next(
+                                (m for m in matches if m["payload"].get("actor_id") == corr_actor),
+                                matches[0],
+                            )
+                        matched_payload = dict(best["payload"])
                         matched_payload.update(
                             {
                                 "branch_id": branch,
                                 "crm_order": item.get("crm_order"),
                                 "actor_name": item["actor_name"],
-                                "actor_id": item.get("actor_id"),
+                                "actor_id": corr_actor,
                             }
                         )
                         db.execute(
@@ -590,7 +644,7 @@ class AlfaMaxConnections:
                             ),
                             {
                                 "w": workspace,
-                                "id": matches[0]["id"],
+                                "id": best["id"],
                                 "provider": f"alfa:{source_id}",
                                 "at": item["occurred_at"],
                                 "payload": json.dumps(matched_payload, ensure_ascii=False),
@@ -607,11 +661,11 @@ class AlfaMaxConnections:
                                 "w": workspace,
                                 "id": uuid4(),
                                 "c": channel,
-                                "m": matches[0]["id"],
+                                "m": best["id"],
                                 "source": source_id,
                             },
                         )
-                        changed(db, workspace, conversation_id, matches[0]["id"])
+                        changed(db, workspace, conversation_id, best["id"])
                         continue
                 if existing:
                     merged = dict(payload)
@@ -732,6 +786,13 @@ class AlfaMaxConnections:
         for conversation_id in touched:
             refresh_unread(db, workspace, conversation_id)
 
+        logging.getLogger(__name__).debug(
+            "AlfaCRM MAX history projected workspace=%s branch_count=%d touched_convs=%d",
+            workspace,
+            len({r[0] for r in updates}) if updates else 0,
+            len(touched),
+        )
+
     def send_target(self, workspace, connection, conversation):
         with self.accounts.transaction(workspace_id=workspace) as db:
             return self._send_target_in_transaction(db, workspace, connection, conversation)
@@ -751,11 +812,14 @@ class AlfaMaxConnections:
                 "SELECT m.payload FROM conversations c JOIN messages m ON "
                 "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
                 "WHERE c.workspace_id=:w AND c.id=:conv AND m.direction='in' "
+                "AND m.payload->>'customer_id' IS NOT NULL "
+                "AND m.payload->>'customer_branch_id' IS NOT NULL "
+                "AND coalesce(m.payload->>'deleted','false')<>'true' "
                 "ORDER BY m.occurred_at DESC,m.id DESC LIMIT 1"
             ),
             {"w": workspace, "conv": conversation},
         ).scalar_one_or_none()
-        if not target or not target.get("customer_id") or not target.get("customer_branch_id"):
+        if not target:
             raise AlfaBrowserError("history_unavailable")
         session = self.vault.open_browser_state(workspace, connection, row["session_ciphertext"])
         return {
@@ -845,12 +909,15 @@ class AlfaMaxWorker:
         )
 
     def run_next(self):
+        import time
+
         claim, lease = self._claim()
         if not claim:
             return False
         workspace, connection = claim["workspace_id"], claim["connection_id"]
         delay, code = 90, None
         phase = "load_settings"
+        sync_start = time.monotonic()
         try:
             with self._transaction(workspace, connection, lease) as db:
                 row = self.service._row(db, workspace)
@@ -880,8 +947,11 @@ class AlfaMaxWorker:
                     .scalars()
                     .all()
                 )
+                # Read cursor early (needed to build requests before browser IO),
+                # but re-read + version-check in final transaction.
                 cursor = dict(row["history_cursor"] or {})
                 origin = row["crm_origin"]
+                settings_version = row["version"]
             if not branches:
                 raise AlfaBrowserError("settings_changed")
             phase = "read_history"
@@ -903,6 +973,8 @@ class AlfaMaxWorker:
                     key = (branch, direction)
                     current = pages_by_request[(branch, direction, 0)]
                     target_page = pages[key]
+                    # Prevent older page from downgrading cursor set by current (page 0).
+                    current["_cursor_frozen"] = True
                     older = (
                         pages_by_request[(branch, direction, target_page)]
                         if target_page > 0
@@ -916,8 +988,17 @@ class AlfaMaxWorker:
             encrypted = self.service.vault.seal_browser_state(workspace, connection, session)
             with self._transaction(workspace, connection, lease) as db:
                 current = self.service._row(db, workspace)
-                if current is None or current["version"] != row["version"]:
+                # Re-check version after browser IO — settings may have changed.
+                if (
+                    current is None
+                    or current["connection_id"] != connection
+                    or current["state"] != "active"
+                    or current["session_ciphertext"] is None
+                    or current["version"] != settings_version
+                ):
                     raise AlfaBrowserError("settings_changed")
+                # Re-read cursor — it may have been modified by another process.
+                cursor = dict(current["history_cursor"] or cursor)
                 for branch, records in updates:
                     self.service._project_page(
                         db, workspace, connection, crm_connection, branch, records
@@ -988,8 +1069,16 @@ class AlfaMaxWorker:
             except Exception:
                 pass
             logging.getLogger(__name__).warning(
-                "AlfaCRM MAX history sync failed phase=%s exception=%s",
+                "AlfaCRM MAX history sync failed phase=%s exception=%s delay=%d",
                 phase,
                 type(error).__name__,
+                delay,
             )
+        duration = time.monotonic() - sync_start
+        logging.getLogger(__name__).info(
+            "AlfaCRM MAX sync completed workspace=%s connection=%s duration=%.1fs",
+            workspace,
+            connection,
+            duration,
+        )
         return True

@@ -578,7 +578,10 @@ class ChatReader:
                     "id": message,
                     "c": conversation,
                     "text": model.text,
-                    "p": json.dumps({"source": "center_messenger"}),
+                    "p": json.dumps({
+                        "source": "center_messenger",
+                        "actor_id": str(actor.user_id),
+                    }),
                     "cmd": command,
                 },
             )
