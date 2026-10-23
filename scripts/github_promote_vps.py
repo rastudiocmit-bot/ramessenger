@@ -120,12 +120,12 @@ def run_promotion(bundle, sha, check_only=False):
     if revision != EXPECTED_DB_REVISION:
         raise ValueError("Database revision changed: manual migration review required")
     image = release["image"]
-    if image == old_image:
-        print("Already deployed:", image)
-        return
     print("Approved:", sha, "Old:", old_image, "New:", image, flush=True)
     if check_only:
         print("CHECK ONLY: validated release, existing API, DB, schema and legacy deploy status")
+        return
+    if image == old_image:
+        print("Already deployed:", image)
         return
     print("Loading verified image without touching live services...", flush=True)
     cmd("docker", "load", "-i", str(bundle / "image.tar"), capture=False)
