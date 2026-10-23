@@ -338,9 +338,10 @@ class AlfaSync:
             else:
                 self._fail(workspace, lease, "internal", retry=False)
         except Exception:
+            import traceback
             self._fail(workspace, lease, "internal", retry=False)
-            logging.getLogger(__name__).warning(
-                "CRM sync page failed; inspect workspace sync status"
+            logging.getLogger(__name__).error(
+                "CRM sync page failed; traceback:\n%s", traceback.format_exc()
             )
         finally:
             self._release(workspace, lease)
