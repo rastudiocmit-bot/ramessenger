@@ -211,6 +211,45 @@ class AlfaMaxConnections:
             }
         ]
 
+    def progress(self, actor, workspace):
+        with self._transaction(actor, workspace) as db:
+            row = self._row(db, workspace)
+            if row is None:
+                return {
+                    "configured": False,
+                    "state": "not_configured",
+                    "syncing": False,
+                    "messages": 0,
+                    "conversations": 0,
+                    "cursor": {},
+                    "last_sync_at": None,
+                }
+            cursor = dict(row["history_cursor"] or {})
+            queued = db.execute(
+                text(
+                    "SELECT 1 FROM alfa_max_sync_queue WHERE workspace_id=:w "
+                    "AND lease_owner IS NULL AND due_at<=clock_timestamp() LIMIT 1"
+                ),
+                {"w": workspace},
+            ).scalar_one_or_none()
+            counts = db.execute(
+                text(
+                    "SELECT (SELECT count(*) FROM conversations WHERE workspace_id=:w) "
+                    "AS conversations, (SELECT count(*) FROM messages WHERE workspace_id=:w) "
+                    "AS messages"
+                ),
+                {"w": workspace},
+            ).mappings().one()
+            return {
+                "configured": True,
+                "state": row["state"],
+                "syncing": queued is not None,
+                "messages": counts["messages"],
+                "conversations": counts["conversations"],
+                "cursor": cursor,
+                "last_sync_at": row["last_sync_at"],
+            }
+
     def _ensure_channel(self, actor, workspace, email, crm_connection):
         with self._transaction(actor, workspace, lock=True) as db:
             existing = self._row(db, workspace)
@@ -1015,6 +1054,10 @@ class AlfaMaxWorker:
                         "cursor": json.dumps(cursor),
                     },
                 )
+                # Keep backfilling older pages quickly; once every branch and
+                # direction reaches its end (cursor value 0) settle to the normal
+                # polling interval.
+                delay = 2 if any(isinstance(v, int) and v > 0 for v in cursor.values()) else 90
                 self._release(db, workspace, connection, lease, delay)
         except AlfaBrowserError as error:
             code = error.code

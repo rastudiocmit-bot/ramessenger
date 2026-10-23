@@ -67,6 +67,12 @@ def sync(workspace_id: UUID, request: Request):
     return request.app.state.alfa_max.sync(identity(request, mutation=True), workspace_id)
 
 
+@router.get("/sync-progress")
+def sync_progress(workspace_id: UUID, request: Request):
+    service(request)
+    return request.app.state.alfa_max.progress(identity(request), workspace_id)
+
+
 @router.delete("", status_code=204)
 def disconnect(workspace_id: UUID, request: Request):
     service(request)

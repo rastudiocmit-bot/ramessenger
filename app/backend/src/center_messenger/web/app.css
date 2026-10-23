@@ -30,7 +30,7 @@ dialog{border:1px solid var(--line);border-radius:20px;box-shadow:0 25px 90px #1
 @media(max-width:760px){.chat-mode .sidebar{padding:12px 14px 8px;gap:10px}.chat-mode .sidebar nav{display:flex;overflow-x:auto;min-width:0;max-width:100%;scrollbar-width:none;gap:5px}.chat-mode .sidebar .nav-item{flex:none;padding:9px 11px}.chat-mode .chat-layout{min-height:420px}}
 
 @media(max-width:760px){.chat-mode .sidebar .nav-item{width:auto}}
-#alfa-max-connect-form,#alfa-max-otp-form{max-width:560px;margin-top:16px}.alfa-max-settings .form-note{display:block}.alfa-max-settings #alfa-max-info{margin:10px 0}
+#alfa-max-connect-form,#alfa-max-otp-form{max-width:560px;margin-top:16px}.alfa-max-settings .form-note{display:block}.alfa-max-settings #alfa-max-info{margin:10px 0}.sync-progress{margin:16px 0;padding:14px 16px;border:1px solid #dceae6;border-radius:12px;background:#f6fbf9}.sync-progress-row{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600;color:var(--ink);margin-bottom:11px}.sync-spinner{display:inline-block;width:18px;min-width:18px;height:18px;border:2px solid #d8e7e5;border-top-color:var(--primary);border-radius:50%;animation:spin .8s linear infinite}.sync-progress-track{height:6px;border-radius:999px;background:#e3f0eb;overflow:hidden}.sync-progress-fill{height:100%;width:45%;border-radius:999px;background:linear-gradient(90deg,#46a88b,#7cc5ad);animation:sync-slide 1.3s ease-in-out infinite}.sync-progress-detail{margin:10px 0 0!important}@keyframes sync-slide{0%{transform:translateX(-110%)}100%{transform:translateX(240%)}}
 
 /* Shared white page header: the selected section's title and controls live here. */
 .topbar{height:auto;min-height:82px;padding:12px clamp(22px,3vw,44px);justify-content:space-between;gap:22px}

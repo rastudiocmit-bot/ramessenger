@@ -524,6 +524,35 @@
     $("#alfa-max-info").textContent = details.join(" · ");
     notice(!payload.vault_ready ? "На сервере не настроен ключ хранения веб-сессий." : (payload.error || ""), $("#alfa-max-error"));
     alfaMaxButtons();
+    if (payload.state === "active") loadAlfaMaxProgress();
+  }
+  function stopAlfaMaxProgress() {
+    if (state.alfaMaxProgressTimer) { clearTimeout(state.alfaMaxProgressTimer); state.alfaMaxProgressTimer = null; }
+  }
+  function scheduleAlfaMaxProgress() {
+    stopAlfaMaxProgress();
+    state.alfaMaxProgressTimer = setTimeout(loadAlfaMaxProgress, 2000);
+  }
+  async function loadAlfaMaxProgress() {
+    const workspace = state.workspace;
+    if (!workspace) return;
+    let payload;
+    try {
+      payload = await api("/workspaces/" + workspace.id + "/integrations/alfa-max/sync-progress");
+    } catch (_) { stopAlfaMaxProgress(); return; }
+    if (workspace.id !== state.workspace?.id) return;
+    if (!payload.configured || payload.state !== "active") { stopAlfaMaxProgress(); show($("#alfa-max-progress"), false); return; }
+    if (payload.syncing) {
+      show($("#alfa-max-progress"));
+      const pages = Object.values(payload.cursor || {}).filter(v => typeof v === "number" && v > 0);
+      const maxPage = pages.length ? Math.max(...pages) : 0;
+      $("#alfa-max-progress-text").textContent = "Загружаем историю…";
+      $("#alfa-max-progress-detail").textContent = "Сообщений: " + payload.messages + " · Диалогов: " + payload.conversations + (maxPage ? " · Страница " + maxPage : "");
+      scheduleAlfaMaxProgress();
+    } else {
+      show($("#alfa-max-progress"), false);
+      $("#alfa-max-progress-detail").textContent = "";
+    }
   }
   async function alfaMaxAction(action, success) {
     if (state.alfaMaxBusy || !state.workspace) return;
