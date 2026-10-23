@@ -146,17 +146,25 @@ def run_promotion(bundle, sha, check_only=False):
     os.chmod(dest, 0o600)
     if backup.returncode or dest.stat().st_size < 1024:
         raise ValueError("Backup failed; refusing deployment")
-    env = dict(os.environ, CM_IMAGE=image)
+    deploy_api_with_rollback(old_image, image, dest)
+
+def deploy_api_with_rollback(old_image, new_image, backup_path):
+    """Recreate only API; revert to previous image on any failed readiness.
+
+    The caller must validate provenance, DB compatibility and backup first.
+    This function is unit-tested without Docker or production access.
+    """
     compose = ["docker", "compose", "-p", "center-messenger", "-f", str(ROOT / "compose.yaml")]
+    new_env = dict(os.environ, CM_IMAGE=new_image)
     changed = False
     try:
         print("Recreating only API...", flush=True)
         changed = True
         cmd(*compose, "up", "-d", "--no-deps", "--no-build", "--force-recreate", "api",
-            env=env, capture=False)
-        if not wait_ready(image):
+            env=new_env, capture=False)
+        if not wait_ready(new_image):
             raise ValueError("New API failed readiness")
-        print("DEPLOYED", image, "backup", dest, flush=True)
+        print("DEPLOYED", new_image, "backup", backup_path, flush=True)
     except Exception:
         if changed:
             print("ERROR: rolling back API only to", old_image, file=sys.stderr, flush=True)
@@ -164,9 +172,13 @@ def run_promotion(bundle, sha, check_only=False):
                 restore_env = dict(os.environ, CM_IMAGE=old_image)
                 cmd(*compose, "up", "-d", "--no-deps", "--no-build",
                     "--force-recreate", "api", env=restore_env, capture=False)
-                print("Rollback ready:", wait_ready(old_image), file=sys.stderr, flush=True)
+                if not wait_ready(old_image):
+                    print("ROLLBACK NOT READY: manual intervention required", file=sys.stderr)
+                    raise RuntimeError("Rollback health check failed")
+                print("Rollback ready: True", file=sys.stderr, flush=True)
             except Exception as rollback_error:
                 print("ROLLBACK FAILED:", rollback_error, file=sys.stderr)
+                raise RuntimeError("New API failed and rollback did not recover service") from rollback_error
         raise
 
 def main():
