@@ -92,7 +92,7 @@ def verify_bundle(bundle):
         raise ValueError("Compose changed: manual review required")
     return release
 
-def run_promotion(bundle, sha):
+def run_promotion(bundle, sha, check_only=False):
     if os.geteuid() != 0:
         raise ValueError("Run as root on the VPS")
     if not (ROOT / ".secrets/db_app_password").is_file() or not (ROOT / "infra/postgres/010-runtime-role.sh").is_file():
@@ -100,9 +100,9 @@ def run_promotion(bundle, sha):
     release = verify_bundle(bundle)
     if sha != release["source_commit"]:
         raise ValueError("Explicit approved SHA does not match release")
-    if cmd("systemctl", "is-active", "center-messenger-gitverse-runner.service") == "active":
+    if subprocess.run(["systemctl", "is-active", "--quiet", "center-messenger-gitverse-runner.service"]).returncode == 0:
         raise ValueError("Legacy runner still active")
-    if cmd("systemctl", "is-active", "center-messenger-deploy.timer") == "active":
+    if subprocess.run(["systemctl", "is-active", "--quiet", "center-messenger-deploy.timer"]).returncode == 0:
         raise ValueError("Legacy timer still active")
     api = json.loads(cmd("docker", "inspect", "center-messenger-api-1"))[0]
     db = json.loads(cmd("docker", "inspect", "center-messenger-db-1"))[0]
@@ -124,6 +124,9 @@ def run_promotion(bundle, sha):
         print("Already deployed:", image)
         return
     print("Approved:", sha, "Old:", old_image, "New:", image, flush=True)
+    if check_only:
+        print("CHECK ONLY: validated release, existing API, DB, schema and legacy deploy status")
+        return
     print("Loading verified image without touching live services...", flush=True)
     cmd("docker", "load", "-i", str(bundle / "image.tar"), capture=False)
     # Distinct docker Id can refer to OCI manifest rather than the config digest.
@@ -170,12 +173,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--bundle", type=Path, required=True)
     p.add_argument("--approve-sha", required=True, help="Exact 40-character GitHub commit SHA")
+    p.add_argument("--check-only", action="store_true", help="Validate, but do not load, back up or deploy")
     args = p.parse_args()
     lock = ROOT / ".deploy.lock"
     with lock.open("a+") as handle:
         os.chmod(lock, 0o600)
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        run_promotion(args.bundle.resolve(), args.approve_sha)
+        run_promotion(args.bundle.resolve(), args.approve_sha, args.check_only)
 
 if __name__ == "__main__":
     try:
