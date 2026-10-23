@@ -1,0 +1,44 @@
+name: VPS read-only audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: center-messenger-vps-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check required SSH configuration
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+        run: |
+          set -eu
+          test -n "$DEPLOY_SSH_KEY" || { echo 'Missing DEPLOY_SSH_KEY' >&2; exit 1; }
+          test -n "$DEPLOY_KNOWN_HOSTS" || { echo 'Missing DEPLOY_KNOWN_HOSTS' >&2; exit 1; }
+          test -n "$DEPLOY_USER" || { echo 'Missing DEPLOY_USER' >&2; exit 1; }
+          mkdir -p -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/center_messenger
+          chmod 600 ~/.ssh/center_messenger
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Verify pinned host fingerprint
+        run: |
+          set -eu
+          ssh-keygen -F 83.222.25.109 -f ~/.ssh/known_hosts > /dev/null
+      - name: Read-only server inspection
+        env:
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+        run: |
+          set -eu
+          ssh -i ~/.ssh/center_messenger -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10 -- "$DEPLOY_USER@83.222.25.109" 'sh -s' < scripts/vps-audit.sh
