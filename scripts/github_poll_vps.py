@@ -5,6 +5,7 @@ Reads /opt/center-messenger-github/autodeploy.json. Requires enabled=true,
 verified successful build and verification workflows for the same main SHA.
 Only updates API through github_promote_vps.py. Never invokes migrations.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -29,13 +30,16 @@ def workflow_runs(name):
                    "databaseId,headSha,status,conclusion")
 
 def main():
+    parser = argparse.ArgumentParser(description="GitHub deployment poller")
+    parser.add_argument("--preview", action="store_true", help="Read-only selection: no downloads, writes or deployment")
+    args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError("root required")
     if not STATE.is_file():
         print("DISABLED: missing autodeploy.json")
         return
     s = json.loads(STATE.read_text())
-    if s.get("enabled") is not True:
+    if not args.preview and s.get("enabled") is not True:
         print("DISABLED: enabled is not true")
         return
     if not PROMOTER.is_file():
@@ -47,12 +51,20 @@ def main():
     sha = newest.get("headSha", "")
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise RuntimeError("Invalid GitHub SHA")
+    if args.preview:
+        print("PREVIEW: no downloads, writes, deployment or restart")
+        print("Autodeploy enabled:", s.get("enabled") is True)
+        print("Newest packaging run:", newest.get("databaseId"))
+        print("Candidate SHA:", sha)
     if newest.get("conclusion") != "success" or newest.get("status") != "completed":
         print("WAIT: latest packaging not successful")
         return
     checks = workflow_runs("verify.yml")
-    if not any(r.get("headSha") == sha and r.get("status") == "completed"
-               and r.get("conclusion") == "success" for r in checks):
+    verified = any(r.get("headSha") == sha and r.get("status") == "completed"
+                   and r.get("conclusion") == "success" for r in checks)
+    if args.preview:
+        print("Matching verification:", "success" if verified else "missing/unsuccessful")
+    if not verified:
         print("WAIT: verification for selected SHA not successful")
         return
     if sha in (s.get("last_deployed_sha"), s.get("last_failed_sha")):
@@ -61,6 +73,10 @@ def main():
     active = subprocess.check_output(
         ["docker", "inspect", "center-messenger-api-1", "--format",
          "{{.Config.Image}}"], text=True).strip()
+    if args.preview:
+        print("Running image:", active)
+        print("Decision:", "already running" if active == "center-messenger:github-" + sha[:12] else "eligible for further artifact checks; NOT deployed")
+        return
     if active == "center-messenger:github-" + sha[:12]:
         s["last_deployed_sha"] = sha
         write_state(s)
