@@ -1,0 +1,11 @@
+[Unit]
+Description=Check verified Center Messenger GitHub releases
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=15min
+Persistent=false
+Unit=ramessenger-github-deploy.service
+
+[Install]
+WantedBy=timers.target
