@@ -9,7 +9,7 @@
 
 Репозиторий выбран и GitHub Actions проверяет код в `.github/workflows/verify.yml`.
 **Автодеплой на VPS ещё не включён.** Старый контроллер настроен на другой источник
-(`capitalbtl-lab/center-messenger`, ветка `production`); его нельзя
+(`устаревший репозиторий (отключён)`, ветка `production`); его нельзя
 переиспользовать простой заменой текста. Файл `.gitverse/workflows/ci.yml`
 предназначен для GitVerse, а не GitHub. Никаких новых входящих портов,
 GitHub self-hosted runner с полным Docker-доступом и SSH-ключей на сайте
