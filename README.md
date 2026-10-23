@@ -43,27 +43,20 @@ python3 -m compileall -q app/backend/src app/backend/migrations scripts
 docker run --rm --entrypoint alembic <image> -c /app/alembic.ini history
 ```
 
-## Деплой
+## Репозиторий и развёртывание
 
-Публикация выполняется из GitVerse по push в `main`, файл
-`.gitverse/workflows/ci.yml`:
+**Актуальный репозиторий:** `rastudiocmit-bot/ramessenger`, ветка `main`.
+**Целевой VPS:** `83.222.25.109`, приложение на `messenger.rastudio.org`.
 
-1. раннер `self-hosted` на VPS клонирует точный коммит по SSH;
-2. проверяется синтаксис Python и собирается образ
-   `center-messenger:gitverse-<sha12>` (linux/amd64);
-3. в контейнере проверяются приложение и граф миграций;
-4. `scripts/build_release.py` собирает бандл в каталог релиза раннера;
-5. `sudo /usr/local/sbin/center-messenger-gitverse-deploy <sha>` передаёт бандл
-   проверенному контроллеру, который делает резервную копию, применяет миграции и
-   переключает активную версию.
+GitHub Actions (`.github/workflows/verify.yml`) проверяет синтаксис Python,
+Docker Compose, сборку образа и граф миграций при push/PR.
+**Автоматическая публикация на VPS не включена.** Включать её только после
+аудита установленного на сервере контроллера, миграции доверия с прежнего
+`capitalbtl-lab/center-messenger` и проверки резервного копирования.
+Прежний GitVerse workflow остаётся историческим и не управляет GitHub Actions.
 
-Запросы на слияние проверяются отдельным заданием: оно собирает образ
-`center-messenger:pr-<sha12>`, проверяет приложение и граф миграций и удаляет
-образ за собой, ничего не публикуя. Публикация идёт только по push в `main`.
-
-Сборка на сервере сайта не является штатным способом обновления. Откат
-руководствуется совместимостью схемы: `docker compose down --volumes` в
-production запрещён.
+Не изменять работающие Nginx/PM2 и сайт `rastudio.org`; не выполнять
+`docker compose down --volumes` на сервере.
 
 ## Документация
 
