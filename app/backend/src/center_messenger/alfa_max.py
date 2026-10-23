@@ -68,9 +68,10 @@ def _history_page_batch(current, target_page, older=None):
         if older is None:
             raise ValueError("Older page result is required")
         pages.append(older)
-        # Only advance cursor from older page if it has more — don't downgrade
-        # to next_page=0 when current has_more=true.
-        if older["has_more"] and not current.get("_cursor_frozen"):
+        # Advance the cursor when the older page still has more history;
+        # otherwise keep the page-0 cursor so a fresh page-0 never downgrades
+        # an in-progress backfill to 0.
+        if older["has_more"]:
             next_page = target_page + 1
     return pages, next_page
 
@@ -1012,8 +1013,6 @@ class AlfaMaxWorker:
                     key = (branch, direction)
                     current = pages_by_request[(branch, direction, 0)]
                     target_page = pages[key]
-                    # Prevent older page from downgrading cursor set by current (page 0).
-                    current["_cursor_frozen"] = True
                     older = (
                         pages_by_request[(branch, direction, target_page)]
                         if target_page > 0
