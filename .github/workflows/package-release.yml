@@ -1,0 +1,46 @@
+name: Package GitHub release (no deployment)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ramessenger-package
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'rastudiocmit-bot/ramessenger'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check source and Python syntax
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -m compileall -q app/backend/src app/backend/migrations scripts
+      - name: Build immutable Linux image
+        run: |
+          docker build --platform linux/amd64 -t "center-messenger:github-${GITHUB_SHA:0:12}" .
+      - name: Verify migrations in built image
+        run: |
+          docker run --rm --entrypoint alembic "center-messenger:github-${GITHUB_SHA:0:12}" -c /app/alembic.ini history
+      - name: Package release without deploying
+        run: |
+          python3 scripts/build_github_release.py --sha "$GITHUB_SHA" --image "center-messenger:github-${GITHUB_SHA:0:12}" --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --output "$RUNNER_TEMP/ramessenger-release"
+          (cd "$RUNNER_TEMP/ramessenger-release" && sha256sum -c checksums.sha256)
+      - name: Store checked release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ramessenger-linux-amd64-${{ github.sha }}
+          path: ${{ runner.temp }}/ramessenger-release/
+          retention-days: 7
+          if-no-files-found: error
+
+# Intentionally no SSH, server restart, database migration or deployment step.
