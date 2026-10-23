@@ -1,0 +1,34 @@
+name: Verify Center Messenger
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python3 -m compileall -q app/backend/src app/backend/migrations scripts
+      - name: Validate Compose
+        run: |
+          mkdir -p .secrets
+          touch .secrets/db_owner_password .secrets/db_app_password .secrets/owner_bootstrap_token
+          mkdir -p /tmp/cm-workflow-placeholder
+          touch /tmp/cm-workflow-placeholder/connection_master_key
+          CM_KEY_DIR=/tmp/cm-workflow-placeholder docker compose config --quiet
+      - name: Build image
+        run: docker build --platform linux/amd64 -t center-messenger:verify .
+      - name: Validate migration graph
+        run: docker run --rm --entrypoint alembic center-messenger:verify -c /app/alembic.ini history
+
+# This workflow intentionally NEVER deploys to the VPS.
+# Deployment requires separately audited GitHub-to-VPS trust and a successful backup/restore test.
