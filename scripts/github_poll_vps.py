@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path("/opt/center-messenger-github")
 STATE = ROOT / "autodeploy.json"
@@ -85,10 +86,24 @@ def main():
     run_id = str(newest["databaseId"])
     staging = Path(tempfile.mkdtemp(prefix="github-bundle-", dir=str(ROOT)))
     try:
-        subprocess.run([
+        download = [
             "gh", "run", "download", run_id, "-R", REPO,
             "-n", "ramessenger-linux-amd64-" + sha, "-D", str(staging)
-        ], check=True)
+        ]
+        for attempt in range(1, 4):
+            try:
+                subprocess.run(download, check=True, timeout=450)
+                break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                if attempt == 3:
+                    raise
+                print("GitHub artifact download interrupted; retry", attempt + 1, flush=True)
+                shutil.rmtree(staging)
+                staging.mkdir(mode=0o700)
+                time.sleep(15 * attempt)
+        for name in ("image.tar", "compose.yaml", "release.json", "checksums.sha256"):
+            if not (staging / name).is_file() or (staging / name).stat().st_size == 0:
+                raise RuntimeError("Incomplete GitHub release artifact: " + name)
         try:
             subprocess.run(
                 ["python3", str(PROMOTER), "--bundle", str(staging),
