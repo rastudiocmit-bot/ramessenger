@@ -1192,6 +1192,7 @@ body:has(#cabinet[hidden]){overflow:auto}
   box-shadow:0 24px 60px rgba(0,0,0,.35)}
 .voice-hold-card[hidden]{display:none}
 .voice-hold-text{margin:0 0 16px;font-size:18px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;max-height:45vh;overflow:auto}
+.voice-hold-note{margin:-6px 0 12px;font-size:13px;color:var(--muted)}
 .voice-hold-bar{height:4px;border-radius:2px;background:var(--sunken);overflow:hidden;margin-bottom:16px}
 .voice-hold-bar i{display:block;height:100%;background:var(--send);transform-origin:left;animation:voice-hold-count linear forwards}
 @keyframes voice-hold-count{from{transform:scaleX(1)}to{transform:scaleX(0)}}

@@ -31,6 +31,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     </div>
     <div class="voice-hold-card" hidden>
       <p class="voice-hold-text"></p>
+      <p class="voice-hold-note">Отправим автоматически. Нажмите мимо — не отправлять.</p>
       <div class="voice-hold-bar"><i></i></div>
       <div class="voice-hold-actions"><button type="button" class="btn sec voice-hold-edit">Изменить</button>
         <button type="button" class="btn primary voice-hold-send">Отправить</button></div>
@@ -272,6 +273,11 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   button.addEventListener("touchend", event => { if (event.cancelable) event.preventDefault(); }, { passive: false });
   layer.querySelector(".voice-hold-send").addEventListener("click", () => commit(true));
   layer.querySelector(".voice-hold-edit").addEventListener("click", () => { commit(false); input.focus(); });
+  // A tap on the free space around the card means "no": stop the countdown and
+  // leave the text in the field, unsent.
+  layer.addEventListener("click", event => {
+    if (preview && !card.contains(event.target)) { commit(false); toast("Не отправлено: текст в поле сообщения."); }
+  });
   layer.addEventListener("keydown", event => { if (event.key === "Escape" && preview) { commit(false); input.focus(); } });
   done.addEventListener("click", () => finish());
   retry.addEventListener("click", () => { if (failedAudio) send(failedAudio); });

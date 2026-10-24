@@ -184,6 +184,18 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     assert.equal(sent().length, before + 2, 'touch hold sends too');
     assert.notEqual(await phone.evaluate(() => document.activeElement?.id), 'chat-input', 'the keyboard does not pop up');
 
+    // «Отправить» sends at once; a tap on the free space means "no": nothing is sent.
+    const sentNow = sent().length;
+    await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
+    await holdMic(800); await phone.mouse.up(); await phone.waitForSelector('#voice-hold[data-phase="preview"]');
+    await phone.locator('.voice-hold-send').tap(); await phone.waitForSelector('#voice-hold', { state: 'hidden' });
+    await phone.waitForTimeout(300); assert.equal(sent().length, sentNow + 1, '«Отправить» sends');
+    await phone.waitForSelector('#chat-voice:not([hidden])');
+    await holdMic(800); await phone.mouse.up(); await phone.waitForSelector('#voice-hold[data-phase="preview"]');
+    await phone.touchscreen.tap(195, 120); await phone.waitForSelector('#voice-hold', { state: 'hidden' });
+    assert.equal(await phone.locator('#chat-input').inputValue(), 'Здравствуйте! Завтра занятие в 17:00.');
+    await phone.waitForTimeout(3500); assert.equal(sent().length, sentNow + 1, 'a tap outside never sends');
+
     // A short tap still opens the old recording panel.
     await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
     await phone.locator('#chat-voice').tap(); await phone.waitForSelector('#chat-voice-panel[data-phase="recording"]');
