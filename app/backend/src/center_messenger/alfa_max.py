@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from center_messenger.accounts import audit
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser
+from center_messenger.alfa_history import advance_history, history_coverage, history_pending, plan_history
 from center_messenger.auth_security import AuthError
 from center_messenger.chat_store import changed, refresh_unread
 from center_messenger.crm_api import DirectoryReader
@@ -48,6 +49,7 @@ ERRORS = {
     "reauth_required": "Сессия AlfaCRM завершилась. Подключите её заново.",
     "not_connected": "Сначала подключите отдельную веб-сессию AlfaCRM для MAX.",
     "history_unavailable": "В истории AlfaCRM пока нет связанной карточки клиента.",
+    "history_incomplete": "В AlfaCRM записей больше, чем сохранено в базе. Повторно проверяем всю историю.",
     "settings_changed": "Настройки AlfaCRM изменились. Подключите веб-сессию заново.",
     "internal": "Не удалось обновить историю AlfaCRM MAX. Повторите позже.",
 }
@@ -59,18 +61,6 @@ def _failure(code, status=502):
 
 def _source_record_id(item, branch):
     return f"{item['direction']}:{branch}:{item['record_id']}"
-
-
-def _history_page_batch(current, target_page, older=None):
-    """Return pages to import and the next older page cursor."""
-    pages = [current]
-    next_page = 1 if current["has_more"] else 0
-    if target_page > 0:
-        if older is None:
-            raise ValueError("Older page result is required")
-        pages.append(older)
-        next_page = target_page + 1 if older["has_more"] else 0
-    return pages, next_page
 
 
 class AlfaMaxConnections:
@@ -223,29 +213,42 @@ class AlfaMaxConnections:
                     "last_sync_at": None,
                 }
             cursor = dict(row["history_cursor"] or {})
-            queued = db.execute(
+            running = db.execute(
                 text(
                     "SELECT 1 FROM alfa_max_sync_queue WHERE workspace_id=:w "
-                    "AND lease_owner IS NULL AND due_at<=clock_timestamp() LIMIT 1"
+                    "AND lease_owner IS NOT NULL AND lease_until>clock_timestamp() LIMIT 1"
                 ),
                 {"w": workspace},
             ).scalar_one_or_none()
             counts = db.execute(
                 text(
-                    "SELECT (SELECT count(*) FROM conversations WHERE workspace_id=:w) "
-                    "AS conversations, (SELECT count(*) FROM messages WHERE workspace_id=:w) "
-                    "AS messages"
+                    "SELECT count(DISTINCT c.id) AS conversations,count(m.id) AS messages,"
+                    "min(m.occurred_at) AS oldest_at,max(m.occurred_at) AS newest_at "
+                    "FROM conversations c JOIN messages m ON m.workspace_id=c.workspace_id "
+                    "AND m.conversation_id=c.id WHERE c.workspace_id=:w AND c.connection_id=:c "
+                    "AND m.payload->>'superseded_by' IS NULL"
                 ),
-                {"w": workspace},
+                {"w": workspace, "c": row["connection_id"]},
             ).mappings().one()
+            branches = db.execute(text(
+                "SELECT external_id FROM alfa_branches WHERE workspace_id=:w "
+                "AND connection_id=:c AND available ORDER BY external_id"
+            ), {"w": workspace, "c": row["crm_connection_id"]}).scalars().all()
+            coverage = history_coverage(db, workspace, row["connection_id"], cursor, branches)
+            for stream in coverage["streams"]:
+                stream["error"] = ERRORS.get(stream.pop("error_code"))
             return {
                 "configured": True,
                 "state": row["state"],
-                "syncing": queued is not None,
+                "syncing": running is not None,
                 "messages": counts["messages"],
                 "conversations": counts["conversations"],
                 "cursor": cursor,
                 "last_sync_at": row["last_sync_at"],
+                "oldest_at": counts["oldest_at"],
+                "newest_at": counts["newest_at"],
+                "error": ERRORS.get(row["last_error_code"]),
+                **coverage,
             }
 
     def _ensure_channel(self, actor, workspace, email, crm_connection):
@@ -487,7 +490,7 @@ class AlfaMaxConnections:
         if contact:
             identity = f"alfa-contact:{contact}"
         elif customer:
-            identity = f"alfa-customer:{branch}:{customer['customer_id']}"
+            identity = f"alfa-customer:{customer['branch_id']}:{customer['customer_id']}"
         else:
             identity = f"alfa-unlinked:{branch}"
         conversation_id = uuid5(connection, identity)
@@ -594,10 +597,16 @@ class AlfaMaxConnections:
                         {"w": workspace, "r": snapshot["run"], "branch": customer["branch_id"],
                          "id": customer["customer_id"]},
                     ).scalar_one_or_none()
-                customers.setdefault("single", []).append(customer)
+                if not customer:
+                    group = "unlinked"
+                elif customer.get("contact_id"):
+                    group = f"contact:{customer['contact_id']}"
+                else:
+                    group = f"customer:{customer['branch_id']}:{customer['customer_id']}"
+                customers.setdefault(group, []).append(customer)
             if not customers:
                 customers["single"] = [None]
-            for group, records in customers.items():
+            for group, records in sorted(customers.items()):
                 # One conversation per parent: prefer a linked card, else the same branch.
                 customer = min(
                     records,
@@ -639,25 +648,58 @@ class AlfaMaxConnections:
                     )
                     merged_contacts.add(customer["contact_id"])
                 touched.add(conversation_id)
-                source_id = _source_record_id(item, branch)
-                existing = (
+                base_source_id = _source_record_id(item, branch)
+                prefix = base_source_id + "|recipient|"
+                source_keys = [base_source_id, prefix + "unlinked"] + [
+                    prefix + f"{r['branch_id']}:{r['customer_id']}"
+                    for group_records in customers.values() for r in group_records if r
+                ]
+                candidates = list(
                     db.execute(
                         text(
-                            "SELECT m.* FROM source_records s JOIN messages m ON "
+                            "SELECT m.*,s.external_record_id AS source_key FROM source_records s JOIN messages m ON "
                             "m.workspace_id=s.workspace_id AND m.id=s.message_id "
                             "WHERE s.workspace_id=:w AND s.connection_id=:c "
                             "AND s.namespace='alfa_max' "
-                            "AND s.external_record_id=:id"
+                            "AND s.external_record_id=ANY(CAST(:keys AS text[])) "
+                            "ORDER BY s.external_record_id"
                         ),
-                        {"w": workspace, "c": channel, "id": source_id},
+                        {"w": workspace, "c": channel, "keys": source_keys},
                     )
                     .mappings()
-                    .one_or_none()
                 )
+                # A bulk journal row can name several unrelated parents. Its
+                # stable source identity must have one projection per recipient,
+                # while multiple cards of one verified parent share one bubble.
+                recipient_cards = {(r["branch_id"], r["customer_id"]) for r in records if r}
+                matching = [m for m in candidates if (
+                    m["payload"].get("customer_branch_id"), m["payload"].get("customer_id")
+                ) in recipient_cards or m["conversation_id"] == conversation_id]
+                matching.sort(key=lambda m: (m["send_command_id"] is None, m["source_key"] != base_source_id))
+                existing = matching[0] if matching else None
+                if existing and customer and customer.get("contact_id"):
+                    for duplicate in {m["id"]: m for m in matching}.values():
+                        if duplicate["id"] != existing["id"] and not duplicate["send_command_id"]:
+                            self._supersede(db, workspace, duplicate["id"], existing["id"])
+                            changed(db, workspace, duplicate["conversation_id"], duplicate["id"])
+                            touched.add(duplicate["conversation_id"])
+                if existing is None and len(customers) == 1:
+                    existing = next((m for m in candidates if m["source_key"] == base_source_id), None)
+                if existing:
+                    source_id = existing["source_key"]
+                elif not any(m["source_key"] == base_source_id for m in candidates):
+                    source_id = base_source_id
+                else:
+                    source_id = prefix + (f"{customer['branch_id']}:{customer['customer_id']}" if customer else "unlinked")
 
                 # Undo aliases created by the old text/time heuristic. Distinct
                 # CRM row keys must survive even when their content is identical.
-                if existing and existing["provider_message_id"] != f"alfa:{source_id}":
+                same_source = existing and (
+                    existing["payload"].get("crm_record_id") == str(item["record_id"])
+                    and str(existing["payload"].get("branch_id")) == str(branch)
+                    and existing["direction"] == item["direction"]
+                )
+                if existing and not same_source and existing["provider_message_id"] != f"alfa:{source_id}":
                     aliases = db.execute(
                         text("SELECT count(*) FROM source_records WHERE workspace_id=:w "
                              "AND connection_id=:c AND namespace='alfa_max' AND message_id=:m"),
@@ -698,6 +740,7 @@ class AlfaMaxConnections:
                     existing = dict(existing) | {"conversation_id": conversation_id}
                 payload = {
                     "source": "alfa_max",
+                    "crm_record_id": str(item["record_id"]),
                     "branch_id": branch,
                     "crm_order": item.get("crm_order"),
                     "customer_branch_id": customer["branch_id"] if customer else None,
@@ -1073,55 +1116,18 @@ class AlfaMaxWorker:
                 original_cursor = dict(row["history_cursor"] or {})
                 # Replay existing history once after this projection correction,
                 # including rows outside page one that were previously aliased.
-                cursor = dict(original_cursor) if original_cursor.get("projection_version") == 2 else {}
-                cursor["projection_version"] = 2
+                cursor, requests = plan_history(original_cursor, branches)
                 origin = row["crm_origin"]
                 settings_version = row["version"]
             if not branches:
                 raise AlfaBrowserError("settings_changed")
             phase = "read_history"
-            updates, requests, pages = [], [], {}
-            # Always refresh page one for every branch and direction. The cursor
-            # adds a single older page per poll, deduped by CRM's stable row key.
-            for branch in branches:
-                for direction in ("receive", "sent"):
-                    key = f"{branch}:{direction}"
-                    target_page = max(0, int(cursor.get(key, 0)))
-                    requests.append((branch, direction, 0))
-                    pages[(branch, direction)] = target_page
-                    if target_page > 0:
-                        requests.append((branch, direction, target_page))
             heartbeat = lambda: self._heartbeat(workspace, connection, lease)
             results, session = self.service.browser.read_histories(
-                origin, session, requests, on_progress=heartbeat
+                origin, session, requests, on_progress=heartbeat, continue_on_error=True
             )
-            pages_by_request = dict(zip(requests, results, strict=True))
-            for branch in branches:
-                for direction in ("receive", "sent"):
-                    key = (branch, direction)
-                    current = pages_by_request[(branch, direction, 0)]
-                    target_page = pages[key]
-                    older = (
-                        pages_by_request[(branch, direction, target_page)]
-                        if target_page > 0
-                        else None
-                    )
-                    page_results, next_page = _history_page_batch(current, target_page, older)
-                    cursor_key = f"{branch}:{direction}"
-                    previous_head = cursor.get(f"head:{cursor_key}")
-                    identities = [str(m["record_id"]) for m in current["messages"]]
-                    gap = bool(previous_head and current["has_more"] and previous_head not in identities)
-                    if gap and target_page != 1:
-                        # More than a page arrived since the last poll. Restart
-                        # the backfill near the head so none of that burst is skipped.
-                        next_page = 1
-                    elif target_page == 0 and cursor.get(f"complete:{cursor_key}"):
-                        next_page = 0
-                    updates.extend((branch, page["messages"]) for page in page_results)
-                    cursor[cursor_key] = next_page
-                    cursor[f"complete:{cursor_key}"] = next_page == 0
-                    if identities:
-                        cursor[f"head:{cursor_key}"] = identities[0]
+            updates = advance_history(cursor, requests, results)
+            page_error = next((result["error"] for result in results if result.get("error")), None)
             heartbeat()
             self.service.sms_templates(origin, session, branches[0])
             phase = "persist_history"
@@ -1142,25 +1148,41 @@ class AlfaMaxWorker:
                     self.service._project_page(
                         db, workspace, connection, crm_connection, branch, records
                     )
+                # A completed traversal with fewer persisted source identities
+                # than CRM reports is not complete. Replay instead of silently
+                # accepting a skipped page or a legacy projection mismatch.
+                finished = any(cursor.get(f"finished:{key}") and
+                               cursor[f"finished:{key}"] != original_cursor.get(f"finished:{key}")
+                               for key in cursor["streams"])
+                if finished:
+                    coverage = history_coverage(db, workspace, connection, cursor, branches)
+                    for stream in coverage["streams"]:
+                        if stream["complete"] and stream["missing_rows"]:
+                            key = f"{stream['branch_id']}:{stream['direction']}"
+                            cursor[key] = 0
+                            cursor[f"complete:{key}"] = False
+                            cursor[f"error:{key}"] = "history_incomplete"
+                            page_error = "history_incomplete"
                 db.execute(
                     text(
                         "UPDATE alfa_max_settings SET session_ciphertext=:session,"
-                        "history_cursor=CAST(:cursor AS jsonb),last_sync_at=now(),"
-                        "last_error_code=NULL,updated_at=now() WHERE workspace_id=:w"
+                        "history_cursor=CAST(:cursor AS jsonb),"
+                        "last_sync_at=CASE WHEN :success THEN now() ELSE last_sync_at END,"
+                        "last_error_code=:error,updated_at=now() WHERE workspace_id=:w"
                     ),
                     {
                         "w": workspace,
                         "session": encrypted,
                         "cursor": json.dumps(cursor),
+                        "success": bool(updates),
+                        "error": page_error,
                     },
                 )
                 # Keep backfilling older pages quickly; once every branch and
                 # direction reaches its end (cursor value 0) settle to the normal
                 # polling interval.
-                delay = 2 if any(
-                    cursor.get(f"{branch}:{direction}", 0) > 0
-                    for branch in branches for direction in ("receive", "sent")
-                ) else 15
+                pending = history_pending(cursor)
+                delay = 60 if page_error else 2 if pending else 15
                 self._release(db, workspace, connection, lease, delay)
         except AlfaBrowserError as error:
             code = error.code

@@ -310,3 +310,100 @@ test("one imported message shows that AlfaCRM history is still loading", async t
   assert.equal(ui.ids().length, 3);
   assert.doesNotMatch(ui.$("#chat-history-note").textContent, /Загружаем/);
 });
+
+test("an old delta cannot skip the unloaded interval when paging history", async t => {
+  let anchor;
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    if (url.searchParams.has("after_seq")) return history(identifier(1), [message(1)], { next_seq: 101 });
+    if (url.searchParams.has("before_id")) {
+      anchor = url.searchParams.get("before_id");
+      return history(identifier(1), [message(61)]);
+    }
+    return history(identifier(1), [message(81), message(82)], { has_more: true });
+  });
+  await ui.app.enter(); await ui.poll();
+  ui.$("#chat-history-more").click(); await flush();
+  assert.equal(anchor, identifier(81));
+});
+
+test("upward wheel at the top requests the next older page", async t => {
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    return url.searchParams.has("before_id") ? history(identifier(1), [message(1)])
+      : history(identifier(1), [message(2)], { has_more: true });
+  });
+  await ui.app.enter();
+  ui.$("#chat-stream").scrollTop = 0;
+  ui.$("#chat-stream").dispatchEvent(new ui.window.WheelEvent("wheel", { deltaY: -100 }));
+  await flush();
+  assert.deepEqual(ui.ids(), [identifier(1), identifier(2)]);
+});
+
+function timelineLayout(ui) {
+  const stream = ui.$("#chat-stream");
+  Object.defineProperty(stream, "clientHeight", { configurable: true, value: 100 });
+  Object.defineProperty(stream, "scrollHeight", { configurable: true, get: () => ui.ids().length * 50 });
+  stream.getBoundingClientRect = () => ({ top: 0, bottom: 100, height: 100 });
+  const original = ui.window.HTMLElement.prototype.getBoundingClientRect;
+  ui.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    if (!this.classList.contains("chat-bubble")) return original.call(this);
+    const index = [...this.parentElement.children].filter(n => n.classList.contains("chat-bubble")).indexOf(this);
+    const top = index * 50 - stream.scrollTop;
+    return { top, bottom: top + 50, height: 50 };
+  };
+  return stream;
+}
+
+test("mixed old and new deltas keep the visible message at the same position", async t => {
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    return url.searchParams.has("after_seq") ? history(identifier(1), [message(1), message(9)], { next_seq: 101 })
+      : history(identifier(1), [message(2), message(3), message(4), message(5), message(6)]);
+  });
+  const stream = timelineLayout(ui);
+  await ui.app.enter(); stream.scrollTop = 50;
+  const before = ui.$(`[data-id="${identifier(3)}"].chat-bubble`).getBoundingClientRect().top;
+  await ui.poll();
+  assert.equal(ui.$(`[data-id="${identifier(3)}"].chat-bubble`).getBoundingClientRect().top, before);
+});
+
+test("expanded automation messages stay expanded after a history update", async t => {
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    return url.searchParams.has("after_seq") ? history(identifier(1), [message(2)], { next_seq: 101 })
+      : history(identifier(1), [message(1, { actor_type: "automation" })]);
+  });
+  await ui.app.enter(); ui.$(".system-toggle").click(); await ui.poll();
+  assert.equal(ui.$(".system-body").hidden, false);
+});
+
+test("history day labels distinguish years across the whole period", async t => {
+  const ui = setup(t, url => url.pathname.endsWith("/messages") ? history(identifier(1), [
+    message(1, { occurred_at: "2024-10-24T00:00:00Z", sort_time: "1729728000000000" }),
+    message(2, { occurred_at: "2025-10-24T00:00:00Z", sort_time: "1761264000000000" }),
+  ]) : undefined);
+  await ui.app.enter();
+  const days = [...ui.$("#chat-history").querySelectorAll(".chat-day")].map(n => n.textContent);
+  assert.match(days[0], /2024/); assert.match(days[1], /2025/);
+});
+
+test("a reset during older paging also replaces the live cursor and page boundary", async t => {
+  let stale = false, anchor;
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    if (url.searchParams.has("after_seq")) {
+      assert.equal(url.searchParams.get("after_seq"), "50");
+      return history(identifier(1), [], { next_seq: 50 });
+    }
+    if (url.searchParams.has("before_id")) {
+      if (!stale) { stale = true; return history(identifier(1), [message(10)], { reset: true, next_seq: 50, has_more: true }); }
+      anchor = url.searchParams.get("before_id"); return history(identifier(1), [message(9)], { next_seq: 50 });
+    }
+    return history(identifier(1), [message(80)], { next_seq: 100, has_more: true });
+  });
+  await ui.app.enter(); ui.$("#chat-history-more").click(); await flush();
+  assert.deepEqual(ui.ids(), [identifier(10)]);
+  await ui.poll(); ui.$("#chat-history-more").click(); await flush();
+  assert.equal(anchor, identifier(10));
+});

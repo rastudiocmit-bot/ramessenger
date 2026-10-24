@@ -267,13 +267,32 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
     has_more = (
         int(range_match.group(2)) < int(range_match.group(3)) if range_match else bool(next_node)
     )
+    source_rows = table.select("tbody tr[data-key]")
+    for row in table.select("tbody tr"):
+        if row.find("td", recursive=False) and not row.has_attr("data-key") and not row.select_one(".empty"):
+            _reject_history_response("history_row_identity", branch, direction, page)
+    if range_match:
+        first, last, total = map(int, range_match.groups())
+        empty_range = (first, last, total) == (0, 0, 0) and not source_rows
+        if not empty_range and (not (1 <= first <= last <= total) or last - first + 1 != len(source_rows)):
+            _reject_history_response("history_row_count", branch, direction, page)
+        if page > 0 and first == 1:
+            _reject_history_response("pagination_page_mismatch", branch, direction, page)
+    else:
+        first = last = total = None
+        if not source_rows and not has_more:
+            total = 0
+    if not source_rows and has_more:
+        _reject_history_response("history_empty_page", branch, direction, page)
     next_page = page + 1 if has_more else None
     messages = []
-    for row in table.select("tbody tr[data-key]"):
+    identities = set()
+    for row in source_rows:
         key = row.get("data-key", "")
         cells = row.find_all("td", recursive=False)
-        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", key) or len(cells) < 5:
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", key) or len(cells) < 5 or key in identities:
             _reject_history_response("history_row_identity", branch, direction, page)
+        identities.add(key)
         customers = []
         seen = set()
         for anchor in row.select("a[href]"):
@@ -290,7 +309,11 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
         for node in text_node.select("small"):
             if node.select_one(".ion-android-attach,.ion-paperclip,.fa-paperclip"):
                 node.decompose()
-        message_text = text_node.get_text(" ", strip=True)[:20000]
+        for node in text_node.select("br"):
+            node.replace_with("\n")
+        for node in text_node.select("p,div,li,blockquote"):
+            node.append("\n")
+        message_text = text_node.get_text().strip()
         actor_type, actor_id = (
             ("contact", None)
             if direction == "receive"
@@ -305,8 +328,6 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
             name = " ".join(anchor.get_text(" ", strip=True).split()) or "Вложение"
             if name:
                 links.append({"name": name[:200]})
-        if not message_text and not links:
-            continue
         messages.append(
             {
                 "record_id": key,
@@ -323,7 +344,8 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
                 "failed": "danger" in (row.get("class") or []),
             }
         )
-    return {"messages": messages, "next_page": next_page, "has_more": has_more}
+    return {"messages": messages, "next_page": next_page, "has_more": has_more,
+            "total": total, "range_start": first, "range_end": last, "row_count": len(source_rows)}
 
 
 def _find_form_markup(value):
@@ -691,7 +713,7 @@ class AlfaMaxBrowser:
             browser = manager.chromium.launch(
                 headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
             )
-            context = browser.new_context(storage_state=storage_state, locale="ru-RU")
+            context = browser.new_context(storage_state=storage_state, locale="ru-RU", timezone_id="Europe/Moscow")
             context.route("**/*", AlfaMaxBrowser._route_factory(origin))
             page = context.new_page()
             return manager, browser, context, page
@@ -823,7 +845,7 @@ class AlfaMaxBrowser:
         results, next_state = self.read_histories(origin, state, [(branch, direction, page_number)])
         return results[0], next_state
 
-    def read_histories(self, origin, state, requests, *, on_progress=None):
+    def read_histories(self, origin, state, requests, *, on_progress=None, continue_on_error=False):
         origin = normalize_origin(origin)
         for branch, direction, page_number in requests:
             if (
@@ -839,20 +861,26 @@ class AlfaMaxBrowser:
             for branch, direction, page_number in requests:
                 if on_progress:
                     on_progress()
-                address = _history_url(origin, branch, direction, page_number)
-                response = page.goto(address, wait_until="domcontentloaded", timeout=20000)
-                self._check_origin(page, origin)
-                if response is None or response.status != 200:
-                    raise AlfaBrowserError("crm_unavailable")
-                results.append(
-                    parse_history_html(
-                        response.text(),
-                        origin=origin,
-                        branch=branch,
-                        direction=direction,
-                        page=page_number,
-                    )
-                )
+                try:
+                    address = _history_url(origin, branch, direction, page_number)
+                    try:
+                        response = page.goto(address, wait_until="domcontentloaded", timeout=20000)
+                        self._check_origin(page, origin)
+                        if response is None or response.status != 200:
+                            raise AlfaBrowserError("crm_unavailable")
+                        result = parse_history_html(
+                            response.text(), origin=origin, branch=branch,
+                            direction=direction, page=page_number,
+                        )
+                    except AlfaBrowserError:
+                        raise
+                    except Exception:
+                        raise AlfaBrowserError("crm_unavailable") from None
+                    results.append(result)
+                except AlfaBrowserError as error:
+                    if not continue_on_error or error.code not in {"invalid_response", "crm_unavailable"}:
+                        raise
+                    results.append({"error": error.code})
             return results, context.storage_state()
         except AlfaBrowserError:
             raise

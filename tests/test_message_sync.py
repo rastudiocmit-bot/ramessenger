@@ -23,7 +23,8 @@ from sqlalchemy import create_engine, text
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app/backend/src"))
 
-from center_messenger.alfa_max import AlfaMaxConnections, AlfaMaxWorker, _history_page_batch
+from center_messenger.alfa_max import AlfaMaxConnections, AlfaMaxWorker
+from center_messenger.alfa_history import PROJECTION_VERSION, RECHECK_INTERVAL, advance_history, history_coverage, history_pending, plan_history
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser, _message_time, parse_history_html
 from bs4 import BeautifulSoup
 from center_messenger.chat_api import ChatReader, SendInput
@@ -32,11 +33,45 @@ from center_messenger.crm_api import DirectoryReader
 from center_messenger.auth_security import AuthError
 
 
+class HistoryCursorTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 10, 24, tzinfo=UTC)
+
+    def test_completed_journals_are_rechecked_for_late_old_rows(self):
+        original = {"projection_version": PROJECTION_VERSION, "1:receive": 0,
+                    "complete:1:receive": True, "finished:1:receive": self.now.isoformat()}
+        cursor, requests = plan_history(original, [1], self.now + RECHECK_INTERVAL)
+        self.assertFalse(cursor["complete:1:receive"])
+        advance_history(cursor, requests, [{"messages": [], "has_more": True} for _ in requests], self.now)
+        self.assertEqual(cursor["1:receive"], 1)
+
+    def test_a_new_branch_is_incomplete_until_both_journals_are_read(self):
+        cursor, requests = plan_history({}, [1], self.now)
+        advance_history(cursor, requests, [{"messages": [], "has_more": False} for _ in requests], self.now)
+        self.assertFalse(history_pending(cursor))
+        cursor, _ = plan_history(cursor, [1, 2], self.now)
+        self.assertTrue(history_pending(cursor))
+
+    def test_catchup_has_its_own_durable_boundary_and_finishes_at_overlap(self):
+        original = {"projection_version": PROJECTION_VERSION, "1:receive": 9,
+                    "catchup:1:receive": 2, "until:1:receive": "10", "head:1:receive": "30"}
+        cursor, requests = plan_history(original, [1], self.now)
+        def page(request):
+            return {"messages": [{"record_id": "40" if request[2] == 0 else "10"}], "has_more": True}
+        advance_history(cursor, requests, [page(request) for request in requests], self.now)
+        self.assertEqual(cursor["1:receive"], 10)
+        self.assertEqual(cursor["catchup:1:receive"], 1)
+        self.assertEqual(cursor["until:1:receive"], "30")
+
+
 class PageTests(unittest.TestCase):
     def test_last_older_page_finishes_backfill(self):
-        latest = {"messages": [], "has_more": True}
-        oldest = {"messages": [], "has_more": False}
-        self.assertEqual(_history_page_batch(latest, 5, oldest), ([latest, oldest], 0))
+        cursor, requests = plan_history({"projection_version": PROJECTION_VERSION, "1:receive": 5}, [1])
+        advance_history(cursor, requests, [
+            {"messages": [], "has_more": request == (1, "receive", 0)} for request in requests
+        ])
+        self.assertEqual(cursor["1:receive"], 0)
+        self.assertTrue(cursor["complete:1:receive"])
 
     def test_browser_parser_preserves_stable_identity_and_exact_time(self):
         html = '''<table class="crm-table"><tbody>
@@ -56,6 +91,44 @@ class PageTests(unittest.TestCase):
         with self.assertRaises(AlfaBrowserError) as error:
             parse_history_html(html, origin="https://test.s20.online", branch=1, direction="receive")
         self.assertEqual(error.exception.code, "invalid_response")
+
+    def test_browser_rejects_a_nonempty_journal_with_unrecognized_rows(self):
+        html = '<div class="summary">1–1 из 1</div><table class="crm-table"><tbody><tr><td>Hello</td></tr></tbody></table>'
+        with self.assertRaises(AlfaBrowserError):
+            parse_history_html(html, origin="https://test.s20.online", branch=1, direction="receive")
+
+    def test_empty_source_message_is_retained_with_its_identity(self):
+        html = '<table class="crm-table"><tbody><tr data-key="1"><td></td><td></td><td></td><td></td><td>24.10.2026 03:10</td></tr></tbody></table>'
+        result = parse_history_html(html, origin="https://test.s20.online", branch=1, direction="receive")
+        self.assertEqual([m["record_id"] for m in result["messages"]], ["1"])
+
+    def test_source_counts_cannot_hide_a_skipped_row(self):
+        html = '<div class="summary">1–2 из 2</div><table class="crm-table"><tbody><tr data-key="1"><td></td><td></td><td></td><td>Text</td><td>24.10.2026 03:10</td></tr></tbody></table>'
+        with self.assertRaises(AlfaBrowserError):
+            parse_history_html(html, origin="https://test.s20.online", branch=1, direction="receive")
+
+    def test_empty_summary_is_a_verified_zero_and_message_line_breaks_are_preserved(self):
+        result = parse_history_html('<div class="summary">0–0 из 0</div><table class="crm-table"></table>',
+                                    origin="https://test.s20.online", branch=1, direction="receive")
+        self.assertEqual(result["total"], 0)
+        body = "a" * 21000
+        html = f'<table class="crm-table"><tbody><tr data-key="1"><td></td><td></td><td></td><td><p>First<br>Second</p><p>{body}</p></td><td>24.10.2026 03:10</td></tr></tbody></table>'
+        result = parse_history_html(html, origin="https://test.s20.online", branch=1, direction="receive")
+        self.assertEqual(result["messages"][0]["text"], "First\nSecond\n" + body)
+
+    def test_browser_can_keep_healthy_journals_when_one_page_is_invalid(self):
+        manager, browser, context, page = [Mock() for _ in range(4)]
+        page.goto.side_effect = [
+            SimpleNamespace(status=200, text=lambda: '<html>Unknown journal</html>'),
+            SimpleNamespace(status=200, text=lambda: '<table class="crm-table"></table>'),
+        ]
+        context.storage_state.return_value = {}
+        with patch.object(AlfaMaxBrowser, "_open", return_value=(manager, browser, context, page)), \
+             patch.object(AlfaMaxBrowser, "_check_origin"):
+            results, _ = AlfaMaxBrowser().read_histories(
+                "https://test.s20.online", {}, [(1, "receive", 0), (2, "sent", 0)], continue_on_error=True)
+        self.assertEqual(results[0]["error"], "invalid_response")
+        self.assertEqual(results[1]["messages"], [])
 
     def test_failed_browser_start_releases_its_playwright_manager(self):
         manager = Mock()
@@ -155,7 +228,7 @@ class MessageSyncTests(unittest.TestCase):
                 yield self.db
 
         self.accounts = SimpleNamespace(transaction=transaction, throttle=Mock())
-        self.service = AlfaMaxConnections(SimpleNamespace(accounts=self.accounts, vault=Mock()), browser=Mock())
+        self.service = AlfaMaxConnections(SimpleNamespace(accounts=self.accounts, vault=Mock(), _transaction=transaction), browser=Mock())
         maximum = SimpleNamespace(chat_transaction=transaction, accounts=self.accounts)
         self.reader = ChatReader(SimpleNamespace(max=maximum, alfa_max=self.service))
 
@@ -272,8 +345,26 @@ class MessageSyncTests(unittest.TestCase):
         result = self.reader.listing(None, self.workspace)
         self.assertEqual(result["conversations"][0]["preview"], "Automated reminder")
 
+    def test_outgoing_only_clients_are_visible_in_the_all_messages_list(self):
+        self.project(self.row("1", direction="out", actor="automation", body="Only outgoing"))
+        result = self.reader.listing(None, self.workspace)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["conversations"][0]["preview"], "Only outgoing")
+
+    def test_saved_history_stays_visible_when_a_client_leaves_the_current_directory(self):
+        self.project(self.row())
+        self.db.execute(text("DELETE FROM alfa_directory WHERE workspace_id=:w"), {"w": self.workspace})
+        self.assertEqual(self.reader.listing(None, self.workspace)["total"], 1)
+
+    def test_saved_unlinked_history_is_visible_before_the_directory_snapshot_exists(self):
+        self.published.return_value = None
+        self.project(self.row())
+        result = self.reader.listing(None, self.workspace)
+        self.assertEqual(result["total"], 1)
+        self.assertFalse(result["conversations"][0]["can_send"])
+
     def test_worker_persists_progress_instead_of_restoring_old_cursor(self):
-        cursor = self.run_worker({"projection_version": 2, "1:receive": 1, "1:sent": 1})
+        cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 1, "1:sent": 1})
         self.assertEqual(cursor["1:receive"], 2)
 
     def run_worker(self, cursor, page_result=None, browser_effect=None):
@@ -297,7 +388,7 @@ class MessageSyncTests(unittest.TestCase):
         return cursor
 
     def test_completed_backfill_does_not_restart_on_every_poll(self):
-        cursor = self.run_worker({"projection_version": 2, "1:receive": 2},
+        cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 2},
                                  page_result=lambda request: {"messages": [], "has_more": request[2] == 0})
         self.assertEqual(cursor["1:receive"], 0)
         self.assertTrue(cursor["complete:1:receive"])
@@ -309,24 +400,183 @@ class MessageSyncTests(unittest.TestCase):
 
     def test_legacy_history_replays_once_to_repair_existing_aliases(self):
         cursor = self.run_worker({"1:receive": 9})
-        self.assertEqual(cursor["projection_version"], 2)
+        self.assertEqual(cursor["projection_version"], PROJECTION_VERSION)
         self.assertEqual(cursor["1:receive"], 1)
         self.assertNotIn((1, "receive", 9), self.service.browser.read_histories.call_args.args[2])
 
     def test_new_message_burst_reopens_backfill_near_the_head(self):
-        cursor = self.run_worker({"projection_version": 2, "1:receive": 0,
+        cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 0,
                                   "complete:1:receive": True, "head:1:receive": "old"},
                                  page_result=lambda request: {"messages": [self.row("10")], "has_more": True})
-        self.assertEqual(cursor["1:receive"], 1)
+        self.assertEqual(cursor["1:receive"], 0)
+        self.assertEqual(cursor["catchup:1:receive"], 1)
+        self.assertTrue(cursor["complete:1:receive"])
+
+    def test_new_bursts_do_not_restart_the_archive_before_it_reaches_old_clients(self):
+        cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 5,
+                                  "head:1:receive": "old"},
+                                 page_result=lambda request: {"messages": [self.row("10")], "has_more": True})
+        self.assertEqual(cursor["1:receive"], 6)
+        self.assertEqual(cursor["catchup:1:receive"], 1)
+
+    def test_a_failed_page_does_not_discard_other_clients_or_advance_its_cursor(self):
+        cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 4}, page_result=lambda request:
+            {"error": "invalid_response"} if request == (1, "receive", 4)
+            else {"messages": [self.row("20")] if request == (2, "receive", 0) else [], "has_more": False})
+        self.assertEqual(cursor["1:receive"], 4)
+        self.assertEqual(cursor["error:1:receive"], "invalid_response")
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_all_recipients_of_a_journal_row_have_the_message(self):
+        other = uuid4()
+        self.add_customer(other, 2, 8)
+        row = self.row("30", direction="out", actor="automation")
+        row["customers"].append({"branch_id": 2, "customer_id": 8, "name": "Other", "status": "archive"})
+        self.project(row)
+        self.project(row | {"customers": list(reversed(row["customers"]))})
+        messages = self.messages()
+        self.assertEqual(len(messages), 2)
+        contacts = self.db.execute(text("SELECT contact_id FROM conversations WHERE workspace_id=:w "
+                                       "AND id=ANY(CAST(:ids AS uuid[]))"),
+                                   {"w": self.workspace, "ids": [m["conversation_id"] for m in messages]}).scalars().all()
+        self.assertEqual(set(contacts), {self.contact, other})
+
+    def test_multiple_cards_of_one_parent_do_not_repeat_a_journal_row(self):
+        self.add_customer(self.contact, 2, 8)
+        row = self.row("30", direction="out", actor="automation")
+        row["customers"].append({"branch_id": 2, "customer_id": 8, "name": "Second card", "status": "client"})
+        self.project(row)
+        self.project(row | {"customers": list(reversed(row["customers"]))})
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_later_verification_merges_proven_copies_of_one_bulk_row(self):
+        self.add_customer(self.contact, 2, 8)
+        row = self.row("30", direction="out", actor="automation")
+        row["customers"].append({"branch_id": 2, "customer_id": 8, "name": "Second card", "status": "client"})
+        self.published.return_value = None
+        self.project(row)
+        self.assertEqual(len(self.messages()), 2)
+        self.published.return_value = self.snapshot
+        self.project(row)
+        self.project(row | {"customers": list(reversed(row["customers"]))})
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_complete_archive_for_every_client_survives_new_bursts_and_worker_restarts(self):
+        self.add_customer(uuid4(), 2, 8)
+        journals = {}
+        for branch in (1, 2):
+            for direction in ("receive", "sent"):
+                journals[(branch, direction)] = [self.row(
+                    str(i), branch=branch, customer=7 if branch == 1 else 8,
+                    direction="in" if direction == "receive" else "out",
+                    at=datetime(2000 + i, 1, 1, tzinfo=UTC), body=f"{branch}:{direction}:{i}",
+                ) for i in range(26, 0, -1)]
+
+        def page(request):
+            branch, direction, number = request
+            rows = journals[(branch, direction)]
+            return {"messages": rows[number * 5:(number + 1) * 5], "total": len(rows),
+                    "has_more": (number + 1) * 5 < len(rows)}
+
+        cursor = {}
+        for cycle in range(30):
+            if cycle in (1, 2):
+                rows = journals[(1, "receive")]
+                rows[:0] = [self.row(str(100 + cycle * 10 + i), at=self.at + timedelta(seconds=i))
+                            for i in range(6, 0, -1)]
+            # run_worker creates a fresh worker and reloads only the DB cursor.
+            cursor = self.run_worker(cursor, page_result=page)
+            if not history_pending(cursor):
+                break
+        self.assertFalse(history_pending(cursor))
+        expected = {(b, "in" if d == "receive" else "out", r["record_id"])
+                    for (b, d), rows in journals.items() for r in rows}
+        actual = {(m["payload"]["branch_id"], m["direction"], m["payload"]["crm_record_id"])
+                  for m in self.messages()}
+        self.assertEqual(actual, expected)
+        self.assertEqual(min(m["occurred_at"] for m in self.messages()).year, 2001)
+        for item in self.reader.listing(None, self.workspace)["conversations"]:
+            loaded, kwargs = [], {}
+            for _ in range(30):
+                response = self.reader.history(None, self.workspace, UUID(item["id"]), **kwargs)
+                loaded = response["messages"] + loaded
+                if not response["has_more"]:
+                    break
+                first = response["messages"][0]
+                kwargs = {"before_time": first["occurred_at"], "before_id": UUID(first["id"])}
+            self.assertEqual(len(loaded), response["total"])
+            keys = [(int(m["sort_time"]), int(m["crm_order"]), m["id"]) for m in loaded]
+            self.assertEqual(keys, sorted(keys))
+
+        late = self.row("999", at=datetime(1999, 1, 1, tzinfo=UTC), body="Late old import")
+        journals[(1, "receive")].append(late)
+        cursor["finished:1:receive"] = (datetime.now(UTC) - RECHECK_INTERVAL).isoformat()
+        for _ in range(30):
+            cursor = self.run_worker(cursor, page_result=page)
+            if not history_pending(cursor):
+                break
+        self.assertEqual(len(self.messages()), len(expected) + 1)
+        self.assertEqual(min(m["occurred_at"] for m in self.messages()).year, 1999)
+
+    def test_unlinked_customers_with_equal_numbers_in_different_branches_stay_separate(self):
+        self.published.return_value = None
+        self.project(self.row("1", branch=1, customer=9))
+        self.project(self.row("2", branch=2, customer=9))
+        self.assertEqual(len({m["conversation_id"] for m in self.messages()}), 2)
+
+    def test_reported_source_count_mismatch_reopens_the_archive(self):
+        def page(request):
+            if request == (1, "receive", 0):
+                return {"messages": [self.row("1")], "has_more": False, "total": 2}
+            return {"messages": [], "has_more": False, "total": 0}
+        cursor = self.run_worker({}, page_result=page)
         self.assertFalse(cursor["complete:1:receive"])
+        self.assertEqual(cursor["error:1:receive"], "history_incomplete")
+        report = history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2])
+        self.assertEqual(report["streams"][0]["missing_rows"], 1)
+        self.assertFalse(report["history_complete"])
+
+    def test_coverage_counts_source_rows_once_for_bulk_recipients(self):
+        self.add_customer(uuid4(), 2, 8)
+        row = self.row("1", direction="out", actor="automation")
+        row["customers"].append({"branch_id": 2, "customer_id": 8, "name": "Other", "status": "archive"})
+        self.project(row)
+        cursor = {"projection_version": PROJECTION_VERSION, "streams": ["1:receive", "1:sent"]}
+        for direction in ("receive", "sent"):
+            cursor[f"complete:1:{direction}"] = True
+            cursor[f"total:1:{direction}"] = int(direction == "sent")
+        report = history_coverage(self.db, self.workspace, self.channel, cursor, [1])
+        self.assertTrue(report["history_complete"])
+        self.assertTrue(report["totals_verified"])
+        self.assertEqual(report["streams"][1]["source_rows"], 1)
+        self.assertEqual(len(self.messages()), 2)
+
+    def test_progress_detects_an_active_worker_and_only_counts_its_channel(self):
+        self.project(self.row())
+        self.db.execute(text("INSERT INTO alfa_max_sync_queue(workspace_id,connection_id,lease_owner,lease_until) "
+                             "VALUES (:w,:c,:lease,clock_timestamp()+interval '1 minute')"),
+                        {"w": self.workspace, "c": self.channel, "lease": uuid4()})
+        connection, conversation, message_id = uuid4(), uuid4(), uuid4()
+        self.db.execute(text("INSERT INTO connections(workspace_id,id,kind,name) VALUES (:w,:c,'max_bot','Bot')"),
+                        {"w": self.workspace, "c": connection})
+        self.db.execute(text("INSERT INTO conversations(workspace_id,id,connection_id,external_chat_id) VALUES (:w,:id,:c,'bot')"),
+                        {"w": self.workspace, "id": conversation, "c": connection})
+        self.db.execute(text("INSERT INTO messages(workspace_id,id,conversation_id,direction,actor_type,text,occurred_at) "
+                             "VALUES (:w,:id,:c,'in','contact','Unrelated',now())"),
+                        {"w": self.workspace, "id": message_id, "c": conversation})
+        report = self.service.progress(None, self.workspace)
+        self.assertTrue(report["syncing"])
+        self.assertEqual(report["messages"], 1)
+        self.assertEqual(report["conversations"], 1)
+        self.assertEqual(report["oldest_at"], self.at)
 
     def test_settings_change_during_browser_read_cannot_publish_stale_history(self):
         def changed_settings(origin, session, requests, **kwargs):
             self.db.execute(text("UPDATE alfa_max_settings SET version=version+1 WHERE workspace_id=:w"),
                             {"w": self.workspace})
             return ([{"messages": [self.row()], "has_more": False} for _ in requests], {})
-        cursor = self.run_worker({"projection_version": 2}, browser_effect=changed_settings)
-        self.assertEqual(cursor, {"projection_version": 2})
+        cursor = self.run_worker({"projection_version": PROJECTION_VERSION}, browser_effect=changed_settings)
+        self.assertEqual(cursor, {"projection_version": PROJECTION_VERSION})
         self.assertEqual(self.messages(), [])
 
     def test_loading_old_history_does_not_invalidate_a_current_reply(self):
@@ -341,6 +591,13 @@ class MessageSyncTests(unittest.TestCase):
         self.assertTrue(result["reset"])
         self.assertEqual(len(result["messages"]), 1)
         self.assertLess(result["next_seq"], 10_000)
+
+    def test_moved_pagination_boundary_resets_to_a_consistent_snapshot(self):
+        self.project(self.row())
+        result = self.reader.history(None, self.workspace, self.conversation()["id"],
+                                     before_time=self.at, before_id=uuid4())
+        self.assertTrue(result["reset"])
+        self.assertEqual(len(result["messages"]), 1)
 
     def test_max_bot_replayed_create_does_not_duplicate(self):
         bot = uuid4()
@@ -488,15 +745,15 @@ class MessageSyncTests(unittest.TestCase):
     def test_one_saved_message_reports_that_older_crm_history_is_loading(self):
         self.project(self.row())
         self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) WHERE workspace_id=:w"),
-                        {"w": self.workspace, "cursor": json.dumps({"projection_version": 2, "1:receive": 4})})
+                        {"w": self.workspace, "cursor": json.dumps({"projection_version": PROJECTION_VERSION, "1:receive": 4})})
         conversation = self.conversation()["id"]
         result = self.reader.history(None, self.workspace, conversation)
         self.assertEqual(result["total"], 1)
         self.assertTrue(result["conversation"]["history_loading"])
         self.assertFalse(result["has_more"])
         self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) WHERE workspace_id=:w"),
-                        {"w": self.workspace, "cursor": json.dumps({"projection_version": 2, "1:receive": 0,
-                                                                  "complete:1:receive": True})})
+                        {"w": self.workspace, "cursor": json.dumps({"projection_version": PROJECTION_VERSION, "1:receive": 0,
+                                                                  "complete:1:receive": True, "streams": ["1:receive"]})})
         result = self.reader.history(None, self.workspace, conversation)
         self.assertFalse(result["conversation"]["history_loading"])
 

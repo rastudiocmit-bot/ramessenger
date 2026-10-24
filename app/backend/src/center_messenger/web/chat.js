@@ -124,7 +124,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function entry(id) {
     if (!cache.has(id)) {
       if (cache.size >= 60) { const removable = [...cache.keys()].find(key => key !== selected && !cache.get(key).draft && !cache.get(key).pending); if (removable) cache.delete(removable); }
-      cache.set(id, { messages: new Map(), next: 0, more: false, loaded: false, meta: null, draft: "", pending: null });
+      cache.set(id, { messages: new Map(), next: 0, oldest: null, expanded: new Set(), more: false, loaded: false, meta: null, draft: "", pending: null });
     }
     return cache.get(id);
   }
@@ -239,7 +239,33 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const at = value(a), bt = value(b), ao = order(a), bo = order(b);
     return at < bt ? -1 : at > bt ? 1 : ao < bo ? -1 : ao > bo ? 1 : a.id.localeCompare(b.id);
   }
+  function rememberScroll() {
+    const stream = $("#chat-stream"), bounds = stream.getBoundingClientRect();
+    const anchors = [];
+    for (const bubble of $("#chat-history").children) {
+      if (!bubble.dataset.id) continue;
+      const rect = bubble.getBoundingClientRect();
+      if (rect.bottom > bounds.top && rect.top < bounds.bottom) anchors.push({ id: bubble.dataset.id, top: rect.top - bounds.top });
+      if (rect.top >= bounds.bottom && anchors.length) break;
+    }
+    return { anchors, top: stream.scrollTop, height: stream.scrollHeight,
+      nearBottom: stream.scrollHeight - stream.scrollTop - stream.clientHeight < 100 };
+  }
+  function restoreScroll(position, { bottom = false, older = false, follow = false } = {}) {
+    const stream = $("#chat-stream");
+    if (bottom || (follow && position.nearBottom && !older)) { stream.scrollTop = stream.scrollHeight; return; }
+    const bubbles = new Map([...$("#chat-history").children].filter(n => n.dataset.id).map(n => [n.dataset.id, n]));
+    for (const anchor of position.anchors) {
+      const bubble = bubbles.get(anchor.id);
+      if (bubble) {
+        stream.scrollTop += bubble.getBoundingClientRect().top - stream.getBoundingClientRect().top - anchor.top;
+        return;
+      }
+    }
+    stream.scrollTop = position.top + (older ? stream.scrollHeight - position.height : 0);
+  }
   function renderHistoryControls(data) {
+    const position = rememberScroll();
     const more = $("#chat-history-more"), status = $("#chat-history-status");
     show(more, Boolean(data.more || data.olderError));
     more.disabled = Boolean(data.olderLoading);
@@ -252,6 +278,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const progress = data.meta?.history_error ? ` История AlfaCRM пока загружена не полностью. ${data.meta.history_error}`
       : data.meta?.history_loading ? " Загружаем более раннюю историю из AlfaCRM…" : "";
     $("#chat-history-note").textContent = count + progress;
+    restoreScroll(position);
   }
   function maybeFillHistory() {
     const data = cache.get(selected), stream = $("#chat-stream");
@@ -283,29 +310,29 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const renderKey = `${id}/${data.next}/${data.meta?.revision}/${data.messages.size}/${data.more}`;
     if (!bottom && !older && data.renderKey === renderKey) { renderHeader(); return; }
     data.renderKey = renderKey;
-    const stream = $("#chat-stream"), previousHeight = stream.scrollHeight, previousTop = stream.scrollTop;
-    const nearBottom = previousHeight - previousTop - stream.clientHeight < 100;
+    const stream = $("#chat-stream"), position = rememberScroll();
     const history = $("#chat-history"); history.replaceChildren(); let day = "";
     const todayKey = dayKey(new Date());
     const messages = [...data.messages.values()].sort(compareMessages);
     for (let i = 0; i < messages.length; i++) {
       const message = messages[i];
       const messageDay = dayKey(message.occurred_at);
-      const label = new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, day: "numeric", month: "long" }).format(new Date(message.occurred_at));
+      const label = new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, day: "numeric", month: "long", year: "numeric" }).format(new Date(message.occurred_at));
       if (messageDay !== day) { history.append(node("div", label, "chat-day")); day = messageDay; }
       if (message.actor_type === "automation") {
         const bubble = node("div", undefined, "chat-bubble system"); bubble.dataset.id = message.id;
         const body = node("p", message.text || "", "system-body");
-        body.hidden = true;
-        const glyph = node("span", "+", "system-toggle-glyph");
+        body.hidden = !data.expanded.has(message.id);
+        const glyph = node("span", body.hidden ? "+" : "−", "system-toggle-glyph");
         const toggle = button("", "system-toggle", () => {
           const opening = body.hidden;
           body.hidden = !opening;
+          if (opening) data.expanded.add(message.id); else data.expanded.delete(message.id);
           glyph.textContent = opening ? "−" : "+";
           toggle.setAttribute("aria-expanded", String(opening));
         });
         toggle.append(glyph);
-        toggle.type = "button"; toggle.setAttribute("aria-expanded", "false");
+        toggle.type = "button"; toggle.setAttribute("aria-expanded", String(!body.hidden));
         const when = (dayKey(message.occurred_at) !== todayKey ? shortDate(message.occurred_at) + " " : "") + time(message.occurred_at);
         const row = node("div", undefined, "system-row");
         const right = node("span", undefined, "system-right");
@@ -339,8 +366,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       history.append(bubble);
     }
     show($("#chat-blank"), false); show(stream); show($("#chat-compose"));
-    if (older) stream.scrollTop = previousTop + stream.scrollHeight - previousHeight;
-    else if (bottom || nearBottom) stream.scrollTop = stream.scrollHeight;
+    restoreScroll(position, { bottom, older, follow: true });
     renderHeader();
     requestAnimationFrame(maybeFillHistory);
   }
@@ -366,7 +392,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const params = new URLSearchParams();
     if (mode === "delta" && data.loaded) params.set("after_seq", data.next);
     if (mode === "older") {
-      const first = [...data.messages.values()].sort(compareMessages)[0];
+      // Live updates may include an ancient edited/backfilled row beyond an
+      // unloaded interval. Only page responses advance the contiguous boundary.
+      const first = data.oldest;
       if (!first || !data.more) return;
       params.set("before_time", first.occurred_at); params.set("before_id", first.id);
     }
@@ -385,19 +413,23 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       await select(result.conversation.id, false);
       return;
     }
-    if (result.reset) { data.messages.clear(); data.loaded = false; }
+    if (result.reset) { data.messages.clear(); data.loaded = false; data.oldest = null; }
     for (const message of result.messages) {
       const old = data.messages.get(message.id); if (!old || old.version <= message.version) data.messages.set(message.id, message);
     }
     for (const removed of result.removed_ids || []) data.messages.delete(removed);
     data.total = result.total ?? data.messages.size;
     // Earlier pages must not advance the live cursor past unseen intervening updates.
-    if (mode !== "older") data.next = result.reset ? result.next_seq : Math.max(data.next, result.next_seq);
-    if (!data.loaded || mode === "older") data.more = result.has_more;
+    if (mode !== "older" || result.reset) data.next = result.reset ? result.next_seq : Math.max(data.next, result.next_seq);
+    if (!data.loaded || mode === "older") {
+      data.more = result.has_more;
+      const first = [...result.messages].sort(compareMessages)[0];
+      if (first) data.oldest = { id: first.id, occurred_at: first.occurred_at };
+    }
     data.loaded = true;
     if (!data.meta || result.conversation.revision >= data.meta.revision) { data.meta = result.conversation; mergeMeta(result.conversation); }
     reconcilePending(data);
-    renderMessages(id, { bottom: mode === "initial", older: mode === "older" }); renderList();
+    renderMessages(id, { bottom: mode === "initial" || result.reset, older: mode === "older" && !result.reset }); renderList();
     if (result.more_changes && mode !== "older") await loadHistoryPage(id);
   }
   async function select(id, mobile = true) {
@@ -477,6 +509,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; resizeCompose(); unlockSound(); });
   $("#chat-input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(min-width: 761px)").matches) { event.preventDefault(); submit(); } });
   $("#chat-stream").addEventListener("scroll", () => { if ($("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
+  $("#chat-stream").addEventListener("wheel", event => { if (event.deltaY < 0 && $("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
+  window.addEventListener("resize", () => requestAnimationFrame(maybeFillHistory));
   $("#chat-history-more").addEventListener("click", () => loadOlder({ retry: true }));
   function filtersChanged() {
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
