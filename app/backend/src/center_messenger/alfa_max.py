@@ -201,6 +201,9 @@ class AlfaMaxConnections:
 
     def progress(self, actor, workspace):
         with self._transaction(actor, workspace) as db:
+            # Projectors publish rows and cursors under the exclusive workspace
+            # lock. Read their coverage together, never across two commits.
+            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR SHARE"), {"w": workspace})
             row = self._row(db, workspace)
             if row is None:
                 return {
