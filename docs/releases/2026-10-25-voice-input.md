@@ -26,34 +26,18 @@
 Ревизия поднята в `database.py`, `release.json`, `scripts/local_build_vps.py`
 и `scripts/github_promote_vps.py`.
 
-Автовыкладка **сама эту версию не поставит**: она требует, чтобы в базе уже
-была нужная ревизия, а старый API с новой ревизией не проходит `/health/ready`.
-Поэтому один раз — вручную, на сервере под root:
+Автовыкладка с этой версии сама применяет миграции (резервная копия →
+`alembic upgrade head` → новый API, при сбое — `downgrade` и прежний API).
+Скрипт автовыкладки живёт на сервере, поэтому новую версию скрипта один раз
+ставят вручную, а он сразу выкладывает `main`:
 
 ```sh
-systemctl stop ramessenger-local-build.timer
-
-rm -rf /tmp/cm-src
-gh repo clone rastudiocmit-bot/ramessenger /tmp/cm-src -- --depth 1 --branch main
-cd /tmp/cm-src && SHA=$(git rev-parse HEAD) && IMG=center-messenger:local-${SHA:0:12}
-OLD=$(docker inspect -f '{{.Config.Image}}' center-messenger-api-1); echo "old=$OLD new=$IMG"
-docker build --platform linux/amd64 -t "$IMG" .
-docker run --rm --entrypoint alembic "$IMG" -c /app/alembic.ini heads   # 0013_ai_voice (head)
-
-# резервная копия
-docker exec center-messenger-db-1 pg_dump -U cm_owner -d center_messenger -Fc \
-  > /opt/center-messenger-github/rollback/before-0013-$(date +%F-%H%M).dump
-
-# миграция и новый API (между ними сайт ~1 минуту отвечает «не готов»)
-cd /opt/center-messenger-github
-CM_IMAGE="$IMG" docker compose -p center-messenger -f compose.yaml --profile tools run --rm migrate
-CM_IMAGE="$IMG" docker compose -p center-messenger -f compose.yaml up -d --no-deps --no-build --force-recreate api
-sleep 20; curl -fsS http://127.0.0.1:8100/health/ready; curl -fsS https://messenger.rastudio.org/health/ready
-
-# обновить скрипты автовыкладки (новая ревизия) и включить её обратно
-install -m 700 /tmp/cm-src/scripts/local_build_vps.py   /opt/center-messenger-github/local_build_vps.py
-install -m 700 /tmp/cm-src/scripts/github_promote_vps.py /opt/center-messenger-github/github_promote_vps.py
-systemctl start ramessenger-local-build.timer
+gh api repos/rastudiocmit-bot/ramessenger/contents/scripts/local_build_vps.py \
+  -H 'Accept: application/vnd.github.raw' > /tmp/local_build_vps.py \
+ && install -m 700 /tmp/local_build_vps.py /opt/center-messenger-github/local_build_vps.py \
+ && systemctl start ramessenger-local-build.timer \
+ && systemctl start ramessenger-local-build.service; \
+ journalctl -u ramessenger-local-build.service -n 30 --no-pager
 ```
 
 Откат: миграция только добавляет таблицы, поэтому старый образ можно
