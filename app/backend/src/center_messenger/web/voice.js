@@ -5,6 +5,9 @@
 // stays in memory until the text arrives or the operator cancels; nothing is
 // sent to a client: the text lands in the message field for the operator to send.
 //
+// The same press-and-hold works with a finger anywhere on the message list:
+// hold still for half a second (a moving finger scrolls as usual).
+//
 // Two gestures on the microphone:
 // • tap — the recording panel in the composer; the text goes into the field;
 // • press and hold — a large centred microphone; release to finish, slide up to
@@ -13,6 +16,8 @@
 //   warning, nothing recognised) is never sent automatically: it goes to the field.
 window.CenterVoice = ({ $, state, api, toast }) => {
   const LIMIT = 30, RATE = 16000, HOLD_MS = 220, CANCEL_PX = 90, SEND_DELAY = 3000;
+  const STREAM_HOLD_MS = 450, STILL_PX = 10;
+  const stream = $("#chat-stream");
   const compose = $("#chat-compose"), input = $("#chat-input"), button = $("#chat-voice");
   const panel = $("#chat-voice-panel"), label = $("#chat-voice-label"), time = $("#chat-voice-time");
   const level = $("#chat-voice-level"), done = $("#chat-voice-done"), cancel = $("#chat-voice-cancel"), retry = $("#chat-voice-retry");
@@ -121,14 +126,18 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     if (hold !== mine) return;
     if (!recording) { closeHold(); return; }            // no microphone: start() has explained why
     if (mine.released) {                                 // released while the permission prompt was open
-      reset(); toast("Удерживайте микрофон всё время, пока говорите.", true);
+      reset(); toast("Держите палец всё время, пока говорите.", true);
     }
   }
   function endHold(cancelled) {
     const mine = hold; if (!mine) return;
     clearTimeout(mine.timer);
     if (mine.armed) swallowUntil = performance.now() + 600;
-    if (!mine.armed) { hold = null; suppressClick = true; start(); return; }   // a short tap
+    if (!mine.armed) {
+      hold = null;
+      if (mine.source === "button") { suppressClick = true; start(); }   // a short tap on the microphone
+      return;                                                          // a tap or scroll on the list
+    }
     mine.released = true;
     if (!recording) return;                              // still waiting for the microphone
     if (cancelled || layer.dataset.phase === "cancel") { reset(); toast("Запись отменена."); return; }
@@ -258,9 +267,41 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     if (event.button !== 0 || !available() || recording || pending || hold || preview) return;
     event.preventDefault();
     try { button.setPointerCapture(event.pointerId); } catch (_) { /* Older browsers: events still reach the button. */ }
-    hold = { id: event.pointerId, x: event.clientX, y: event.clientY, armed: false, released: false };
+    hold = { id: event.pointerId, x: event.clientX, y: event.clientY, armed: false, released: false, source: "button" };
     hold.timer = setTimeout(beginHold, HOLD_MS);
   });
+
+  // Hold a finger still on the message list. Scrolling, taps, links and buttons
+  // keep working: only a still finger for STREAM_HOLD_MS starts the recording.
+  const interactive = "button, a, input, textarea, select, label, summary, [contenteditable], [role=button]";
+  stream.addEventListener("pointerdown", event => {
+    if (event.pointerType !== "touch" || !event.isPrimary || !available() || recording || pending || hold || preview) return;
+    if (event.target.closest(interactive)) return;
+    hold = { id: event.pointerId, x: event.clientX, y: event.clientY, armed: false, released: false, source: "stream" };
+    hold.timer = setTimeout(() => {
+      if (hold?.source !== "stream") return;
+      try { stream.setPointerCapture(hold.id); } catch (_) { /* The pointer may already be gone. */ }
+      window.getSelection?.()?.removeAllRanges();
+      beginHold();
+    }, STREAM_HOLD_MS);
+  });
+  stream.addEventListener("pointermove", event => {
+    if (hold?.source !== "stream" || event.pointerId !== hold.id) return;
+    if (!hold.armed) {
+      if (Math.hypot(event.clientX - hold.x, event.clientY - hold.y) > STILL_PX) { clearTimeout(hold.timer); hold = null; }
+      return;
+    }
+    if (recording) holdPhase(hold.y - event.clientY > CANCEL_PX ? "cancel" : "recording");
+  });
+  stream.addEventListener("pointerup", event => { if (hold?.source === "stream" && event.pointerId === hold.id) endHold(false); });
+  stream.addEventListener("pointercancel", event => {
+    if (hold?.source !== "stream" || event.pointerId !== hold.id) return;
+    if (hold.armed) endHold(true); else { clearTimeout(hold.timer); hold = null; }
+  });
+  // While a hold is pending or recording: no scrolling, text selection or long-press menu.
+  stream.addEventListener("touchmove", event => { if (hold?.source === "stream" && hold.armed && event.cancelable) event.preventDefault(); }, { passive: false });
+  stream.addEventListener("selectstart", event => { if (hold?.source === "stream") event.preventDefault(); });
+  stream.addEventListener("contextmenu", event => { if (hold?.source === "stream") event.preventDefault(); });
   button.addEventListener("pointermove", event => {
     if (!hold?.armed || event.pointerId !== hold.id || !recording) return;
     holdPhase(hold.y - event.clientY > CANCEL_PX ? "cancel" : "recording");

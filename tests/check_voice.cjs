@@ -196,6 +196,34 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     assert.equal(await phone.locator('#chat-input').inputValue(), 'Здравствуйте! Завтра занятие в 17:00.');
     await phone.waitForTimeout(3500); assert.equal(sent().length, sentNow + 1, 'a tap outside never sends');
 
+    // Hold a finger still on the message list: the same recording and auto-send.
+    // A swipe scrolls and a tap does nothing.
+    const listSent = sent().length, listHeard = phoneData.ai.transcribe.length;
+    await phone.locator('#chat-input').fill(''); await phone.waitForTimeout(300);
+    const bubble = await phone.locator('.chat-bubble').first().boundingBox();
+    const spot = { x: bubble.x + bubble.width / 2, y: bubble.y + bubble.height / 2 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [spot] });
+    await phone.waitForTimeout(200);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await phone.waitForTimeout(700);
+    assert.equal(await phone.locator('#voice-hold').isHidden(), true, 'a tap on a message does not record');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [spot] });
+    for (let step = 1; step <= 6; step += 1) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: spot.x, y: spot.y + step * 25 }] });
+      await phone.waitForTimeout(30);
+    }
+    await phone.waitForTimeout(600);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    assert.equal(await phone.locator('#voice-hold').isHidden(), true, 'a swipe scrolls, it does not record');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [spot] });
+    await phone.waitForSelector('#voice-hold[data-phase="recording"]'); await phone.waitForTimeout(1000);
+    await save(phone, 'voice-hold-list');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await phone.waitForSelector('#voice-hold[data-phase="preview"]');
+    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 6000 }); await phone.waitForTimeout(300);
+    assert.equal(phoneData.ai.transcribe.length, listHeard + 1);
+    assert.equal(sent().length, listSent + 1, 'a hold on the message list sends too');
+
     // A short tap still opens the old recording panel.
     await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
     await phone.locator('#chat-voice').tap(); await phone.waitForSelector('#chat-voice-panel[data-phase="recording"]');
