@@ -4,6 +4,7 @@
   "scripts": {
     "test": "node --test tests/test_*_ui.cjs",
     "test:scroll": "node tests/check_chat_scroll.cjs",
+    "test:chat-list": "node tests/check_chat_list.cjs",
     "test:progress": "node tests/check_alfa_progress.cjs",
     "test:appearance": "node tests/check_appearance.cjs",
     "test:cabinet": "node tests/check_cabinet.cjs",

@@ -21,6 +21,7 @@ from center_messenger.alfa_service import AlfaConnections
 from center_messenger.alfa_sync import AlfaSync, SyncWorker
 from center_messenger.auth_security import AuthError, Passwords
 from center_messenger.chat_queue import QueueProjectionWorker
+from center_messenger.family_cache import FamilyCacheWorker
 from center_messenger.chat_api import ChatReader
 from center_messenger.chat_api import hooks as max_hooks
 from center_messenger.chat_api import router as chat_router
@@ -103,7 +104,12 @@ def create_app(
         queue_worker = QueueProjectionWorker(app.state.accounts) if app.state.accounts else None
         if queue_worker:
             queue_worker.start()
+        card_worker = FamilyCacheWorker(app.state.alfa) if config.crm_sync_worker and app.state.alfa else None
+        if card_worker:
+            card_worker.start()
         yield
+        if card_worker:
+            card_worker.stop()
         if queue_worker:
             queue_worker.stop()
         if alfa_max_worker:

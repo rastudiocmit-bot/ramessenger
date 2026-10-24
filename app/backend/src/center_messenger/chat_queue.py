@@ -10,10 +10,11 @@ import logging
 import threading
 
 from sqlalchemy import text
+from uuid import uuid4
 
 from center_messenger.message_order import message_order, visible_message
 
-PROJECTION_VERSION = 1
+PROJECTION_VERSION = 2
 
 
 def queue_state_sql(c="c", *, enabled="true"):
@@ -107,7 +108,28 @@ def refresh(db, workspace, conversation):
         "OR needs_reply IS DISTINCT FROM :pending)"
     ), {"w": workspace, "c": conversation, "inbound": result["last_inbound_at"],
         "priority": result["priority_at"], "pending": result["needs_reply"]})
+    # Store only this policy's derived facts, in the same message transaction.
+    # The list must not scan a whole timeline again for every visible row/poll.
+    payload = dict(result) | {"projection_version": PROJECTION_VERSION}
+    db.execute(text("INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) "
+        "VALUES (:w,:id,'chat.list.state',:key,CAST(:p AS jsonb),'published') "
+        "ON CONFLICT (workspace_id,topic,event_key) DO UPDATE SET payload=EXCLUDED.payload"),
+        {"w": workspace, "id": uuid4(), "key": str(conversation), "p": json.dumps(payload, default=str)})
     return result
+
+
+def cached_state_sql(c="c"):
+    fields = "unanswered_count bigint,needs_reply boolean,last_unanswered_message_id uuid,last_unanswered_at timestamptz," \
+        "last_inbound_at timestamptz,latest_inbound_id uuid,last_human_activity_at timestamptz,last_event_at timestamptz," \
+        "priority_at timestamptz,preview_message_id uuid,preview_text text,preview_attachments jsonb,last_direction text,last_state text"
+    exists = (f"SELECT 1 FROM outbox_events projection WHERE projection.workspace_id={c}.workspace_id "
+              f"AND projection.topic='chat.list.state' AND projection.event_key={c}.id::text "
+              f"AND projection.payload->>'projection_version'='{PROJECTION_VERSION}'")
+    return (f"SELECT cached.* FROM outbox_events projection CROSS JOIN LATERAL jsonb_to_record(projection.payload) "
+            f"AS cached({fields}) WHERE projection.workspace_id={c}.workspace_id AND projection.topic='chat.list.state' "
+            f"AND projection.event_key={c}.id::text AND projection.payload->>'projection_version'='{PROJECTION_VERSION}' "
+            "UNION ALL SELECT live.* FROM (" + queue_state_sql(c, enabled=f"NOT EXISTS ({exists})") + ") live "
+            f"WHERE NOT EXISTS ({exists})")
 
 
 def preview(result):

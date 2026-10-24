@@ -572,3 +572,106 @@ test("negative family debt uses the total including base money, even with positi
   assert.match(ui.$('.family-note.debt').textContent,/Общий баланс клиента отрицательный/);
   assert.doesNotMatch(ui.$('.family-note.debt').textContent,/Баланс по абонементам/);
 });
+
+test('window patches retain unchanged nodes and apply new ordering without duplicates', async t=>{
+  let lists=0;
+  const rows=[conversation(1),conversation(2),conversation(3)];
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/chats')) {
+      assert.equal(url.searchParams.get('window'),'90');
+      if(++lists===1)return {window_token:'one',reset:true,conversations:rows,order:rows.map(r=>r.id),total:3,unread:3,page:0,has_more:false};
+      assert.equal(url.searchParams.get('window_token'),'one');
+      return {window_token:'two',reset:false,conversations:[{...conversation(3),preview:'Changed',last_message_at:'2026-10-24T12:00:00Z'}],order:[3,1,2].map(identifier),total:3,unread:3,page:0,has_more:false};
+    }
+  });
+  await ui.app.enter();
+  const retained=ui.$(`.chat-row[data-id="${identifier(2)}"]`);
+  ui.$('#chat-input').value='Unsent draft';
+  await ui.poll();
+  assert.deepEqual([...ui.$('#chat-list').querySelectorAll('.chat-row')].map(row=>row.dataset.id),[3,1,2].map(identifier));
+  assert.equal(ui.$(`.chat-row[data-id="${identifier(2)}"]`),retained);
+  assert.equal(ui.$('#chat-input').value,'Unsent draft');
+});
+
+test('list prefetch starts several screens before the end and never overlaps a poll', async t=>{
+  let reads=0,release;
+  const ui=setup(t,url=>{
+    if(!url.pathname.endsWith('/chats'))return;
+    reads++;
+    if(reads===2)return new Promise(resolve=>{release=()=>resolve({window_token:'second',reset:false,conversations:[],order:[identifier(1)],total:200,unread:1,page:1,has_more:false});});
+    return {window_token:'first',reset:true,conversations:[conversation(1)],order:[identifier(1)],total:200,unread:1,page:0,has_more:true};
+  });
+  await ui.app.enter();
+  const scroll=ui.$('.chat-list-scroll');
+  Object.defineProperties(scroll,{clientHeight:{get:()=>600},scrollHeight:{get:()=>3000}});
+  scroll.scrollTop=1000;scroll.dispatchEvent(new ui.window.Event('scroll'));
+  await flush();assert.equal(reads,2);
+  const polling=ui.poll();await flush();assert.equal(reads,2);
+  release();await polling;
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/chats')).at(-1).searchParams.get('window'),'180');
+});
+
+function preparedFamily(n) {
+  return {id:identifier(90+n),name:`Family ${n}`,phones:[],emails:[],today:'2026-10-24',
+    cache:{ready:true,refreshing:false,auto_refresh:false,updated_at:'2026-10-24T00:00:00Z',sources:1,cached_sources:1,overdue:false},
+    students:[{id:identifier(100+n),name:`Child ${n}`,balance:'100',groups:[],cards:[{id:String(n),branch_id:'1',branch_name:'Branch',status:'client',needs_refresh:false,subscriptions:[]}]}]};
+}
+function dockFamily(ui) {
+  ui.window.matchMedia=()=>({matches:false});
+  Object.defineProperty(ui.$('#chat-layout'),'clientWidth',{get:()=>1400});
+  ui.$('.pane-list').getBoundingClientRect=()=>({width:380});
+  const dialog=ui.$('#chat-details-dialog');
+  dialog.show=dialog.showModal=function(){this.open=true;};
+  dialog.close=function(){this.open=false;this.dispatchEvent(new ui.window.Event('close'));};
+}
+
+test('pinned read client defers full card until explicit open and clears the previous family', async t=>{
+  const rows=[{...conversation(1),contact_id:identifier(91)}, {...conversation(2),unread:false,unread_count:0,contact_id:identifier(92)}];
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages')){
+      const n=Number(url.pathname.split('/').at(-2).slice(-2));
+      return history(identifier(n),[],{conversation:rows[n-1]});
+    }
+    if(url.pathname.endsWith('/family'))return preparedFamily(url.pathname.includes(identifier(2))?2:1);
+  },{conversations:rows});
+  dockFamily(ui);await ui.app.enter();
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length,0);
+  ui.$('#chat-details').click();await flush();ui.$('#chat-details-pin').click();
+  ui.$(`.chat-row[data-id="${identifier(2)}"] .chat-select`).click();await flush();
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length,1);
+  assert.doesNotMatch(ui.$('#chat-details-dialog').textContent,/Child 1/);
+  const open=ui.$('#chat-details-student button');assert.equal(open.textContent,'Открыть карточку клиента');
+  open.click();await flush();
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length,2);
+  assert.match(ui.$('#chat-details-student').textContent,/Child 2/);
+});
+
+test('pinned pending client reads ready card in parallel with a slow timeline', async t=>{
+  let release;
+  const rows=[{...conversation(1),contact_id:identifier(91)},{...conversation(2),contact_id:identifier(92)}];
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages')){
+      if(url.pathname.includes(identifier(2)))return new Promise(resolve=>{release=()=>resolve(history(identifier(2),[],{conversation:rows[1]}));});
+      return history(identifier(1),[],{conversation:rows[0]});
+    }
+    if(url.pathname.endsWith('/family'))return preparedFamily(url.pathname.includes(identifier(2))?2:1);
+  },{conversations:rows});
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();ui.$('#chat-details-pin').click();
+  ui.$(`.chat-row[data-id="${identifier(2)}"] .chat-select`).click();await flush();
+  assert.ok(release);assert.match(ui.$('#chat-details-student').textContent,/Child 2/);
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).at(-1).searchParams.get('auto'),'true');
+  release();await flush();
+});
+
+test('opening family for staff uses prepared GET data without per-source CRM mutations', async t=>{
+  const ui=setup(t,(url,options)=>{
+    assert.ok(!options?.method || options.method==='GET','Opening a card must not run browser-driven refresh POSTs');
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return {...preparedFamily(1),cache:{...preparedFamily(1).cache,refreshing:true}};
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.match(ui.$('#chat-details-student').textContent,/Child 1/);
+  assert.match(ui.$('#chat-details-sync').textContent,/обновляем на сервере/);
+});

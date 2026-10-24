@@ -63,6 +63,27 @@ class FamilyBalanceTests(unittest.TestCase):
             return {'items':items,'total':len(items),'page':body['page']}
         return type('Client',(),{'call':staticmethod(call)})(),calls
 
+    def test_background_cache_reuses_tariff_metadata_but_reads_live_customer_money_each_time(self):
+        from center_messenger.family_cache import _TariffCache
+        client,calls = self.client()
+        original = client.call
+        observed = 0
+        def call(path,body):
+            nonlocal observed
+            data = original(path,body)
+            if path.endswith('/customer/index'):
+                observed += 1
+                data['items'][0]['balance'] = str(observed*100)
+            return data
+        client.call = call
+        cached = _TariffCache(client,{},('workspace','connection',1))
+        first = fetch_family_card(cached,1,7,source_customer={'id':7,'branch_id':1})
+        second = fetch_family_card(cached,1,7,source_customer={'id':7,'branch_id':1})
+        self.assertEqual(first['balance'],Decimal('100'))
+        self.assertEqual(second['balance'],Decimal('200'))
+        self.assertEqual(len([path for path,_ in calls if path.endswith('/tariff/index')]),1)
+        self.assertEqual(len([path for path,_ in calls if path.endswith('/customer/index')]),2)
+
     def test_refresh_reads_customer_total_instead_of_stale_snapshot_or_tariff_sum(self):
         client,calls=self.client()
         facts=fetch_family_card(client,1,7,source_customer={'id':'7','branch_id':'1','balance':'50','paid_lesson_count':99},today=date(2026,10,24))

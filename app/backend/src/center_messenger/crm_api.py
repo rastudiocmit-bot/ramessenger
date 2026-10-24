@@ -14,6 +14,7 @@ from center_messenger.alfa_family import fetch_family_card, group_facts, custome
 from center_messenger.alfa_sync import SyncOptions
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_directory import normalized_name, phone_number
+from center_messenger.family_cache import enqueue, cache_status
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}/directory")
 STATUS = {3: "client", 2: "lead", 1: "archive"}
@@ -393,7 +394,7 @@ class DirectoryReader:
                         )
                     card["needs_refresh"] = source is None or source["refreshed_at"] < datetime.now(
                         UTC
-                    ) - timedelta(minutes=15)
+                    ) - timedelta(minutes=30)
             for row in members:
                 person = people.get(str(row["student_id"]))
                 group = {
@@ -432,12 +433,34 @@ class DirectoryReader:
                 "max_connected": bool(contact["max_connected"]),
                 "max_bot_connected": bool(contact["max_bot_connected"]),
                 "students": list(people.values()),
+                "cache": cache_status(db, workspace, snapshot["connection_id"], list(people.values()), contact_id, snapshot["version"]),
                 "snapshot_at": snapshot["finished_at"].isoformat()
                 if snapshot["finished_at"]
                 else None,
                 "today": snapshot["today"].isoformat(),
                 "has_more": len(cards) > 1000 or len(members) == 5000,
             }
+
+    def prepare(self, actor, workspace, contact_id, *, conversation, auto=False, force=False, cached_only=False):
+        # An ordinary chat selection must not prepare a read client's full card.
+        # Both cache hits and requests retain the same chat membership checks.
+        from center_messenger.chat_queue import state
+        with self.connections.chat_transaction(actor, workspace) as db:
+            linked = db.execute(text("SELECT 1 FROM conversations WHERE workspace_id=:w AND id=:c "
+                "AND contact_id=:contact AND kind='direct'"),
+                {"w": workspace, "c": conversation, "contact": contact_id}).scalar_one_or_none()
+            if not linked:
+                raise AuthError(404, "Контакт недоступен в этом диалоге.")
+            if auto and not state(db, workspace, conversation)["needs_reply"]:
+                return {"deferred": True}
+            if force:
+                self.connections.accounts._workspace(db, actor, workspace, manage=True)
+            snapshot = self._published(db, workspace)
+            if snapshot is None:
+                raise AuthError(404, "Контакт недоступен.")
+            if not cached_only:
+                enqueue(db, workspace, snapshot, contact=contact_id, force=force)
+        return self.detail(actor, workspace, contact_id, conversation=conversation)
 
     def refresh_card(self, actor, workspace, contact_id, student_id, branch_id, customer_id):
         """Refresh one source card without holding a transaction over network IO."""
