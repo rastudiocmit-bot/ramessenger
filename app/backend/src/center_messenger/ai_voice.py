@@ -215,7 +215,7 @@ class AiVoice:
             self.accounts._workspace(db, actor, workspace, manage=True)
             db.execute(text(
                 "UPDATE ai_settings SET status=:s,last_error_code=:e,"
-                "verified_at=CASE WHEN :e IS NULL THEN now() ELSE verified_at END WHERE workspace_id=:w"
+                "verified_at=CASE WHEN CAST(:e AS text) IS NULL THEN now() ELSE verified_at END WHERE workspace_id=:w"
             ), {"w": workspace, "s": "error" if error else "active", "e": error})
             db.execute(text(
                 "INSERT INTO ai_usage(workspace_id,id,user_id,kind,audio_seconds,input_tokens,output_tokens,"
