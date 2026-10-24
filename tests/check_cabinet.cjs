@@ -36,8 +36,8 @@ const { fixture } = require('./browser_fixture.cjs');
       await page.locator('#messages-tab').click(); await page.waitForSelector('.chat-bubble');
       assert.equal(await page.locator('.chat-bubble').count(), 4);
       await page.locator('#chat-search-toggle').click(); assert.equal(await page.locator('#chat-search').isVisible(), true);
-      await page.locator('#chat-filters-open').click(); assert.equal(await page.locator('#chat-branch option').count(), 3);
-      await page.locator('[data-close="chat-filters-dialog"]').click();
+      // Chat filters moved to Profile: nothing next to search opens settings any more.
+      assert.equal(await page.locator('#chat-search-wrap button').count(), 0);
       await page.locator('#chat-person-open').click(); await page.waitForFunction(() => document.querySelector('#chat-details-name').textContent === 'Анна Смирнова');
       await page.locator('[data-close="chat-details-dialog"]').click();
       // A closed client card must leave nothing on screen (it once stayed visible under the list).
@@ -83,9 +83,14 @@ const { fixture } = require('./browser_fixture.cjs');
       }
       await page.locator('#overview-tab').click(); await page.waitForFunction(() => document.querySelector('#organization-branch-count').textContent === '2'); await save('installed-organization');
       await page.locator('#security-tab').click(); await page.waitForSelector('#sessions-list .session-row'); await save('installed-security');
-      await page.locator('#profile-tab').click(); await page.locator('#profile-sound').check(); await page.locator('#profile-preview').uncheck();
+      await page.locator('#profile-tab').click(); await page.locator('#profile-sound').check();
       assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('cm-sound')).enabled), true);
-      assert.equal(await page.evaluate(() => localStorage.getItem('cm-notification-preview')), 'false'); await save('installed-light-profile');
+      assert.equal(await page.locator('#pane-profile #chat-branch option').count(), 3, 'Branch filter lives in Profile');
+      await page.locator('#chat-branch').selectOption('2'); await page.locator('#messages-tab').click();
+      await page.waitForFunction(() => !document.querySelector('#chat-filter-chip').hidden && /Северный/.test(document.querySelector('#chat-filter-chip').textContent));
+      assert.ok(data.calls.some(c => c.path.endsWith('/chats') && c.query.includes('branch=2')), 'Profile filter applies to the chat list');
+      await page.locator('#chat-filter-chip').click(); await page.waitForFunction(() => document.querySelector('#chat-filter-chip').hidden && !document.querySelector('#chat-branch').value);
+      await page.locator('#profile-tab').click(); await save('installed-light-profile');
       if (!admin) {
         await page.locator('#profile-connections').click(); await page.waitForSelector('#channel-info-dialog .split');
         await page.locator('[data-close="channel-info-dialog"]').click();

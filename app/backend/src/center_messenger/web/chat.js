@@ -540,6 +540,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const branches = context.branches || [];
       $("#chat-branch").replaceChildren(new Option("Все филиалы", ""), ...branches.map(b => new Option(b.name, b.id)));
       if (branches.some(b => String(b.id) === old)) $("#chat-branch").value = old;
+      renderFilterChip();
       await loadList();
       if (selected && !currentItem()) await select(selected, false);
     } catch (error) { if (valid(epoch, gen)) fail(error); }
@@ -622,7 +623,21 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-stream").addEventListener("wheel", event => { if (event.deltaY < 0 && $("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
   window.addEventListener("resize", () => requestAnimationFrame(() => { resizeCompose(); maybeFillHistory(); }));
   $("#chat-history-more").addEventListener("click", () => loadOlder({ retry: true }));
+  // Filters are set in Profile; while one is on, a chip next to the views says so and clears it.
+  function renderFilterChip() {
+    const picked = [["chat-branch", ""], ["chat-channel", ""]].map(([id]) => $(`#${id}`)).filter(select => select.value).map(select => select.selectedOptions[0]?.textContent || "");
+    const status = $("#chat-status");
+    if (status.value && status.value !== "lead") picked.push(status.selectedOptions[0]?.textContent || "");
+    const chip = $("#chat-filter-chip"); show(chip, picked.length > 0);
+    chip.textContent = picked.length ? `Фильтр: ${picked.join(" · ")} ✕` : "";
+  }
+  $("#chat-filter-chip").addEventListener("click", () => {
+    $("#chat-branch").value = ""; $("#chat-channel").value = "";
+    if ($("#chat-status").value !== "lead") $("#chat-status").value = "";
+    filtersChanged();
+  });
   function filtersChanged() {
+    renderFilterChip();
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
     selected = null; historyBusy = false; listLoading = false; listRetryRequired = false; hasMore = false; page = 0;
     updateListLoader();
@@ -630,6 +645,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-layout").classList.remove("has-selection"); $("#chat-input").value = "";
     $("#chat-history").replaceChildren(); show($("#chat-stream"), false); show($("#chat-compose"), false); show($("#chat-blank"));
     $("#chat-person").replaceChildren(node("strong", "Выберите диалог"));
+    if (detailsDialog.open) detailsDialog.close();
     loadList().catch(error => fail(error));
   }
   $("#chat-search").addEventListener("input", () => { clearTimeout(searchTimer); listSeq += 1; searchTimer = setTimeout(filtersChanged, 250); });
@@ -744,6 +760,17 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   const firstName = name => { const parts = (name || "").trim().split(/\s+/); return parts.length >= 2 ? parts[1] : parts[0] || "Ребёнок"; };
   const part = (title, ...children) => el("section", "family-part", node("h4", title, "family-label"), ...children);
   function fact(label, ...value) { return el("div", "family-fact", node("dt", label), el("dd", undefined, ...value)); }
+  // The child who actually attends comes first and opens by default: a lesson ahead
+  // outranks an active subscription or group, which outrank a lead with neither.
+  function attendance(student) {
+    const groups = student.groups || [];
+    if (groups.some(group => group.next_lesson?.date)) return 3;
+    if (activeSubscriptions(student.cards || []).length) return 2;
+    if (groups.length) return 1;
+    return 0;
+  }
+  const orderStudents = list => list.map((student, index) => ({ student, index, rank: attendance(student) }))
+    .sort((a, b) => b.rank - a.rank || a.index - b.index).map(item => item.student);
   function familyStatus() {
     const all = (family.students || []).flatMap(student => (student.cards || []).map(card => card.status));
     return ["client", "lead", "archive"].filter(status => all.includes(status));
@@ -762,7 +789,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     for (const phone of family.phones || []) contact.append(contactRow("phone", phone));
     for (const email of family.emails || []) contact.append(contactRow("email", email));
     if (!contact.childNodes.length) contact.append(node("p", "Телефон и почта в CRM не указаны.", "family-empty"));
-    const students = family.students || [];
+    const students = orderStudents(family.students || []);
     const synced = family.snapshot_at ? new Date(family.snapshot_at) : null;
     const selected = students.find(student => student.id === familySelected) || students[0];
     const times = (selected?.cards || []).map(card => card.refreshed_at).filter(Boolean).sort();
@@ -1142,7 +1169,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }
       if (latest) {
         notifyTarget = latest.id;
-        const marker = $("#chat-new-marker"); marker.textContent = previewEnabled ? `Новое: ${latest.name}${latest.preview ? ": " + latest.preview : ""}` : "Новое сообщение"; marker.title = previewEnabled ? `Открыть новое сообщение: ${latest.name}` : "Открыть новое сообщение"; show(marker);
+        // No pop-up banner for new messages: the list, the counters and the sound are enough.
         // Coordinate two open chat windows without storing message content or IDs.
         if (navigator.locks) navigator.locks.request("cm-message-sound", { ifAvailable: true }, async lock => { if (lock) { playTone(latest.status); await new Promise(resolve => setTimeout(resolve, 1000)); } }).catch(() => {});
         else playTone(latest.status);

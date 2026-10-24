@@ -892,11 +892,11 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-kids-block{padding-top:12px}
 .family-kids{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin:0 -14px;padding:0 14px 2px}
 .family-kids::-webkit-scrollbar{display:none}
-.family-kid{flex:none;height:30px;padding:0 12px;border-radius:999px;border:1px solid var(--line);background:var(--surface);
-  font-size:12.5px;font-weight:600;color:var(--muted);white-space:nowrap;transition:background .15s,border-color .15s,color .15s}
-.family-kid:hover{border-color:var(--primary);color:var(--ink)}
-.family-kid small{font-weight:500;color:var(--faint);margin-left:5px}
-.family-kid[aria-pressed="true"]{border-color:transparent;background:var(--primary);color:var(--on-primary)}
+.family-kid{flex:none;height:35px;padding:0 15px;border-radius:999px;border:1px solid var(--line);background:var(--surface);
+  font-size:14.5px;font-weight:600;color:var(--ink);white-space:nowrap;transition:background .15s,border-color .15s,color .15s}
+.family-kid:hover{border-color:var(--chip-on)}
+.family-kid small{font-size:12.5px;font-weight:500;color:var(--muted);margin-left:6px}
+.family-kid[aria-pressed="true"]{border-color:transparent;background:var(--chip-on);color:#fff;box-shadow:0 3px 9px rgba(37,116,173,.28)}
 .family-kid[aria-pressed="true"] small{color:inherit;opacity:.8}
 
 .family-student{padding-top:12px}
@@ -1005,7 +1005,18 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* Every child stays in view: the switcher wraps onto more lines instead of scrolling
    sideways, where a mouse could not reach the hidden names. */
 .family-kids-block:not([hidden]){display:flex;align-items:flex-start;gap:10px}
-.family-kids-block .family-label{margin:0;flex:none;height:30px}
+.family-kids-block .family-label{margin:0;flex:none;height:35px}
 .family-kids-block .family-kids{flex:1;min-width:0;flex-wrap:wrap;overflow:visible;margin:0;padding:0}
 .family-kid{max-width:100%;overflow:hidden;text-overflow:ellipsis}
 @media (pointer:coarse){.family-kids-block .family-label{height:36px}}
+
+/* Search: the wrapper draws the one focus ring; the field itself stays flat. */
+#chat-search-wrap input,#chat-search-wrap input:focus{border:0;outline:none;box-shadow:none;background:none;border-radius:0}
+/* Chat filters now live in Profile, as selects under their item titles. */
+.pane-prof .profile-chats select{display:block;width:100%;margin-top:8px;min-height:36px;padding:6px 9px}
+.chip.chip-filter{background:var(--amber-tint);color:var(--amber-ink);border-color:transparent;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;line-height:32px}
+.chip.chip-filter[hidden]{display:none}
+@container app (min-width:720px){
+  .pane-prof .profile-chats .item-main:has(> select){display:grid;grid-template-columns:minmax(0,1fr) minmax(200px,320px);column-gap:16px;align-items:center}
+  .pane-prof .profile-chats .item-main select{grid-column:2;grid-row:1 / span 2;margin-top:0}
+}
