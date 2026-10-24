@@ -60,7 +60,7 @@ const root = path.join(__dirname, "../app/backend/src/center_messenger/web");
     });
     await page.goto("https://synthetic.example.test/");
     await page.locator("#connections-tab").click();
-    await page.waitForFunction(() => window.progressTest.aborts === 1 && document.querySelector("#alfa-max-progress-detail").textContent.includes("82770"));
+    await page.waitForFunction(() => window.progressTest.aborts === 1 && document.querySelector('[data-metric="messages"] strong')?.dataset.count === "82770");
     const result = await page.evaluate(() => ({ ...window.progressTest,
       recovered: !document.querySelector("#alfa-max-progress").classList.contains("is-offline"),
       stream: document.querySelector("#alfa-max-progress-streams").textContent }));

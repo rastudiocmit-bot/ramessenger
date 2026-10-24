@@ -58,7 +58,7 @@ ERRORS = {
     "history_incomplete": "В AlfaCRM записей больше, чем сохранено в базе. Повторно проверяем всю историю.",
     "history_gap": "После повторного обхода число записей не совпало. Проверка архива приостановлена на 6 часов; новые сообщения продолжают поступать. Для повтора нажмите «Синхронизировать историю».",
     "history_projection": "Не все прочитанные ID сообщений сохранены. Страница будет проверена повторно; позиция обхода не изменена.",
-    "settings_changed": "Настройки AlfaCRM изменились. Подключите веб-сессию заново.",
+    "settings_changed": "Настройки изменились во время чтения. Сервис повторит текущий проход автоматически.",
     "internal": "Не удалось обновить историю AlfaCRM MAX. Повторите позже.",
 }
 
@@ -223,13 +223,13 @@ class AlfaMaxConnections:
                     "last_sync_at": None,
                 }
             cursor = dict(row["history_cursor"] or {})
-            running = db.execute(
+            queue = db.execute(
                 text(
-                    "SELECT 1 FROM alfa_max_sync_queue WHERE workspace_id=:w "
-                    "AND lease_owner IS NOT NULL AND lease_until>clock_timestamp() LIMIT 1"
+                    "SELECT due_at,lease_until,lease_owner IS NOT NULL AND lease_until>clock_timestamp() AS running "
+                    "FROM alfa_max_sync_queue WHERE workspace_id=:w AND connection_id=:c"
                 ),
-                {"w": workspace},
-            ).scalar_one_or_none()
+                {"w": workspace, "c": row["connection_id"]},
+            ).mappings().one_or_none()
             counts = db.execute(
                 text(
                     "SELECT count(DISTINCT c.id) FILTER(WHERE " + visible_message() + ") AS conversations,"
@@ -242,17 +242,23 @@ class AlfaMaxConnections:
                 ),
                 {"w": workspace, "c": row["connection_id"]},
             ).mappings().one()
-            branches = db.execute(text(
-                "SELECT external_id FROM alfa_branches WHERE workspace_id=:w "
+            branch_rows = db.execute(text(
+                "SELECT external_id,name FROM alfa_branches WHERE workspace_id=:w "
                 "AND connection_id=:c AND available ORDER BY external_id"
-            ), {"w": workspace, "c": row["crm_connection_id"]}).scalars().all()
-            coverage = history_coverage(db, workspace, row["connection_id"], cursor, branches)
+            ), {"w": workspace, "c": row["crm_connection_id"]}).mappings().all()
+            names = {str(b["external_id"]): b["name"] for b in branch_rows}
+            coverage = history_coverage(db, workspace, row["connection_id"], cursor, [b["external_id"] for b in branch_rows])
             for stream in coverage["streams"]:
-                stream["error"] = ERRORS.get(stream.pop("error_code"))
+                stream["branch_name"] = names[stream["branch_id"]]
+                stream["error"] = ERRORS.get(stream["error_code"])
             return {
                 "configured": True,
-                "state": row["state"],
-                "syncing": running is not None,
+                "state": self.public(row)["state"],
+                "syncing": bool(queue and queue["running"]),
+                "scheduled": queue is not None,
+                "next_attempt_at": queue["due_at"] if queue else None,
+                "lease_expires_at": queue["lease_until"] if queue and queue["running"] else None,
+                "worker": cursor.get("activity"),
                 "messages": counts["messages"],
                 "stored_messages": counts["stored_messages"],
                 "conversations": counts["conversations"],
@@ -261,6 +267,7 @@ class AlfaMaxConnections:
                 "oldest_at": counts["oldest_at"],
                 "newest_at": counts["newest_at"],
                 "error": ERRORS.get(row["last_error_code"]),
+                "error_code": row["last_error_code"],
                 **coverage,
             }
 
@@ -445,10 +452,13 @@ class AlfaMaxConnections:
     def _schedule(db, workspace, connection, delay=0):
         db.execute(
             text(
-                "INSERT INTO alfa_max_sync_queue(workspace_id,connection_id,due_at) "
+                "INSERT INTO alfa_max_sync_queue AS q(workspace_id,connection_id,due_at) "
                 "VALUES (:w,:c,now()+(:delay*interval '1 second')) ON CONFLICT(workspace_id) "
-                "DO UPDATE SET connection_id=EXCLUDED.connection_id,due_at=EXCLUDED.due_at,"
-                "lease_owner=NULL,lease_until='-infinity'"
+                "DO UPDATE SET connection_id=EXCLUDED.connection_id,due_at=least(q.due_at,EXCLUDED.due_at),"
+                "lease_owner=CASE WHEN q.connection_id=EXCLUDED.connection_id AND q.lease_until>clock_timestamp() "
+                "THEN q.lease_owner ELSE NULL END,"
+                "lease_until=CASE WHEN q.connection_id=EXCLUDED.connection_id AND q.lease_until>clock_timestamp() "
+                "THEN q.lease_until ELSE '-infinity' END"
             ),
             {"w": workspace, "c": connection, "delay": delay},
         )
@@ -456,8 +466,14 @@ class AlfaMaxConnections:
     def sync(self, actor, workspace):
         with self._transaction(actor, workspace, lock=True) as db:
             row = self._row(db, workspace)
-            if row is None or row["state"] != "active":
+            if row is None or row["state"] != "active" or row["session_ciphertext"] is None or row["current_crm_connection_id"] is None:
                 raise AuthError(409, "Сначала подключите веб-сессию AlfaCRM MAX.")
+            running = db.execute(text(
+                "SELECT 1 FROM alfa_max_sync_queue WHERE workspace_id=:w AND connection_id=:c "
+                "AND lease_owner IS NOT NULL AND lease_until>clock_timestamp() FOR UPDATE"
+            ), {"w": workspace, "c": row["connection_id"]}).scalar_one_or_none()
+            if running:
+                return {"queued": True, "already_running": True}
             cursor = retry_history(row["history_cursor"] or {})
             db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) "
                             "WHERE workspace_id=:w"), {"w": workspace, "cursor": json.dumps(cursor)})
@@ -469,7 +485,7 @@ class AlfaMaxConnections:
                 workspace_id=workspace,
                 subject_id=row["connection_id"],
             )
-        return {"queued": True}
+        return {"queued": True, "already_running": False}
 
     def disconnect(self, actor, workspace):
         with self._transaction(actor, workspace, lock=True) as db:
@@ -1092,7 +1108,15 @@ class AlfaMaxWorker:
             {"w": workspace, "c": connection, "lease": lease, "delay": delay},
         )
 
-    def _heartbeat(self, workspace, connection, lease):
+    @staticmethod
+    def _activity(db, workspace, connection, value):
+        value = dict(value, updated_at=datetime.now(UTC).isoformat())
+        db.execute(text(
+            "UPDATE alfa_max_settings SET history_cursor=jsonb_set(history_cursor,'{activity}',CAST(:value AS jsonb)) "
+            "WHERE workspace_id=:w AND connection_id=:c"
+        ), {"w": workspace, "c": connection, "value": json.dumps(value)})
+
+    def _heartbeat(self, workspace, connection, lease, activity=None):
         # Many branches/pages can take longer than one lease. Renew between
         # browser navigations without keeping a database transaction open.
         with self._transaction(workspace, connection, lease) as db:
@@ -1101,6 +1125,8 @@ class AlfaMaxWorker:
                      "WHERE workspace_id=:w AND connection_id=:c AND lease_owner=:lease"),
                 {"w": workspace, "c": connection, "lease": lease},
             )
+            if activity is not None:
+                self._activity(db, workspace, connection, activity)
 
     def run_next(self):
         import time
@@ -1112,6 +1138,7 @@ class AlfaMaxWorker:
         delay, code = 90, None
         phase = "load_settings"
         sync_start = time.monotonic()
+        activity = {"started_at": datetime.now(UTC).isoformat(), "phase": "repair"}
         try:
             with self._transaction(workspace, connection, lease) as db:
                 row = self.service._row(db, workspace)
@@ -1128,6 +1155,7 @@ class AlfaMaxWorker:
                 phase = "repair_saved_history"
                 repair_cursor = dict(row["history_cursor"] or {})
                 if repair_batch(self.service, db, workspace, connection, repair_cursor):
+                    repair_cursor["activity"] = activity | {"updated_at": datetime.now(UTC).isoformat()}
                     db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) "
                                     "WHERE workspace_id=:w"), {"w": workspace, "cursor": json.dumps(repair_cursor)})
                     row = dict(row) | {"history_cursor": repair_cursor}
@@ -1161,10 +1189,22 @@ class AlfaMaxWorker:
                 cursor, requests = plan_history(original_cursor, branches)
                 origin = row["crm_origin"]
                 settings_version = row["version"]
+                activity.update(phase="reading", completed_pages=0, total_pages=len(requests))
+                self._activity(db, workspace, connection, activity)
             if not branches:
                 raise AlfaBrowserError("settings_changed")
             phase = "read_history"
-            heartbeat = lambda: self._heartbeat(workspace, connection, lease)
+            read_step = 0
+            def heartbeat():
+                nonlocal read_step
+                current_activity = activity | {"completed_pages": min(read_step, len(requests))}
+                if read_step < len(requests):
+                    branch, direction, page = requests[read_step]
+                    current_activity.update(branch_id=str(branch), direction=direction, page=page)
+                else:
+                    current_activity["phase"] = "saving"
+                self._heartbeat(workspace, connection, lease, current_activity)
+                read_step += 1
             results, session = self.service.browser.read_histories(
                 origin, session, requests, on_progress=heartbeat, continue_on_error=True
             )
@@ -1183,7 +1223,8 @@ class AlfaMaxWorker:
                     or current["state"] != "active"
                     or current["session_ciphertext"] is None
                     or current["version"] != settings_version
-                    or dict(current["history_cursor"] or {}) != original_cursor
+                    or {k: v for k, v in (current["history_cursor"] or {}).items() if k != "activity"}
+                       != {k: v for k, v in original_cursor.items() if k != "activity"}
                 ):
                     raise AlfaBrowserError("settings_changed")
                 for branch, records in updates:
@@ -1216,6 +1257,8 @@ class AlfaMaxWorker:
                 page_error = next((result["error"] for result in results if result.get("error")), None)
                 status_error = page_error or next((cursor.get(f"error:{key}") for key in cursor["streams"]
                                                    if cursor.get(f"error:{key}")), None)
+                cursor["activity"] = activity | {"phase": "waiting", "completed_pages": len(requests),
+                                                 "updated_at": datetime.now(UTC).isoformat()}
                 db.execute(
                     text(
                         "UPDATE alfa_max_settings SET session_ciphertext=:session,"
@@ -1248,6 +1291,7 @@ class AlfaMaxWorker:
             )
             try:
                 with self._transaction(workspace, connection, lease) as db:
+                    self._activity(db, workspace, connection, activity | {"phase": "error", "error_code": code})
                     if code == "reauth_required":
                         db.execute(
                             text(
@@ -1280,6 +1324,7 @@ class AlfaMaxWorker:
             code, delay = "internal", 120
             try:
                 with self._transaction(workspace, connection, lease) as db:
+                    self._activity(db, workspace, connection, activity | {"phase": "error", "error_code": code})
                     db.execute(
                         text(
                             "UPDATE alfa_max_settings SET last_error_code=:code,updated_at=now() "

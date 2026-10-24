@@ -406,7 +406,8 @@ class MessageSyncTests(unittest.TestCase):
                              "ON CONFLICT(workspace_id) DO UPDATE SET due_at='-infinity',lease_until='-infinity',lease_owner=NULL"),
                         {"w": self.workspace, "c": self.channel})
         self.service._row = Mock(side_effect=lambda db, w: db.execute(
-            text("SELECT *, 'https://test.s20.online' AS crm_origin FROM alfa_max_settings WHERE workspace_id=:w"),
+            text("SELECT *, 'https://test.s20.online' AS crm_origin,crm_connection_id AS current_crm_connection_id,"
+                 "'Test' AS name FROM alfa_max_settings WHERE workspace_id=:w"),
             {"w": w}).mappings().one())
         self.service.sms_templates = Mock()
         self.service.vault.seal_browser_state.return_value = "new-session"
@@ -678,6 +679,81 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(report["conversations"], 1)
         self.assertEqual(report["oldest_at"], self.at)
 
+    def test_manual_sync_does_not_cancel_an_active_worker_or_rewind_its_cursor(self):
+        lease = uuid4()
+        cursor = {"projection_version": PROJECTION_VERSION, "streams": ["1:receive"],
+                  "1:receive": 12, "paused:1:receive": (datetime.now(UTC)+RECHECK_INTERVAL).isoformat()}
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) WHERE workspace_id=:w"),
+                        {"w": self.workspace, "cursor": json.dumps(cursor)})
+        self.db.execute(text("INSERT INTO alfa_max_sync_queue(workspace_id,connection_id,lease_owner,lease_until) "
+                             "VALUES (:w,:c,:lease,clock_timestamp()+interval '1 minute')"),
+                        {"w": self.workspace, "c": self.channel, "lease": lease})
+        result = self.service.sync(SimpleNamespace(user_id=self.user), self.workspace)
+        self.assertTrue(result["already_running"])
+        saved = self.db.execute(text("SELECT lease_owner FROM alfa_max_sync_queue WHERE workspace_id=:w"), {"w": self.workspace}).scalar_one()
+        self.assertEqual(saved, lease)
+        self.assertEqual(self.db.execute(text("SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar_one(), cursor)
+
+    def test_unchanged_directory_snapshot_does_not_restart_saved_history_repair(self):
+        self.project(self.row())
+        for n in range(25):
+            self.add_customer(uuid4(), 1, 100+n)
+        cursor = {}
+        repair_batch(self.service, self.db, self.workspace, self.channel, cursor)
+        self.assertEqual(cursor["client_repair"]["processed"], 20)
+        next_run = uuid4()
+        self.db.execute(text("INSERT INTO alfa_sync_runs(workspace_id,id,connection_id,settings_version,requested_by,state) "
+                             "VALUES (:w,:r,:c,1,:u,'succeeded')"), {"w": self.workspace, "r": next_run, "c": self.crm, "u": self.user})
+        self.db.execute(text("INSERT INTO alfa_customers(workspace_id,run_id,branch_id,external_id,name,status,contact_id) "
+                             "SELECT workspace_id,:next,branch_id,external_id,name,status,contact_id FROM alfa_customers "
+                             "WHERE workspace_id=:w AND run_id=:old"), {"w": self.workspace, "old": self.run, "next": next_run})
+        self.snapshot["run"] = next_run
+        repair_batch(self.service, self.db, self.workspace, self.channel, cursor)
+        self.assertEqual(cursor["client_repair"]["processed"], 26)
+        self.assertTrue(cursor["client_repair"]["complete"])
+
+    def test_changed_customer_mapping_restarts_repair_and_updates_its_total(self):
+        self.project(self.row())
+        cursor = {}
+        repair_batch(self.service, self.db, self.workspace, self.channel, cursor)
+        original = cursor["client_repair"]["mapping"]
+        self.add_customer(uuid4(), 1, 99)
+        self.assertTrue(repair_batch(self.service, self.db, self.workspace, self.channel, cursor))
+        self.assertNotEqual(cursor["client_repair"]["mapping"], original)
+        self.assertEqual(cursor["client_repair"]["processed"], 2)
+        self.assertEqual(cursor["client_repair"]["total"], 2)
+
+    def test_rescheduling_preserves_a_live_lease_for_the_same_connection(self):
+        lease = uuid4()
+        self.db.execute(text("INSERT INTO alfa_max_sync_queue(workspace_id,connection_id,lease_owner,lease_until) "
+                             "VALUES (:w,:c,:lease,clock_timestamp()+interval '1 minute')"),
+                        {"w": self.workspace, "c": self.channel, "lease": lease})
+        self.service._schedule(self.db, self.workspace, self.channel)
+        self.assertEqual(self.db.execute(text("SELECT lease_owner FROM alfa_max_sync_queue WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar_one(), lease)
+
+    def test_missing_crm_credentials_are_not_reported_as_an_active_loader(self):
+        self.db.execute(text("UPDATE alfa_settings SET secret_ciphertext=NULL WHERE workspace_id=:w"), {"w": self.workspace})
+        self.assertEqual(self.service.progress(None, self.workspace)["state"], "reauth_required")
+        with self.assertRaises(AuthError) as error:
+            self.service.sync(SimpleNamespace(user_id=self.user), self.workspace)
+        self.assertEqual(error.exception.status, 409)
+
+    def test_page_heartbeat_exposes_movement_before_source_rows_are_saved(self):
+        reports = []
+        def read(origin, session, requests, **kwargs):
+            for request in requests:
+                kwargs["on_progress"]()
+                reports.append(self.service.progress(None, self.workspace)["worker"])
+            return ([{"messages": [], "has_more": True} for request in requests], {})
+        cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 4}, browser_effect=read)
+        self.assertTrue(all(report["phase"] == "reading" for report in reports))
+        self.assertEqual([report["completed_pages"] for report in reports], list(range(len(reports))))
+        self.assertEqual(reports[1]["page"], 4)
+        self.assertEqual(cursor["activity"]["phase"], "waiting")
+        self.assertEqual(cursor["activity"]["completed_pages"], len(reports))
+
     def test_chat_context_is_safe_metadata_for_message_members(self):
         self.membership["role"] = "operator"
         self.membership["sections"] = ["messages"]
@@ -782,6 +858,7 @@ class MessageSyncTests(unittest.TestCase):
             return ([{"messages": [self.row()], "has_more": False} for _ in requests], {})
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION}, browser_effect=changed_settings)
         self.assertTrue(cursor.pop("client_repair")["complete"])
+        cursor.pop("activity", None)
         self.assertEqual(cursor, {"projection_version": PROJECTION_VERSION})
         self.assertEqual(self.messages(), [])
 

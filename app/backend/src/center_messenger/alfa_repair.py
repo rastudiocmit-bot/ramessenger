@@ -2,7 +2,7 @@
 
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid5
 
 from sqlalchemy import text
@@ -150,8 +150,24 @@ def repair_batch(service, db, workspace, channel, cursor):
         return False
     previous = cursor.get("client_repair", {})
     run = str(snapshot["run"])
-    if previous.get("version") == REPAIR_VERSION and previous.get("run") == run:
+    # A refreshed CRM snapshot gets a new run UUID even when all identities
+    # are unchanged. Resume by identity evidence so refreshes cannot starve
+    # a long repair by resetting its checkpoint every thirty minutes.
+    mapping = db.execute(text(
+        "SELECT md5(coalesce(string_agg(jsonb_build_array(a.branch_id,a.external_id,a.contact_id,"
+        "b.available)::text,',' ORDER BY a.branch_id,a.external_id),'')) AS fingerprint,"
+        "count(DISTINCT a.contact_id) AS total FROM alfa_customers a LEFT JOIN alfa_branches b "
+        "ON b.workspace_id=a.workspace_id AND b.connection_id=:crm AND b.external_id=a.branch_id "
+        "WHERE a.workspace_id=:w AND a.run_id=:r"
+    ), {"w": workspace, "r": snapshot["run"], "crm": snapshot["connection_id"]}).mappings().one()
+    same_mapping = previous.get("version") == REPAIR_VERSION and (
+        previous.get("mapping") == mapping["fingerprint"]
+        or previous.get("run") == run and not previous.get("mapping"))
+    if same_mapping:
         if previous.get("complete"):
+            if previous.get("run") != run or previous.get("mapping") != mapping["fingerprint"]:
+                cursor["client_repair"] = previous | {"run": run, "mapping": mapping["fingerprint"]}
+                return True
             return False
         after, processed = previous.get("after"), previous.get("processed", 0)
     else:
@@ -162,7 +178,8 @@ def repair_batch(service, db, workspace, channel, cursor):
                             {"w": workspace, "c": channel}).scalar()
         if not exists:
             cursor["client_repair"] = {"version": REPAIR_VERSION, "run": run,
-                                       "processed": 0, "after": None, "complete": True}
+                                       "processed": 0, "total": 0, "after": None, "complete": True,
+                                       "mapping": mapping["fingerprint"], "updated_at": datetime.now(UTC).isoformat()}
             return True
     contacts = db.execute(text(
         "SELECT DISTINCT contact_id FROM alfa_customers WHERE workspace_id=:w AND run_id=:r "
@@ -224,7 +241,9 @@ def repair_batch(service, db, workspace, channel, cursor):
                                "crm_primary_branch": primary})})
             reconcile_messages(service, db, workspace, channel, canonical)
     cursor["client_repair"] = {"version": REPAIR_VERSION, "run": run, "processed": processed + len(contacts),
-                               "after": str(contacts[-1]) if contacts else after, "complete": not more}
+                               "after": str(contacts[-1]) if contacts else after, "complete": not more,
+                               "total": mapping["total"], "mapping": mapping["fingerprint"],
+                               "updated_at": datetime.now(UTC).isoformat()}
     if not more:
         branches = db.execute(text("SELECT external_id FROM alfa_branches WHERE workspace_id=:w "
                                    "AND connection_id=:crm AND available ORDER BY external_id"),
