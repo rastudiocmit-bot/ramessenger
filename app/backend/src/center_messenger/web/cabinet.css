@@ -201,7 +201,7 @@ input,textarea{font:inherit;color:inherit}
 
 /* ── Conversation on the wallpapered canvas ─────────────────────── */
 .canvas{flex:1;min-height:0;position:relative;overflow:hidden;
-  background-color:var(--wall);background-image:url(/assets/messenger-wallpaper.webp?v=1);
+  background-color:var(--wall);background-image:url(/assets/messenger-wallpaper.webp?v=2);
   background-size:cover;background-position:center}
 .canvas::before{content:"";position:absolute;inset:0;background:var(--veil);pointer-events:none;z-index:0}
 /* Messages scroll beneath the floating header; this band keeps that edge soft. */
@@ -525,7 +525,7 @@ input,textarea{font:inherit;color:inherit}
    on it as one rounded card, with the conversation beside them. */
 @container app (min-width:720px){
   .app{flex-direction:row;
-    background:linear-gradient(var(--veil),var(--veil)), url(/assets/messenger-wallpaper.webp?v=1) center/cover, var(--wall);
+    background:linear-gradient(var(--veil),var(--veil)), url(/assets/messenger-wallpaper.webp?v=2) center/cover, var(--wall);
     padding:calc(var(--sat) + 10px) max(10px,env(safe-area-inset-right,0px))
             calc(var(--sab) + 10px) max(10px,env(safe-area-inset-left,0px))}
   .panes{display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:0}
@@ -1045,7 +1045,7 @@ body:has(#cabinet[hidden]){overflow:auto}
    The chat wallpaper behind one floating card with the studio logo, large fields and
    one clear button; follows the light and dark themes. */
 #auth.auth-layout{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100dvh;padding:24px 16px calc(24px + env(safe-area-inset-bottom,0px));
-  background:linear-gradient(var(--veil),var(--veil)),url(/assets/messenger-wallpaper.webp?v=1) center/cover,var(--wall);
+  background:linear-gradient(var(--veil),var(--veil)),url(/assets/messenger-wallpaper.webp?v=2) center/cover,var(--wall);
   font-family:var(--ui);color:var(--ink);overflow:auto}
 #auth[hidden]{display:none}
 #auth .welcome{display:none}
