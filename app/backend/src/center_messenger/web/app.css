@@ -162,6 +162,8 @@ body:has(dialog[open]){overflow:hidden}
 .system-body{margin:6px 0 0;font-size:11px;font-weight:600;line-height:1.35;color:#6f857c;white-space:pre-wrap}
 .system-body[hidden]{display:none}
 .chat-history-loader{display:flex;flex-direction:column;align-items:center;gap:4px;color:#52685c;font-size:12px}.chat-history-loader button{font-size:12px;min-height:36px;padding:7px 12px}.chat-history-loader:has(button[hidden]):has(span[hidden]){display:none}
+.chat-stream{overflow-anchor:none}.chat-stream .chat-bubble{animation:none}
+.sync-progress.is-complete .sync-spinner{display:none}.sync-progress.is-complete .sync-progress-fill{width:100%;animation:none}
 .chat-bubble.has-tail.incoming{border-bottom-left-radius:4px;margin-left:9px}
 .chat-bubble.has-tail.outgoing{border-bottom-right-radius:4px;margin-right:9px}
 .chat-bubble.has-tail.incoming::before,.chat-bubble.has-tail.outgoing::before{content:"";position:absolute;bottom:0;width:11px;height:20px;background:inherit;pointer-events:none}

@@ -12,6 +12,7 @@ from sqlalchemy import text
 from center_messenger.accounts import audit
 from center_messenger.accounts_api import identity, service
 from center_messenger.alfa_max import ERRORS as ALFA_MAX_ERRORS
+from center_messenger.alfa_history import history_pending
 from center_messenger.auth_security import AuthError, InputModel
 from center_messenger.chat_store import changed
 from center_messenger.crm_api import DirectoryReader, search_query
@@ -205,15 +206,8 @@ class ChatReader:
     @staticmethod
     def _meta(row):
         cursor = row.get("crm_history_cursor") or {}
-        loading = (
-            row.get("channel_kind") == "alfa_max_browser"
-            and row.get("crm_history_state") == "active"
-            and (cursor.get("projection_version") != 2 or any(
-                isinstance(value, int) and not isinstance(value, bool) and value > 0
-                for key, value in cursor.items() if key.count(":") == 1
-                and key.split(":")[-1] in {"receive", "sent"}
-            ))
-        )
+        loading = (row.get("channel_kind") == "alfa_max_browser"
+                   and row.get("crm_history_state") == "active" and history_pending(cursor))
         return {
             "id": str(row["id"]),
             "connection_id": str(row["connection_id"]),
@@ -304,7 +298,8 @@ class ChatReader:
                 + "%",
             }
             where = "c.workspace_id=:w AND c.kind='direct' AND "
-            where += "(c.peer_user_id IS NOT NULL OR cn.kind='alfa_max_browser')"
+            where += ("(c.peer_user_id IS NOT NULL OR (cn.kind='alfa_max_browser' "
+                      "AND am.connection_id IS NOT NULL AND c.last_message_at IS NOT NULL))")
             if connection:
                 where += " AND c.connection_id=:connection"
             if view == "unread":
@@ -325,14 +320,9 @@ class ChatReader:
                 if branch or status:
                     where += " AND EXISTS (SELECT 1 FROM alfa_customers a WHERE " + scope + ")"
                 where += (
-                    " AND (cn.kind <> 'alfa_max_browser' OR (c.contact_id IS NOT NULL "
-                    "AND c.last_inbound_at IS NOT NULL AND am.crm_connection_id=:crm "
-                    "AND EXISTS(SELECT 1 FROM alfa_directory d WHERE "
-                    "d.workspace_id=c.workspace_id AND d.run_id=:run "
-                    "AND d.contact_id=c.contact_id)))"
+                    " AND (cn.kind <> 'alfa_max_browser' OR am.crm_connection_id=:crm)"
                 )
             else:
-                where += " AND cn.kind <> 'alfa_max_browser'"
                 if branch or status:
                     where += " AND false"
             if query.strip():
@@ -534,11 +524,14 @@ class ChatReader:
                              "AND m.id=:id"), params | {"id": before_id},
                     ).mappings().one_or_none()
                     if anchor is None:
-                        raise AuthError(422, "Указатель истории устарел. Откройте диалог заново.")
-                    params.update(before_time=anchor["occurred_at"], before_id=before_id,
-                                  before_order=anchor["source_order"])
-                    where += (" AND (m.occurred_at," + source_order() + ",m.id)"
-                              "<(:before_time,:before_order,:before_id)")
+                        # A background repair may move the boundary message to
+                        # its correct client. Restart with a consistent snapshot.
+                        reset = True
+                    else:
+                        params.update(before_time=anchor["occurred_at"], before_id=before_id,
+                                      before_order=anchor["source_order"])
+                        where += (" AND (m.occurred_at," + source_order() + ",m.id)"
+                                  "<(:before_time,:before_order,:before_id)")
                 where += " AND m.payload->>'superseded_by' IS NULL"
                 records = self._messages(
                     db, where, params, "ORDER BY " + message_order(descending=True) + " LIMIT 21"

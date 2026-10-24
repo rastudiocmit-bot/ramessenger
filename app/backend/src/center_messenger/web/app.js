@@ -542,16 +542,17 @@
     } catch (_) { stopAlfaMaxProgress(); return; }
     if (workspace.id !== state.workspace?.id) return;
     if (!payload.configured || payload.state !== "active") { stopAlfaMaxProgress(); show($("#alfa-max-progress"), false); return; }
-    if (payload.syncing) {
-      show($("#alfa-max-progress"));
-      const pages = Object.values(payload.cursor || {}).filter(v => typeof v === "number" && v > 0);
-      const maxPage = pages.length ? Math.max(...pages) : 0;
-      $("#alfa-max-progress-text").textContent = "Загружаем историю…";
-      $("#alfa-max-progress-detail").textContent = "Сообщений: " + payload.messages + " · Диалогов: " + payload.conversations + (maxPage ? " · Страница " + maxPage : "");
+    show($("#alfa-max-progress"));
+    const streams = payload.streams || [], done = streams.filter(s => s.complete && !s.missing_rows).length;
+    const issue = payload.error || streams.find(s => s.error)?.error;
+    $("#alfa-max-progress").classList.toggle("is-complete", Boolean(payload.history_complete && !issue));
+    $("#alfa-max-progress-text").textContent = issue ? "История загружена не полностью"
+      : payload.history_complete ? "Обход всей истории завершён" : "Загружаем историю за весь период…";
+    const period = payload.oldest_at ? " · С " + date(payload.oldest_at) + " по " + date(payload.newest_at) : "";
+    $("#alfa-max-progress-detail").textContent = "В базе сообщений: " + payload.messages + " · Диалогов: " + payload.conversations
+      + " · Журналов проверено: " + done + " из " + streams.length + period + (issue ? " · " + issue : "");
+    if (payload.backfill_pending || payload.syncing) {
       scheduleAlfaMaxProgress();
-    } else {
-      show($("#alfa-max-progress"), false);
-      $("#alfa-max-progress-detail").textContent = "";
     }
   }
   async function alfaMaxAction(action, success) {
