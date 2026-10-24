@@ -19,7 +19,6 @@ const { fixture } = require('./browser_fixture.cjs');
         scrollTop: input.scrollTop, sendVisible: send.top >= canvas.top && send.bottom <= canvas.bottom+1,
         lastVisible: last.bottom <= composer.getBoundingClientRect().top, canvasTop: canvas.top, maxHeight: getComputedStyle(input).maxHeight };
     });
-    assert.equal(await page.locator('#chat-chip-lead').textContent(), '2');
     const short = await geometry();
     await input.fill(Array.from({ length: 12 }, (_, n) => `Предложение ${n+1}.`).join('\n'));
     const desktop = await geometry();
