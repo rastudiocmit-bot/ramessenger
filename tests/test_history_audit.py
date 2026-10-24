@@ -92,10 +92,12 @@ class SourceAuditTests(unittest.TestCase):
 class BrowserAuditContextTests(unittest.TestCase):
     def read_failure(self, *, navigation=None, response=None, check=None):
         manager, browser, context, page = [Mock() for _ in range(4)]
+        context.new_page.return_value = page
         page.goto.side_effect = navigation
         page.goto.return_value = response or SimpleNamespace(status=200)
         with patch.object(AlfaMaxBrowser, '_open', return_value=(manager, browser, context, page)), \
-             patch.object(AlfaMaxBrowser, '_check_origin', side_effect=check):
+             patch.object(AlfaMaxBrowser, '_check_origin', side_effect=check), \
+             patch('center_messenger.alfa_max_browser.time.sleep'):
             with self.assertRaises(AlfaBrowserError) as caught:
                 AlfaMaxBrowser().read_histories('https://test.s20.online', {}, [(4, 'sent', 2)])
         context.close.assert_called_once()
@@ -128,6 +130,124 @@ class BrowserAuditContextTests(unittest.TestCase):
         error = self.read_failure(check=AlfaBrowserError('reauth_required'))
         self.assertEqual(error.code, 'reauth_required')
         self.assertEqual(error.stage, 'check_session')
+
+
+class HistoryNavigationRecoveryTests(unittest.TestCase):
+    def setup_pages(self):
+        manager, browser, context, first, replacement = [Mock() for _ in range(5)]
+        context.new_page.return_value = replacement
+        context.storage_state.return_value = {'cookies': [{'name': 'session', 'value': 'synthetic'}]}
+        response = SimpleNamespace(status=200, text=lambda: '<table class="crm-table"></table>')
+        first.goto.return_value = response
+        replacement.goto.return_value = response
+        return manager, browser, context, first, replacement
+
+    def test_a_transport_reset_retries_the_same_page_in_a_fresh_tab(self):
+        from playwright.sync_api import Error
+        manager,browser,context,first,replacement = self.setup_pages()
+        first.goto.side_effect = Error('page.goto: net::ERR_CONNECTION_RESET at https://private.test/?cookie=secret')
+        heartbeat = Mock()
+        with patch.object(AlfaMaxBrowser, '_open', return_value=(manager,browser,context,first)), \
+             patch.object(AlfaMaxBrowser, '_check_origin'), patch('center_messenger.alfa_max_browser.time.sleep') as delay:
+            results,state = AlfaMaxBrowser().read_histories('https://test.s20.online',{},[(4,'sent',19)],on_progress=heartbeat)
+        self.assertEqual(len(results),1)
+        self.assertNotIn('error',results[0])
+        self.assertEqual(first.goto.call_args.args,replacement.goto.call_args.args)
+        self.assertEqual(heartbeat.call_count,1, 'Retry must not advance the worker page counter')
+        first.close.assert_called_once()
+        context.new_page.assert_called_once()
+        delay.assert_called_once_with(0.5)
+        self.assertEqual(state,context.storage_state.return_value)
+
+    def test_exhausted_retries_are_bounded_and_only_emit_approved_network_codes(self):
+        from playwright.sync_api import Error
+        manager,browser,context,first,replacement = self.setup_pages()
+        failure = Error('net::ERR_CONNECTION_RESET at https://private.test/?cookie=secret')
+        first.goto.side_effect = replacement.goto.side_effect = failure
+        with patch.object(AlfaMaxBrowser, '_open', return_value=(manager,browser,context,first)), \
+             patch.object(AlfaMaxBrowser, '_check_origin'), patch('center_messenger.alfa_max_browser.time.sleep') as delay:
+            results,_ = AlfaMaxBrowser().read_histories('https://test.s20.online',{},[(4,'sent',19)],continue_on_error=True)
+        self.assertEqual(first.goto.call_count+replacement.goto.call_count,3)
+        self.assertEqual([c.args[0] for c in delay.call_args_list],[0.5,1.0])
+        self.assertEqual(results[0]['attempts'],3)
+        self.assertEqual(results[0]['network_error'],'ERR_CONNECTION_RESET')
+        self.assertNotIn('private',json.dumps(results))
+        self.assertNotIn('secret',json.dumps(results))
+
+    def test_security_and_resource_errors_do_not_start_more_navigation_attempts(self):
+        from playwright.sync_api import Error
+        for code in ('ERR_CERT_AUTHORITY_INVALID','ERR_BLOCKED_BY_CLIENT','ERR_OUT_OF_MEMORY'):
+            with self.subTest(code=code):
+                manager,browser,context,first,_ = self.setup_pages()
+                first.goto.side_effect = Error('net::'+code+' at https://private.test')
+                with patch.object(AlfaMaxBrowser, '_open', return_value=(manager,browser,context,first)), \
+                     patch('center_messenger.alfa_max_browser.time.sleep') as delay:
+                    results,_ = AlfaMaxBrowser().read_histories('https://test.s20.online',{},[(4,'sent',19)],continue_on_error=True)
+                self.assertEqual(first.goto.call_count,1)
+                self.assertEqual(results[0]['network_error'],code)
+                context.new_page.assert_not_called()
+                delay.assert_not_called()
+
+    def test_http_503_is_retried_but_403_is_reported_immediately(self):
+        for status in (503,403):
+            with self.subTest(status=status):
+                manager,browser,context,first,replacement = self.setup_pages()
+                first.goto.return_value = SimpleNamespace(status=status)
+                with patch.object(AlfaMaxBrowser, '_open', return_value=(manager,browser,context,first)), \
+                     patch.object(AlfaMaxBrowser, '_check_origin'), patch('center_messenger.alfa_max_browser.time.sleep') as delay:
+                    results,_ = AlfaMaxBrowser().read_histories('https://test.s20.online',{},[(4,'sent',19)],continue_on_error=True)
+                if status==503:
+                    self.assertNotIn('error',results[0])
+                    self.assertEqual(replacement.goto.call_count,1)
+                else:
+                    self.assertEqual(results[0]['http_status'],403)
+                    context.new_page.assert_not_called()
+                    delay.assert_not_called()
+
+    def test_crashed_context_is_reopened_with_the_last_known_session(self):
+        from playwright._impl._errors import TargetClosedError
+        manager,browser,context,first,_ = self.setup_pages()
+        manager2,browser2,context2,replacement,_ = self.setup_pages()
+        first.goto.side_effect = context.new_page.side_effect = context.storage_state.side_effect = TargetClosedError()
+        session = {'cookies':[{'name':'session','value':'last-known'}]}
+        with patch.object(AlfaMaxBrowser, '_open', side_effect=[(manager,browser,context,first),(manager2,browser2,context2,replacement)]) as opening, \
+             patch.object(AlfaMaxBrowser, '_check_origin'), patch('center_messenger.alfa_max_browser.time.sleep'):
+            results,_ = AlfaMaxBrowser().read_histories('https://test.s20.online',session,[(4,'sent',19)])
+        self.assertNotIn('error',results[0])
+        self.assertEqual(opening.call_args.args[1],session)
+        context.close.assert_called_once()
+        context2.close.assert_called_once()
+        manager.stop.assert_called_once()
+        manager2.stop.assert_called_once()
+
+    def test_unrecognized_tokens_are_not_exposed_as_network_errors(self):
+        from playwright.sync_api import Error
+        from center_messenger.alfa_max_browser import _browser_network_error
+        self.assertIsNone(_browser_network_error(Error('net::ERR_PRIVATE_CUSTOMER_NAME at private URL')))
+        self.assertEqual(_browser_network_error(Error('net::ERR_ABORTED at private URL')),'ERR_ABORTED')
+
+    def test_failed_page_preserves_the_verified_prefix_inside_the_same_batch(self):
+        browser = Mock()
+        def read(origin,state,requests,**kwargs):
+            self.assertTrue(kwargs['continue_on_error'])
+            results=[]
+            for _,_,page in requests:
+                if page==19:
+                    results.append({'error':'crm_unavailable','stage':'navigation','cause':'browser_error',
+                                    'network_error':'ERR_CONNECTION_RESET','attempts':3})
+                else:
+                    results.append({'messages':[{'record_id':str(page*20+n+1)} for n in range(20)],
+                                    'row_count':20,'total':684,'has_more':True})
+            return results,state
+        browser.read_histories.side_effect=read
+        report=compare_source_history(browser,'https://test.s20.online',{},4,'sent',set())
+        self.assertEqual(report['status'],'failed')
+        self.assertEqual(report['failed_page'],20)
+        self.assertEqual(report['pages_checked'],19)
+        self.assertEqual(report['observed_rows'],380)
+        self.assertEqual(report['network_error'],'ERR_CONNECTION_RESET')
+        self.assertEqual(report['attempts'],3)
+        self.assertNotIn('missing_in_database',report)
 
 
 if __name__ == '__main__':

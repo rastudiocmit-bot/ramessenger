@@ -74,7 +74,7 @@ class HistoryCursorTests(unittest.TestCase):
         pages = [{"messages": [{"record_id": n} for n in values], "total": 6,
                   "row_count": 2, "has_more": i < 2}
                  for i, values in enumerate((("6", "5"), ("5", "4"), ("2", "1")))]
-        browser.read_histories.side_effect = lambda origin, state, requests: ([pages[r[2]] for r in requests], state)
+        browser.read_histories.side_effect = lambda origin, state, requests, **kwargs: ([pages[r[2]] for r in requests], state)
         report = compare_source_history(browser, "https://example.test", {}, 4, "sent", {"1", "2", "3", "4", "5"})
         self.assertEqual(report["missing_ids"], ["6"])
         self.assertEqual(report["duplicate_source_ids"], ["5"])

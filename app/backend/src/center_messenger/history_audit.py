@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import text
 
 from center_messenger.alfa_history import history_coverage
-from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser
+from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser, NETWORK_ERRORS, HISTORY_READ_ATTEMPTS
 from center_messenger.config import Settings
 from center_messenger.connector_vault import ConnectorVault
 from center_messenger.database import make_engine
@@ -40,7 +40,9 @@ def source_failure(error, branch, direction, page, checked, observed):
             "stage": error.stage if error.stage in STAGES else None,
             "cause": error.cause if error.cause in CAUSES else None,
             "http_status": status if isinstance(status, int) and 100 <= status <= 599 else None,
-            "failed_page": failed_page + 1, "pages_checked": checked, "observed_rows": observed}
+            "failed_page": failed_page + 1, "pages_checked": checked, "observed_rows": observed,
+            "network_error": error.network_error if error.network_error in NETWORK_ERRORS else None,
+            "attempts": error.attempts if isinstance(error.attempts, int) and 1 <= error.attempts <= HISTORY_READ_ATTEMPTS else None}
 
 
 def audit_exit_code(reports):
@@ -62,12 +64,14 @@ def compare_source_history(browser, origin, session, branch, direction, saved_id
         if on_progress:
             on_progress({"page": page, "pages_checked": checked})
         try:
-            results, session = browser.read_histories(origin, session, requests)
+            results, session = browser.read_histories(origin, session, requests, continue_on_error=True)
         except AlfaBrowserError as error:
             return source_failure(error, branch, direction, page, checked, occurrences)
         for request, result in zip(requests, results, strict=True):
             if result.get("error"):
-                return source_failure(AlfaBrowserError(result["error"], stage="read_page", request=request),
+                return source_failure(AlfaBrowserError(result["error"], stage=result.get("stage", "read_page"), request=request,
+                    cause=result.get("cause"), http_status=result.get("http_status"),
+                    network_error=result.get("network_error"), attempts=result.get("attempts", 1)),
                                       branch, direction, request[2], checked, occurrences)
             if result.get("total") is not None:
                 totals.add(result["total"])
@@ -165,7 +169,8 @@ def main(argv=None):
                 if verification["status"] == "failed":
                     print(f"Source verification failed: code={verification['error_code']} "
                           f"stage={verification['stage']} page={verification['failed_page']} "
-                          f"cause={verification['cause']} http_status={verification['http_status']}. "
+                          f"cause={verification['cause']} http_status={verification['http_status']} "
+                          f"network_error={verification['network_error']} attempts={verification['attempts']}. "
                           + verification["error"], file=sys.stderr, flush=True)
         print(json.dumps({"workspaces": reports}, ensure_ascii=False, indent=2, default=str))
         return audit_exit_code(reports)
