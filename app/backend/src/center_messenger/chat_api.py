@@ -1,7 +1,7 @@
 """Workspace-scoped chat API. Operator access waits for branch/channel ACL."""
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -18,6 +18,7 @@ from center_messenger.crm_api import DirectoryReader, search_query
 from center_messenger.max_client import ERRORS as MAX_ERRORS
 from center_messenger.max_client import MaxChannelInput, MaxSettingsInput
 from center_messenger.max_connections import fingerprint
+from center_messenger.message_order import message_order, source_order, visible_message
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}")
 hooks = APIRouter()
@@ -27,14 +28,7 @@ LATEST_INBOUND_ID = """(
   SELECT mi.id FROM messages mi
   WHERE mi.workspace_id=c.workspace_id AND mi.conversation_id=c.id
     AND mi.direction='in' AND mi.actor_type='contact'
-    AND coalesce(mi.payload->>'deleted','false')<>'true'
-  ORDER BY mi.occurred_at DESC,
-    CASE WHEN mi.payload->>'source_ms' ~ '^[0-9]{1,19}$'
-      THEN (mi.payload->>'source_ms')::numeric END DESC NULLS LAST,
-    CASE WHEN mi.payload->>'crm_order' ~ '^[0-9]{1,19}$'
-      THEN (mi.payload->>'crm_order')::numeric END DESC NULLS LAST,
-    mi.id DESC LIMIT 1
-)"""
+    AND """ + visible_message("mi") + " ORDER BY " + message_order("mi", descending=True) + " LIMIT 1)"
 EFFECTIVE_UNREAD = (
     "(c.needs_reply AND c.handled_inbound_id IS DISTINCT FROM " + LATEST_INBOUND_ID + ")"
 )
@@ -163,6 +157,8 @@ class ChatReader:
             db.execute(
                 text(
                     "SELECT c.*,cn.name AS channel_name,cn.kind AS channel_kind,"
+                    "am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
+                    "am.last_error_code AS crm_history_error,"
                     "CASE WHEN cn.kind='alfa_max_browser' THEN "
                     "(am.state='active' AND am.session_ciphertext IS NOT NULL AND EXISTS("
                     "SELECT 1 FROM alfa_settings ax WHERE ax.workspace_id=c.workspace_id "
@@ -192,10 +188,32 @@ class ChatReader:
         )
         if row is None:
             raise AuthError(404, "Диалог недоступен.")
+        if row["channel_kind"] == "alfa_max_browser" and row["contact_id"]:
+            external = f"alfa-contact:{row['contact_id']}"
+            if row["external_chat_id"] != external:
+                canonical = db.execute(
+                    text("SELECT id FROM conversations WHERE workspace_id=:w "
+                         "AND connection_id=:connection AND contact_id=:contact "
+                         "AND external_chat_id=:external AND external_topic_id=''"),
+                    {"w": workspace, "connection": row["connection_id"],
+                     "contact": row["contact_id"], "external": external},
+                ).scalar_one_or_none()
+                if canonical:
+                    return ChatReader._conversation(db, workspace, canonical, lock=lock)
         return row
 
     @staticmethod
     def _meta(row):
+        cursor = row.get("crm_history_cursor") or {}
+        loading = (
+            row.get("channel_kind") == "alfa_max_browser"
+            and row.get("crm_history_state") == "active"
+            and (cursor.get("projection_version") != 2 or any(
+                isinstance(value, int) and not isinstance(value, bool) and value > 0
+                for key, value in cursor.items() if key.count(":") == 1
+                and key.split(":")[-1] in {"receive", "sent"}
+            ))
+        )
         return {
             "id": str(row["id"]),
             "connection_id": str(row["connection_id"]),
@@ -206,11 +224,14 @@ class ChatReader:
             "inbound_seq": row["inbound_seq"],
             "revision": row["revision"],
             "can_send": bool(row["can_send"]) and row["channel_status"] == "active",
+            "history_loading": bool(loading),
+            "history_error": ALFA_MAX_ERRORS.get(row.get("crm_history_error")),
         }
 
     @staticmethod
     def _message(row):
         payload = row["payload"]
+        attachments = payload.get("attachments", [])
         return {
             "id": str(row["id"]),
             "direction": row["direction"],
@@ -218,13 +239,21 @@ class ChatReader:
             "text": row["text"],
             "occurred_at": row["occurred_at"],
             "branch_id": payload.get("branch_id"),
-            "crm_order": payload.get("crm_order"),
+            # CRM bigint keys and timestamps with microseconds must not lose
+            # precision when the response is parsed by JavaScript.
+            "crm_order": str(payload["crm_order"]) if payload.get("crm_order") is not None else None,
+            "sort_time": str((row["occurred_at"] - datetime(1970, 1, 1, tzinfo=UTC))
+                             // timedelta(microseconds=1)),
             "version": row["version"],
-            "attachments": payload.get("attachments", []),
+            "attachments": [item if isinstance(item, str) else "file" for item in attachments],
+            "attachment_names": [item.get("name", "") if isinstance(item, dict) else ""
+                                 for item in attachments],
             "edited": payload.get("edited", False),
             "deleted": payload.get("deleted", False),
+            "superseded": bool(payload.get("superseded_by")),
             "forwarded": payload.get("forwarded", False),
-            "state": row["send_state"] or "received",
+            "state": "failed" if payload.get("failed") else row["send_state"] or (
+                      "accepted" if row["direction"] == "out" else "received"),
             "error": ERRORS.get(row["last_error_code"]),
             "request_id": row["client_request_id"],
             "template_name": payload.get("template_name"),
@@ -255,12 +284,17 @@ class ChatReader:
         branch=None,
         status=None,
         page=0,
+        through_page=None,
     ):
         with self.max.chat_transaction(actor, workspace) as db:
+            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR SHARE"), {"w": workspace})
+            if through_page is not None:
+                page = through_page
             snapshot = DirectoryReader._published(db, workspace)
             params = {
                 "w": workspace,
-                "offset": page * 30,
+                "offset": 0 if through_page is not None else page * 30,
+                "limit": (page + 1) * 30 if through_page is not None else 30,
                 "connection": connection,
                 "branch": branch,
                 "status": status,
@@ -339,6 +373,8 @@ class ChatReader:
                     text(
                         "SELECT c.*,cn.name AS "
                         "channel_name,coalesce(p.display_name,c.peer_name) AS display_name,"
+                        "cn.kind AS channel_kind,am.history_cursor AS crm_history_cursor,"
+                        "am.state AS crm_history_state,am.last_error_code AS crm_history_error,"
                         "CASE WHEN cn.kind='alfa_max_browser' THEN "
                         "(am.state='active' AND am.session_ciphertext IS NOT NULL AND EXISTS("
                         "SELECT 1 FROM alfa_settings ax WHERE ax.workspace_id=c.workspace_id "
@@ -354,15 +390,16 @@ class ChatReader:
                         "(SELECT count(*) FROM messages i WHERE i.workspace_id=c.workspace_id "
                         "AND i.conversation_id=c.id AND i.direction='in' "
                         "AND i.actor_type='contact' "
-                        "AND coalesce(i.payload->>'deleted','false')<>'true' "
-                        "AND (c.handled_inbound_id IS NULL OR i.occurred_at > "
-                        "(SELECT h.occurred_at FROM messages h WHERE h.workspace_id=c.workspace_id "
-                        "AND h.id=c.handled_inbound_id)) "
+                        "AND " + visible_message("i") + " "
+                        "AND " + EFFECTIVE_UNREAD + " "
+                        "AND (c.handled_inbound_id IS NULL OR (i.occurred_at," + source_order("i") + ",i.id) > "
+                        "(SELECT h.occurred_at," + source_order("h") + ",h.id FROM messages h "
+                        "WHERE h.workspace_id=c.workspace_id AND h.id=c.handled_inbound_id)) "
                         "AND NOT EXISTS (SELECT 1 FROM messages r LEFT JOIN send_commands s ON "
                         "s.workspace_id=r.workspace_id AND s.id=r.send_command_id "
                         "WHERE r.workspace_id=i.workspace_id AND r.conversation_id=i.conversation_id "
                         "AND r.direction='out' AND r.actor_type='human' "
-                        "AND coalesce(r.payload->>'deleted','false')<>'true' "
+                        "AND " + visible_message("r") + " "
                         "AND coalesce(r.payload->>'failed','false')<>'true' "
                         "AND (r.send_command_id IS NULL OR s.state IN "
                         "('accepted','delivered','read')) "
@@ -373,40 +410,17 @@ class ChatReader:
                         "AND i.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
                         "THEN (r.payload->>'crm_order')::numeric"
                         ">(i.payload->>'crm_order')::numeric ELSE false END)))) AS unread_count,"
-                        "coalesce((SELECT m.text FROM messages m WHERE c.needs_reply AND "
-                        "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
-                        "AND m.direction='in' AND m.actor_type='contact' AND "
-                        "coalesce(m.payload->>'deleted','false')<>'true' AND NOT EXISTS("
-                        "SELECT 1 FROM messages r LEFT JOIN send_commands sc ON "
-                        "sc.workspace_id=r.workspace_id AND sc.id=r.send_command_id "
-                        "WHERE r.workspace_id=m.workspace_id "
-                        "AND r.conversation_id=m.conversation_id "
-                        "AND r.direction='out' AND r.actor_type='human' AND "
-                        "coalesce(r.payload->>'deleted','false')<>'true' AND "
-                        "coalesce(r.payload->>'failed','false')<>'true' AND "
-                        "(r.send_command_id IS NULL OR "
-                        "sc.state IN ('accepted','delivered','read')) "
-                        "AND (r.occurred_at>m.occurred_at OR (r.occurred_at=m.occurred_at "
-                        "AND m.payload->>'branch_id' IS NOT NULL AND "
-                        "m.payload->>'branch_id'=r.payload->>'branch_id' AND "
-                        "CASE WHEN m.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
-                        "AND r.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
-                        "THEN (r.payload->>'crm_order')::numeric "
-                        "> (m.payload->>'crm_order')::numeric ELSE false END))) "
-                        "ORDER BY m.occurred_at DESC, CASE WHEN m.payload->>'crm_order' ~ "
-                        "'^[0-9]{1,19}$' "
-                        "THEN (m.payload->>'crm_order')::numeric END DESC NULLS LAST, "
-                        "m.id DESC LIMIT 1),(SELECT m.text FROM messages m WHERE "
+                        "(SELECT m.text FROM messages m WHERE "
                         "m.workspace_id=c.workspace_id "
-                        "AND m.conversation_id=c.id ORDER BY m.occurred_at DESC,m.id DESC "
-                        "LIMIT 1)) AS preview "
+                        "AND m.conversation_id=c.id AND " + visible_message() + " ORDER BY "
+                        + message_order(descending=True) + " LIMIT 1) AS preview "
                         + joins
                         + " WHERE "
                         + where
                         + " ORDER BY "
                         + EFFECTIVE_UNREAD
                         + " DESC,c.last_message_at DESC NULLS LAST,"
-                        "c.id LIMIT 30 OFFSET :offset"
+                        "c.id LIMIT :limit OFFSET :offset"
                     ),
                     params,
                 ).mappings()
@@ -466,7 +480,9 @@ class ChatReader:
         self, actor, workspace, conversation, *, before_time=None, before_id=None, after_seq=None
     ):
         with self.max.chat_transaction(actor, workspace) as db:
+            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR SHARE"), {"w": workspace})
             row = self._conversation(db, workspace, conversation)
+            conversation = row["id"]
             params = {"w": workspace, "c": conversation}
             end = db.execute(
                 text(
@@ -476,6 +492,14 @@ class ChatReader:
                 params,
             ).scalar_one()
             where = "m.workspace_id=:w AND m.conversation_id=:c"
+            total = db.execute(
+                text("SELECT count(*) FROM messages m WHERE " + where +
+                     " AND m.payload->>'superseded_by' IS NULL"), params,
+            ).scalar_one()
+            removed_ids = []
+            reset = after_seq is not None and after_seq > end
+            if reset:
+                after_seq = None
             has_more, more_changes = False, False
             if after_seq is not None:
                 params["after"] = min(after_seq, end)
@@ -496,15 +520,28 @@ class ChatReader:
                     if changes
                     else []
                 )
+                present = {r["id"] for r in records if not r["payload"].get("superseded_by")}
+                removed_ids = [str(identifier) for identifier in params["ids"] if identifier not in present]
+                records = [r for r in records if not r["payload"].get("superseded_by")]
                 next_seq = changes[-1]["seq"] if more_changes else end
             else:
                 if (before_time is None) != (before_id is None):
                     raise AuthError(422, "Для загрузки истории нужен полный указатель страницы.")
                 if before_time is not None:
-                    params.update(before_time=before_time, before_id=before_id)
-                    where += " AND (m.occurred_at,m.id)<(:before_time,:before_id)"
+                    anchor = db.execute(
+                        text("SELECT m.occurred_at," + source_order() + " AS source_order "
+                             "FROM messages m WHERE m.workspace_id=:w AND m.conversation_id=:c "
+                             "AND m.id=:id"), params | {"id": before_id},
+                    ).mappings().one_or_none()
+                    if anchor is None:
+                        raise AuthError(422, "Указатель истории устарел. Откройте диалог заново.")
+                    params.update(before_time=anchor["occurred_at"], before_id=before_id,
+                                  before_order=anchor["source_order"])
+                    where += (" AND (m.occurred_at," + source_order() + ",m.id)"
+                              "<(:before_time,:before_order,:before_id)")
+                where += " AND m.payload->>'superseded_by' IS NULL"
                 records = self._messages(
-                    db, where, params, "ORDER BY m.occurred_at DESC,m.id DESC LIMIT 21"
+                    db, where, params, "ORDER BY " + message_order(descending=True) + " LIMIT 21"
                 )
                 has_more = len(records) > 20
                 records = list(reversed(records[:20]))
@@ -512,6 +549,9 @@ class ChatReader:
             return {
                 "conversation": self._meta(row),
                 "messages": [self._message(r) for r in records],
+                "total": total,
+                "removed_ids": removed_ids,
+                "reset": reset,
                 "next_seq": next_seq,
                 "has_more": has_more,
                 "more_changes": more_changes,
@@ -519,9 +559,11 @@ class ChatReader:
 
     def send(self, actor, workspace, conversation, model):
         self.max.accounts.throttle(f"chat-send:{workspace}:{actor.user_id}", limit=60, minutes=1)
-        payload = {"text": model.text, "conversation_id": str(conversation)}
-        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         with self.max.chat_transaction(actor, workspace, lock=True) as db:
+            row = self._conversation(db, workspace, conversation, lock="UPDATE")
+            conversation = row["id"]
+            payload = {"text": model.text, "conversation_id": str(conversation)}
+            encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
             old = (
                 db.execute(
                     text(
@@ -534,14 +576,13 @@ class ChatReader:
                 .one_or_none()
             )
             if old:
-                if old["payload_hash"] != fingerprint(encoded):
+                if old["conversation_id"] != conversation or old["payload"].get("text") != model.text:
                     raise AuthError(409, "Этот запрос уже использован для другого сообщения.")
                 return {
                     "command_id": str(old["id"]),
                     "state": old["state"],
                     "request_id": str(model.request_id),
                 }
-            row = self._conversation(db, workspace, conversation, lock="UPDATE")
             if row["inbound_seq"] != model.seen_inbound_seq:
                 raise AuthError(409, "Поступило новое сообщение. Прочитайте его перед ответом.")
             if not self._meta(row)["can_send"]:
@@ -612,7 +653,8 @@ class ChatReader:
 
     def link(self, actor, workspace, conversation, model):
         with self.max.chat_transaction(actor, workspace, lock=True) as db:
-            self._conversation(db, workspace, conversation, lock="UPDATE")
+            row = self._conversation(db, workspace, conversation, lock="UPDATE")
+            conversation = row["id"]
             if model.contact_id:
                 snapshot = DirectoryReader._published(db, workspace)
                 exists = (
@@ -645,6 +687,7 @@ class ChatReader:
     def handle(self, actor, workspace, conversation):
         with self.max.chat_transaction(actor, workspace, lock=True) as db:
             row = self._conversation(db, workspace, conversation, lock="UPDATE")
+            conversation = row["id"]
             inbound_id = row["latest_inbound_id"]
             if not row["needs_reply"] or inbound_id is None:
                 raise AuthError(409, "На последнее сообщение уже ответили.")
@@ -729,6 +772,7 @@ def chats(
     branch: int | None = Query(default=None, gt=0, le=9223372036854775807),
     status: Literal["client", "lead", "archive"] | None = None,
     page: int = Query(default=0, ge=0, le=2000),
+    through_page: int | None = Query(default=None, ge=0, le=2000),
 ):
     _, reader = components(request)
     return reader.listing(
@@ -740,6 +784,7 @@ def chats(
         branch=branch,
         status=status,
         page=page,
+        through_page=through_page,
     )
 
 

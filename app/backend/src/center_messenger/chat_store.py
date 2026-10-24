@@ -7,6 +7,7 @@ from uuid import uuid4, uuid5
 from sqlalchemy import text
 
 from center_messenger.max_client import MaxError, integer_id, message_id, timestamp, user_name
+from center_messenger.message_order import visible_message
 
 
 def changed(db, workspace, conversation, message, *, new_inbound=False):
@@ -32,9 +33,9 @@ def refresh_unread(db, workspace, conversation):
               SELECT
                 max(m.occurred_at) FILTER (WHERE m.direction='in'
                   AND m.actor_type='contact'
-                  AND coalesce(m.payload->>'deleted','false')<>'true') AS last_inbound,
+                  AND """ + visible_message() + """) AS last_inbound,
                 max(m.occurred_at) FILTER (
-                  WHERE coalesce(m.payload->>'deleted','false')<>'true'
+                  WHERE """ + visible_message() + """
                 ) AS last_message
               FROM messages m
               WHERE m.workspace_id=:w AND m.conversation_id=:c
@@ -45,7 +46,7 @@ def refresh_unread(db, workspace, conversation):
                   WHERE i.workspace_id=:w AND i.conversation_id=:c
                     AND i.direction='in' AND i.actor_type='contact'
                     AND i.occurred_at=message_state.last_inbound
-                    AND coalesce(i.payload->>'deleted','false')<>'true'
+                    AND """ + visible_message("i") + """
                     AND NOT EXISTS (
                       SELECT 1 FROM messages r
                       LEFT JOIN send_commands s ON s.workspace_id=r.workspace_id
@@ -53,7 +54,7 @@ def refresh_unread(db, workspace, conversation):
                       WHERE r.workspace_id=i.workspace_id
                         AND r.conversation_id=i.conversation_id
                         AND r.direction='out' AND r.actor_type='human'
-                        AND coalesce(r.payload->>'deleted','false')<>'true'
+                        AND """ + visible_message("r") + """
                         AND coalesce(r.payload->>'failed','false')<>'true'
                         AND (r.send_command_id IS NULL
                           OR s.state IN ('accepted','delivered','read'))

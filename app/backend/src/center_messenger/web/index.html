@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Личный кабинет · РазвивайсяMessenger</title>
-  <link rel="stylesheet" href="/assets/app.css?v=0.8.29">
+  <link rel="stylesheet" href="/assets/app.css?v=0.8.30">
   <script src="/assets/directory.js?v=0.8.2" defer></script>
-  <script src="/assets/chat.js?v=0.8.14" defer></script>
+  <script src="/assets/chat.js?v=0.8.15" defer></script>
   <script src="/assets/app.js?v=0.8.2" defer></script>
 </head>
 <body>
@@ -133,7 +133,7 @@
             <div id="chat-resizer" class="directory-resizer" role="separator" aria-label="Ширина списка диалогов" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="640" aria-valuenow="450" tabindex="0"></div>
             <article class="chat-conversation" aria-label="Переписка"><header class="chat-header"><button id="chat-list-toggle" type="button" class="icon-button" aria-label="Свернуть или раскрыть список диалогов" title="Список диалогов">☷</button><div id="chat-person" class="chat-person"><strong>Выберите диалог</strong><small>Новые сообщения и ваши ответы</small></div><button id="chat-details" type="button" class="chat-details" hidden>Подробнее</button><button id="chat-handled" type="button" class="chat-handled" hidden>Обработана</button></header>
               <div id="chat-blank" class="detail-placeholder"><span class="detail-placeholder-icon" aria-hidden="true">▤</span><h2>Диалог начинается здесь</h2><p>Одна переписка с родителем, даже если дети занимаются в разных филиалах.</p><button id="chat-go-connections" class="secondary" type="button">Подключить MAX-бота</button></div>
-              <div id="chat-stream" class="chat-stream" role="region" aria-label="Сообщения диалога" hidden><div id="chat-history"></div><p id="chat-history-note" class="chat-history-note">История сохраняется с момента подключения бота.</p></div>
+              <div id="chat-stream" class="chat-stream" role="region" aria-label="Сообщения диалога" hidden><div class="chat-history-loader"><button id="chat-history-more" class="text-button" type="button" hidden>Загрузить более ранние сообщения</button><span id="chat-history-status" role="status" aria-live="polite" hidden></span></div><div id="chat-history"></div><p id="chat-history-note" class="chat-history-note"></p></div>
               <form id="chat-compose" class="chat-compose" hidden><p id="chat-send-hint" class="chat-compose-hint" hidden></p><div class="chat-compose-row"><label class="chat-compose-field"><span class="sr-only">Текст сообщения</span><textarea id="chat-input" name="text" rows="1" maxlength="4000" placeholder="Сообщение" required></textarea></label><button id="chat-send" type="submit" class="chat-send" aria-label="Отправить" title="Отправить"><svg class="chat-send-plane" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 11.2 20.2 3.7c.7-.3 1.4.4 1.1 1.1l-7.5 16.8c-.3.7-1.3.7-1.6 0l-2.5-6.3-6.3-2.5c-.7-.3-.7-1.3 0-1.6Z"/><path d="M10.2 13.8 20.6 4.7"/></svg><span class="chat-send-retry" aria-hidden="true">↻</span></button></div></form>
             </article>
           </div><p class="directory-footnote">Приём продолжается на сервере при закрытой АльфаCRM. Ответ сотрудника в MAX или AlfaCRM снимает отметку «Нужен ответ»; системные и автоматические сообщения её не снимают.</p>

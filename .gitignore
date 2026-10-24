@@ -12,6 +12,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+node_modules/
 
 # Артефакты сборки и релиза
 image.tar.gz
