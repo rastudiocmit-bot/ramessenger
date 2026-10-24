@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -29,7 +30,7 @@ from center_messenger.config import Settings
 from center_messenger.connector_vault import ConnectorVault
 from center_messenger.crm_api import DirectoryReader
 from center_messenger.crm_api import router as directory_router
-from center_messenger.database import database_is_ready, log_database_error, make_engine
+from center_messenger.database import SCHEMA_REVISION, database_is_ready, log_database_error, make_engine
 from center_messenger.ai_api import router as ai_router
 from center_messenger.ai_voice import AiVoice
 from center_messenger.http_security import SecurityMiddleware, StaticCompressionMiddleware
@@ -177,6 +178,8 @@ def create_app(
             "service": "center-messenger",
             "version": __version__,
             "stage": "message_unread",
+            "build": os.environ.get("CM_BUILD_SHA", "unknown")[:12],
+            "schema": SCHEMA_REVISION,
         }
 
     @app.get("/health/live")

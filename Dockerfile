@@ -35,6 +35,11 @@ COPY --chown=10001:10001 app/backend/src ./backend/src
 COPY --chown=10001:10001 app/backend/migrations ./backend/migrations
 COPY --chown=10001:10001 app/alembic.ini ./alembic.ini
 
+# The commit this image was built from, shown in /api/system/info so a deploy
+# can be confirmed from outside. Last, so it never invalidates cached layers.
+ARG CM_BUILD_SHA=unknown
+ENV CM_BUILD_SHA=${CM_BUILD_SHA}
+
 USER 10001:10001
 EXPOSE 8000
 CMD ["uvicorn", "center_messenger.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-proxy-headers"]

@@ -132,7 +132,7 @@ def main(preview):
         run("python3","-m","unittest","discover","-s","tests",
             "-p","test_github_deploy_rollback.py",cwd=src,timeout=120)
         announce("BUILD",target)
-        subprocess.run(["docker","build","--platform","linux/amd64","-t",target,"."],
+        subprocess.run(["docker","build","--platform","linux/amd64","--build-arg","CM_BUILD_SHA="+sha,"-t",target,"."],
                        cwd=src,check=True,timeout=1500)
         image=json.loads(run("docker","image","inspect",target))[0]
         if (image["Os"],image["Architecture"])!=("linux","amd64"):
