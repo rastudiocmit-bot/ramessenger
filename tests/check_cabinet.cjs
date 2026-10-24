@@ -59,7 +59,10 @@ const { fixture } = require('./browser_fixture.cjs');
         assert.ok(data.mutations.some(c => c.path.endsWith('/handled')));
       }
       if (role !== 'operator') {
+        // An open client card must not follow the operator into another section.
+        await page.locator('#chat-person-open').click(); await page.waitForFunction(() => document.querySelector('#chat-details-dialog').open);
         await page.locator('#clients-tab').click(); await page.waitForSelector('#directory-list .contact-row'); await save('installed-clients');
+        assert.equal(await page.evaluate(() => document.querySelector('#chat-details-dialog').getBoundingClientRect().width), 0, 'Client card leaked into another section');
         assert.equal(await page.locator('#directory-sync').isVisible(), admin);
         await page.locator('#directory-list .contact-select').first().click(); await page.waitForSelector('#directory-contact-dialog .student-card');
         await page.locator('[data-close="directory-contact-dialog"]').click();

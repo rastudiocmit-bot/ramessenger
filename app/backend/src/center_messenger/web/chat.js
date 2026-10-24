@@ -935,6 +935,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   function syncDetailsMode() {
     if (!detailsDialog.open || detailsDialog.classList.contains("is-closing")) return;
+    // A hidden Chats section has no width; that is not a reason to float the card over
+    // whichever section is on screen now.
+    if (!active() || !chatLayout.offsetParent || !chatLayout.clientWidth) return;
     if ((detailsDialog.dataset.mode === "docked") !== canDock()) presentDetails();
   }
   if (window.ResizeObserver && chatLayout) new ResizeObserver(() => syncDetailsMode()).observe(chatLayout);
@@ -1152,5 +1155,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function endDrag() { drag = null; layout.classList.remove("resizing"); }
   resizer.addEventListener("pointerup", endDrag); resizer.addEventListener("pointercancel", endDrag); resizer.addEventListener("lostpointercapture", endDrag);
   resizer.addEventListener("keydown", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); resize(event.key === "Home" ? 300 : event.key === "End" ? 640 : width + (event.key === "ArrowRight" ? 20 : -20)); } });
-  return { reset, connections, enter, watch, setView, leave: () => { clearTimeout(timer); selectionSeq += 1; } };
+  return { reset, connections, enter, watch, setView, leave: () => {
+    clearTimeout(timer); selectionSeq += 1;
+    // The docked card lives inside the Chats section and hides with it; a floating card
+    // sits above every section, so it closes when the operator leaves Chats.
+    if (detailsDialog.open && detailsDialog.dataset.mode !== "docked") detailsDialog.close();
+  } };
 };
