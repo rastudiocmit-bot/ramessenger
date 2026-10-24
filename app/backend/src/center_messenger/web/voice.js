@@ -42,6 +42,30 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   const cardText = layer.querySelector(".voice-hold-text"), bar = layer.querySelector(".voice-hold-bar i");
 
   const phone = () => matchMedia("(max-width: 719px)").matches;
+
+  // One AudioContext for the page, created and resumed inside a real user gesture.
+  // Phones (iOS Safari above all) only let audio start from a tap's end, and the
+  // press-and-hold recording begins from a timer, outside any gesture. Unlocking
+  // on earlier taps (opening the chat, tapping the field) makes it ready in time.
+  let shared = null;
+  function audio() {
+    if (!shared) { const Context = window.AudioContext || window.webkitAudioContext; shared = new Context(); }
+    return shared;
+  }
+  function unlock() {
+    if (!supported() || !state.voiceInput) return;
+    try { const context = audio(); if (context.state !== "running") context.resume().then(() => {
+      if (!recording) context.suspend().catch(() => {});
+    }).catch(() => {}); } catch (_) { /* Not allowed yet: the next gesture tries again. */ }
+  }
+  for (const type of ["pointerup", "touchend", "keydown"]) document.addEventListener(type, unlock, { capture: true, passive: true });
+
+  // After a hold ends, the phone sends a click to whatever is under the finger
+  // (the panel's «Отмена», the message field). Swallow it.
+  let swallowUntil = 0;
+  document.addEventListener("click", event => {
+    if (performance.now() < swallowUntil && !layer.contains(event.target)) { event.preventDefault(); event.stopPropagation(); }
+  }, true);
   const supported = () => Boolean(navigator.mediaDevices?.getUserMedia && (window.AudioContext || window.webkitAudioContext));
   const available = () => Boolean(state.voiceInput) && state.workspace && !input.disabled && !compose.hidden && supported();
 
@@ -53,7 +77,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     button.hidden = !hold && (!can || busy || (phone() && !empty));
     compose.classList.toggle("voice-swap", can && phone() && empty && !busy);
     compose.classList.toggle("voice-active", busy);
-    panel.hidden = !busy;
+    panel.hidden = !busy || !layer.hidden;
   }
   function phase(kind, text) {
     panel.dataset.phase = kind; label.textContent = text;
@@ -68,7 +92,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     recording = null; clearInterval(ticker);
     try { processor.onaudioprocess = null; source.disconnect(); processor.disconnect(); } catch (_) { /* Already detached. */ }
     stream.getTracks().forEach(track => track.stop());
-    context.close().catch(() => {});
+    context.suspend().catch(() => {});                  // kept for the next recording (see audio())
     return { chunks, rate };
   }
   function reset() {
@@ -102,6 +126,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   function endHold(cancelled) {
     const mine = hold; if (!mine) return;
     clearTimeout(mine.timer);
+    if (mine.armed) swallowUntil = performance.now() + 600;
     if (!mine.armed) { hold = null; suppressClick = true; start(); return; }   // a short tap
     mine.released = true;
     if (!recording) return;                              // still waiting for the microphone
@@ -137,7 +162,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
         : "Микрофон недоступен на этом устройстве.", true);
       return;
     }
-    const Context = window.AudioContext || window.webkitAudioContext, context = new Context();
+    const context = audio();
     try { await context.resume(); } catch (_) { /* Resumed on the next gesture. */ }
     const source = context.createMediaStreamSource(stream), processor = context.createScriptProcessor(4096, 1, 1);
     const chunks = [];
@@ -242,6 +267,9 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   button.addEventListener("pointerup", event => { if (hold && event.pointerId === hold.id) endHold(false); });
   button.addEventListener("pointercancel", event => { if (hold && event.pointerId === hold.id) endHold(true); });
   button.addEventListener("contextmenu", event => event.preventDefault());
+  // No long-press callout, text selection or emulated mouse/click on the microphone.
+  button.addEventListener("touchstart", event => { if (event.cancelable) event.preventDefault(); }, { passive: false });
+  button.addEventListener("touchend", event => { if (event.cancelable) event.preventDefault(); }, { passive: false });
   layer.querySelector(".voice-hold-send").addEventListener("click", () => commit(true));
   layer.querySelector(".voice-hold-edit").addEventListener("click", () => { commit(false); input.focus(); });
   layer.addEventListener("keydown", event => { if (event.key === "Escape" && preview) { commit(false); input.focus(); } });

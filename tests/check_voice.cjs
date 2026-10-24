@@ -8,7 +8,7 @@ const { fixture } = require('./browser_fixture.cjs');
 const shots = process.env.CM_TEST_SCREENSHOTS;
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CM_TEST_CHROMIUM_EXECUTABLE || undefined,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=user-gesture-required',
       ...JSON.parse(process.env.CM_TEST_CHROMIUM_ARGS || '[]')] });
   const save = async (page, name) => { if (shots) { fs.mkdirSync(shots, { recursive: true }); await page.screenshot({ path: path.join(shots, name + '.png') }); } };
   const visible = (page, selector) => page.locator(selector).isVisible();
@@ -168,6 +168,21 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await phone.waitForSelector('#voice-hold', { state: 'hidden' });
     await phone.waitForFunction(() => document.querySelector('#chat-input').value.includes('ну это'));
     await phone.waitForTimeout(3500); assert.equal(sent().length, before + 1);
+
+    // Real touch (not mouse): the click a phone sends after lifting the finger must not
+    // land on the panel's «Отмена» or the field; the text still arrives and is sent.
+    await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
+    await phone.waitForTimeout(400);
+    const touchBox = await phone.locator('#chat-voice').boundingBox(), cdp = await phoneContext.newCDPSession(phone);
+    const point = { x: touchBox.x + touchBox.width / 2, y: touchBox.y + touchBox.height / 2 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
+    await phone.waitForSelector('#voice-hold[data-phase="recording"]'); await phone.waitForTimeout(1000);
+    assert.equal(await phone.locator('#chat-voice-panel').isHidden(), true, 'no panel buttons under the finger');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await phone.waitForSelector('#voice-hold[data-phase="preview"]');
+    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 6000 }); await phone.waitForTimeout(300);
+    assert.equal(sent().length, before + 2, 'touch hold sends too');
+    assert.notEqual(await phone.evaluate(() => document.activeElement?.id), 'chat-input', 'the keyboard does not pop up');
 
     // A short tap still opens the old recording panel.
     await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
