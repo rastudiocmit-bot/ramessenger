@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0012_member_sections"
+SCHEMA_REVISION = "0013_ai_voice"
 
 
 def log_database_error(logger, error, *, operation):
@@ -96,6 +96,10 @@ TENANT_TABLES = (
     "max_tombstones",
     "alfa_max_settings",
     "alfa_family_details",
+    "ai_settings",
+    "ai_agents",
+    "ai_agent_versions",
+    "ai_usage",
 )
 
 IDENTITY_RLS_TABLES = (

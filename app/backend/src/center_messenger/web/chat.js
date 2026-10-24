@@ -33,6 +33,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     control.addEventListener("click", handler); return control;
   }
   function reset() {
+    state.voiceInput = false; document.dispatchEvent(new CustomEvent("cm:voice-availability"));
     generation += 1; listSeq += 1; selectionSeq += 1; linkSeq += 1; cardSeq += 1; detailsSeq += 1; family = null; familySelected = null; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     clearTimeout(timer); clearTimeout(searchTimer); clearTimeout(linkTimer); clearTimeout(notifyTimer);
     notifyTimer = null; notifyBusy = false; notifySeq = null; notifyEpoch = null; notifyTarget = null; show($("#chat-new-marker"), false);
@@ -576,6 +577,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (result.more_changes && mode !== "older") await loadHistoryPage(id);
   }
   async function select(id, mobile = true) {
+    if (id !== selected) document.dispatchEvent(new CustomEvent("cm:chat-selected"));
     const keepDetails = id !== selected && pinnedDocked();
     if (id !== selected && detailsDialog.open && !keepDetails) detailsDialog.close();
     if (keepDetails && detailsDialog.open) familyPending(currentItemFor(id)?.name);
@@ -600,6 +602,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     try {
       const context = await api(`${chatPath()}/context`);
       if (!valid(epoch, gen) || !active()) return;
+      state.voiceInput = Boolean(context.voice_input);
+      document.dispatchEvent(new CustomEvent("cm:voice-availability"));
       channels = context.channels || [];
       const channel = $("#chat-channel"), chosen = channel.value;
       channel.replaceChildren(new Option("Все каналы MAX", ""), ...channels.map(c => new Option(c.name, c.id)));

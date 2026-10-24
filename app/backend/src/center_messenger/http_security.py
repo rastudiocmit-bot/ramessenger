@@ -53,7 +53,14 @@ class SecurityMiddleware:
             "PATCH",
             "DELETE",
         }
-        body_limit = 32768 if scope["path"].endswith("/messages") else 8192
+        path = scope["path"]
+        # Voice input carries up to 1 MB of audio as base64 JSON; agent prompts run to
+        # 4000 Cyrillic characters. Every other mutation keeps its small limit.
+        body_limit = (
+            1_400_000 if path.endswith("/voice/transcribe")
+            else 32768 if path.endswith("/messages") or "/ai/agents" in path
+            else 8192
+        )
 
         async def secure_send(message):
             if message["type"] == "http.response.start":

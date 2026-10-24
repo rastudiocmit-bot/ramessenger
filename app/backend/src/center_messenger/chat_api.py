@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from center_messenger.accounts import audit
 from center_messenger.accounts_api import identity, service
+from center_messenger.ai_voice import AiVoice
 from center_messenger.alfa_max import ERRORS as ALFA_MAX_ERRORS
 from center_messenger.alfa_history import history_pending
 from center_messenger.auth_security import AuthError, InputModel
@@ -99,7 +100,8 @@ class ChatReader:
             return {"channels": [{"id": str(row["id"]), "name": row["name"], "kind": row["kind"],
                                   "status": row["status"], "enabled": bool(row["enabled"])} for row in rows],
                     "branches": DirectoryReader._branches(db, workspace), "can_write": writable,
-                    "send_attachments": False}
+                    "send_attachments": False,
+                    "voice_input": writable and AiVoice.voice_available(db, workspace)}
 
     def updates(self, actor, workspace, after=None):
         with self.max.chat_transaction(actor, workspace, snapshot=True) as db:

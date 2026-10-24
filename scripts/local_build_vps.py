@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT=Path("/opt/center-messenger-github")
 REPO="rastudiocmit-bot/ramessenger"
 STATE=ROOT/"local-build-state.json"
-REV="0012_member_sections"
+REV="0013_ai_voice"
 
 def run(*a, cwd=None, timeout=120):
     return subprocess.run(a,cwd=cwd,check=True,stdout=subprocess.PIPE,

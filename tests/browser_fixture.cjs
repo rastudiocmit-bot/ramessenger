@@ -2,8 +2,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const web = path.join(__dirname, '../app/backend/src/center_messenger/web');
-async function fixture(context, role = 'owner', sections = ['overview', 'messages', 'security']) {
+async function fixture(context, role = 'owner', sections = ['overview', 'messages', 'security'], options = {}) {
   const calls = [], mutations = [], errors = [], unexpected = [];
+  // Voice input and AI agents (Connections → service settings). Off in the chat unless asked.
+  const ai = { settings: { configured: Boolean(options.voice), folder_id: options.voice ? 'b1gexamplefolder0000' : '', key_hint: options.voice ? 'k3y9' : '',
+      voice_enabled: Boolean(options.voice), monthly_limit_rub: null, status: options.voice ? 'active' : 'not_configured', error: null, verified_at: null,
+      month_spent_rub: 0, vault_ready: true, models: [{ id: 'yandexgpt-5.1', title: 'YandexGPT Pro 5.1' }, { id: 'aliceai-llm', title: 'Alice AI LLM' }],
+      tasks: [{ id: 'voice_input', title: 'Голосовой ввод' }], default_model: 'yandexgpt-5.1', default_prompt: 'Нормализуй текст, убери слова-паразиты.' },
+    agents: [], transcribe: [], failNext: 0 };
   context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
   const conversations = Array.from({ length: 40 }, (_, n) => ({ id: 'client-' + n,
     name: n === 0 ? 'Анна Смирнова' : 'Клиент ' + String(n + 1).padStart(2, '0'), students: [n === 0 ? 'Миша, 6 лет' : 'Ученик ' + (n + 1)],
@@ -49,7 +55,34 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       workspaces: [{ id: 'test', name: 'Развивайся', role, timezone: 'Europe/Moscow', sections }] };
     else if (p === '/api/auth/sessions') payload = { sessions: [{ id: 'session', current: true, device_label: 'Chrome · Linux', last_seen_at: '2026-10-24T11:00:00Z' }] };
     else if (p === '/api/auth/logout') payload = {};
-    else if (p.endsWith('/chats/context')) payload = { channels, branches, can_write: role !== 'observer', send_attachments: false };
+    else if (p.endsWith('/chats/context')) payload = { channels, branches, can_write: role !== 'observer', send_attachments: false,
+      voice_input: Boolean(options.voice) && role !== 'observer' };
+    else if (p.endsWith('/ai/settings')) {
+      if (method === 'PUT') Object.assign(ai.settings, { folder_id: entry.body.folder_id, voice_enabled: entry.body.voice_enabled, monthly_limit_rub: entry.body.monthly_limit_rub,
+        key_hint: entry.body.clear_key ? '' : entry.body.api_key ? entry.body.api_key.slice(-4) : ai.settings.key_hint, status: 'not_configured' },
+        { configured: Boolean(entry.body.folder_id) && !entry.body.clear_key && Boolean(entry.body.api_key || ai.settings.key_hint) });
+      payload = ai.settings;
+    } else if (p.endsWith('/ai/settings/verify')) { ai.settings.status = 'active'; payload = { ...ai.settings, ok: true }; }
+    else if (p.endsWith('/ai/agents/test')) payload = { text: 'Здравствуйте! Занятие завтра переносится на 17:00.', fallback: false, cost_rub: 0.12, tokens: { input: 140, output: 18 } };
+    else if (/\/ai\/agents\/[^/]+\/versions$/.test(p)) payload = { versions: [{ version: 1, name: 'Чистовик', model: 'yandexgpt-5.1', prompt: 'Первая версия', temperature: 0.2, created_at: '2026-10-24T20:00:00Z', author: 'Олег Иванов' }] };
+    else if (/\/ai\/agents\/[^/]+$/.test(p)) {
+      const id = p.split('/').pop(), index = ai.agents.findIndex(agent => agent.id === id);
+      if (method === 'DELETE') { ai.agents.splice(index, 1); return route.fulfill({ status: 204, body: '' }); }
+      if (entry.body.is_default) ai.agents.forEach(agent => { agent.is_default = false; });
+      ai.agents[index] = { ...ai.agents[index], ...entry.body, version: ai.agents[index].version + 1 }; payload = ai.agents[index];
+    } else if (p.endsWith('/ai/agents')) {
+      if (method === 'POST') {
+        if (entry.body.is_default || !ai.agents.some(agent => agent.is_default)) ai.agents.forEach(agent => { agent.is_default = false; });
+        const agent = { id: 'agent-' + (ai.agents.length + 1), ...entry.body, is_default: entry.body.is_default || !ai.agents.some(a => a.is_default),
+          task_title: 'Голосовой ввод', model_title: 'YandexGPT Pro 5.1', version: 1, updated_at: '2026-10-24T20:00:00Z' };
+        ai.agents.push(agent); payload = agent;
+      } else payload = { agents: ai.agents };
+    } else if (p.endsWith('/voice/transcribe')) {
+      ai.transcribe.push(entry.body);
+      if (ai.failNext > 0) { ai.failNext -= 1; return route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"Yandex Cloud сейчас недоступен. Повторите позже."}' }); }
+      payload = { raw_text: 'ну это здравствуйте завтра занятие в пять', text: 'Здравствуйте! Завтра занятие в 17:00.', seconds: 1.5,
+        agent: { id: 'agent-1', name: 'Чистовик' }, fallback: false, warning: null };
+    }
     else if (p.endsWith('/summary')) payload = metrics;
     else if (p.endsWith('/chat-updates')) payload = { updates: [], next_seq: 4, has_more: false };
     else if (p.endsWith('/chats')) {
@@ -77,6 +110,6 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     else { unexpected.push(method + ' ' + p); return route.fulfill({ status: 501, contentType: 'application/json', body: '{"detail":"Unmocked request"}' }); }
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) });
   });
-  return { calls, mutations, errors, unexpected, conversations, messages };
+  return { calls, mutations, errors, unexpected, conversations, messages, ai };
 }
 module.exports = { fixture };

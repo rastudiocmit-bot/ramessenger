@@ -39,24 +39,24 @@ class ConnectorVault:
 
     @staticmethod
     def _aad(workspace: UUID, connection: UUID, purpose="alfa"):
-        if purpose not in {"alfa", "alfa-max-browser"}:
+        if purpose not in {"alfa", "alfa-max-browser", "yandex-ai"}:
             raise ValueError("Unsupported connector secret purpose")
         return f"center-messenger:{purpose}:v1:{workspace}:{connection}".encode()
 
-    def seal(self, workspace: UUID, connection: UUID, payload: dict) -> str:
+    def seal(self, workspace: UUID, connection: UUID, payload: dict, *, purpose="alfa") -> str:
         nonce = secrets.token_bytes(12)
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-        encrypted = AESGCM(self._key()).encrypt(nonce, data, self._aad(workspace, connection))
+        encrypted = AESGCM(self._key()).encrypt(nonce, data, self._aad(workspace, connection, purpose))
         return "v1." + base64.urlsafe_b64encode(nonce + encrypted).decode()
 
-    def open(self, workspace: UUID, connection: UUID, ciphertext: str) -> dict:
+    def open(self, workspace: UUID, connection: UUID, ciphertext: str, *, purpose="alfa") -> dict:
         key = self._key()
         try:
             if not ciphertext.startswith("v1.") or len(ciphertext) > 50000:
                 raise ValueError
             raw = base64.b64decode(ciphertext[3:], altchars=b"-_", validate=True)
             payload = json.loads(
-                AESGCM(key).decrypt(raw[:12], raw[12:], self._aad(workspace, connection))
+                AESGCM(key).decrypt(raw[:12], raw[12:], self._aad(workspace, connection, purpose))
             )
             if not isinstance(payload, dict) or not isinstance(payload.get("api_key"), str):
                 raise ValueError

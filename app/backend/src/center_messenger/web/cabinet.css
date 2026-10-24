@@ -1084,3 +1084,77 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* Keep offscreen dialog rows cheap; updates retain the existing keyed nodes. */
 .chat-list-scroll { overflow-anchor: none; }
 .chat-list .row-wrap, #chat-list > .row-wrap { content-visibility: auto; contain-intrinsic-size: auto 102px; }
+
+/* ── Voice input ────────────────────────────────────────────────────────────────
+   Desktop: a light disc left of "send". Phone, empty field: the round button IS the
+   microphone; once there is text it is "send" again. While recording or processing
+   a panel covers the field. */
+.voice-btn{width:48px;height:48px;min-height:0;flex:none;border-radius:50%;display:grid;place-items:center;
+  background:var(--surface);color:var(--primary-ink);box-shadow:var(--card);transition:transform .15s,background .15s}
+.voice-btn:hover{background:var(--primary-tint)}
+.voice-btn:active{transform:scale(.92)}
+.voice-btn svg{width:22px;height:22px}
+.voice-btn[hidden]{display:none}
+.compose.voice-swap #chat-send{display:none}
+.compose.voice-swap .voice-btn{background:var(--send);color:#fff;box-shadow:0 5px 18px var(--send-glow), inset 0 1px 0 rgba(255,255,255,.2)}
+.compose.voice-active .field{visibility:hidden}
+.compose.voice-active #chat-send{visibility:hidden}
+.voice-panel{position:absolute;inset:auto 0 0 0;min-height:48px;display:flex;align-items:center;gap:10px;
+  padding:0 6px 0 16px;background:var(--surface);border-radius:16px;box-shadow:var(--card);color:var(--ink);z-index:2}
+.voice-panel[hidden]{display:none}
+.voice-dot{width:10px;height:10px;flex:none;border-radius:50%;background:var(--danger);animation:voice-pulse 1.2s ease-in-out infinite}
+.voice-panel[data-phase="working"] .voice-dot{background:var(--primary);animation:voice-pulse .7s ease-in-out infinite}
+.voice-panel[data-phase="error"] .voice-dot{animation:none}
+@keyframes voice-pulse{50%{opacity:.25}}
+.voice-label{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.voice-panel[data-phase="error"] .voice-label{color:var(--danger);white-space:normal;font-weight:550;font-size:13px;line-height:1.35;padding:6px 0}
+.voice-time{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.voice-time[hidden],.voice-meter[hidden]{display:none}
+.voice-meter{flex:1;min-width:24px;max-width:120px;height:6px;border-radius:3px;background:var(--sunken);overflow:hidden}
+.voice-meter i{display:block;height:100%;background:var(--primary);transform-origin:left;transform:scaleX(0);transition:transform .12s linear}
+.voice-actions{display:flex;gap:4px;margin-left:auto;flex:none}
+.voice-actions button{min-height:0;height:38px;padding:0 12px;border-radius:12px;font-size:13.5px;font-weight:600;color:var(--muted)}
+.voice-actions button:hover{background:var(--surface-2)}
+.voice-actions button[hidden]{display:none}
+.voice-actions .voice-done,.voice-actions .voice-retry{display:inline-flex;align-items:center;gap:6px;background:var(--primary);color:var(--on-primary)}
+.voice-actions .voice-done:hover,.voice-actions .voice-retry:hover{background:var(--primary-deep)}
+.voice-actions .voice-done svg{width:16px;height:16px}
+@media (max-width:420px){.voice-meter{display:none}.voice-actions button{padding:0 10px}}
+
+/* ── Connections → Yandex Cloud and AI agents ──────────────────────────────────── */
+.ai-section-title{margin-top:26px}
+.ai-services .card-heading .btn{height:34px;min-height:0;padding:0 12px;font-size:13px}
+.ai-voice-toggle{margin:4px 0 14px;font-weight:550}
+.ai-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.ai-agent-list{display:grid;border:1px solid var(--line);border-radius:14px;overflow:hidden;margin:10px 0 0}
+.ai-agent-list>p{margin:0;padding:12px 14px}
+.ai-agent{display:flex;align-items:center;gap:10px;width:100%;min-height:56px;padding:9px 14px;text-align:left;background:var(--surface);color:var(--ink)}
+.ai-agent+.ai-agent{border-top:1px solid var(--line)}
+.ai-agent:hover{background:var(--surface-2)}
+.ai-agent.selected{background:var(--primary-tint)}
+.ai-agent.off .ai-agent-main{opacity:.6}
+.ai-agent-main{flex:1;min-width:0}
+.ai-agent-main strong,.ai-agent-main small{display:block}
+.ai-agent-main strong{font-size:14px;font-weight:600}
+.ai-agent-main small{font-size:12px;color:var(--muted);margin-top:2px}
+.ai-default{background:var(--primary-tint);color:var(--primary-ink)}
+.ai-agent-form{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.ai-agent-form h3{margin:0 0 12px;font-size:16px;font-weight:650}
+.ai-agent-form textarea{width:100%;resize:vertical;font:inherit;line-height:1.45;padding:10px 12px;border-radius:12px}
+.ai-agent-form input[type=range]{padding:0;min-height:30px;accent-color:var(--primary);width:100%}
+.ai-agent-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:560px){.ai-agent-row{grid-template-columns:1fr}}
+.ai-agent-test{margin:14px 0;padding:12px;border-radius:14px;background:var(--surface-2);border:1px solid var(--line-soft)}
+.ai-agent-test .fld{margin-bottom:8px}
+.ai-agent-result{margin:10px 0 0;display:grid;gap:4px;font-size:14px;line-height:1.45}
+.ai-agent-result strong{font-size:12px;color:var(--muted);font-weight:600}
+.ai-agent-result small{font-size:11.5px;color:var(--faint)}
+.ai-agent-result[hidden]{display:none}
+.ai-agent-versions{margin:0 0 14px}
+.ai-agent-versions summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--primary-ink);padding:6px 0}
+.ai-agent-versions ol{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:8px}
+.ai-agent-versions li{display:grid;gap:3px;padding:10px 12px;border-radius:12px;border:1px solid var(--line-soft)}
+.ai-agent-versions li strong{font-size:13px}
+.ai-agent-versions li small{font-size:11.5px;color:var(--muted)}
+.ai-agent-versions li span{font-size:12.5px;color:var(--ink);white-space:pre-wrap;max-height:4.5em;overflow:hidden}
+.ai-agent-versions li .text-button{justify-self:start;min-height:0;padding:4px 0}

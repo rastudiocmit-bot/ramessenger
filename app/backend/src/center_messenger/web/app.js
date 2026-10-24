@@ -170,7 +170,7 @@
     form.elements.name.disabled = !manage;
     show($("button[type=submit]", form), Boolean(manage));
     show($("#workspace-readonly"), !manage);
-    if (state.pane === "connections") await Promise.allSettled([loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
+    if (state.pane === "connections") await Promise.allSettled([ai.load(), loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
     if (state.pane === "messages") { chat.setView(state.chatView || "all", false); await chat.enter(); }
     if (state.pane === "summary") await cabinet.summary();
     if (state.pane === "clients") await directory.enter();
@@ -619,6 +619,8 @@
   }
   const directory = window.CenterDirectory({ $, state, api, node, show, notice, date });
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast, confirm, renderPane });
+  window.CenterVoice({ $, state, api, toast });
+  const ai = window.CenterAi({ $, state, api, node, show, notice, toast, confirm });
   const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date, onStatus: (payload, view) => {
     connectionSummary("#alfa-history-summary", view.title, view.mode === "complete" ? "active" : ["error", "offline", "attention"].includes(view.mode) ? "error" : "waiting");
     if (payload && state.alfaMax && payload.state !== state.alfaMax.state) loadAlfaMax().catch(error => { if (error.name !== "AbortError") notice(error.message, $("#alfa-max-error")); });
