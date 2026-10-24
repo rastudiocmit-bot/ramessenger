@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Center Messenger GitHub main and build locally
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=15min
+AccuracySec=1min
+Unit=ramessenger-local-build.service
+
+[Install]
+WantedBy=timers.target
