@@ -19,9 +19,24 @@ MOSCOW = ZoneInfo("Europe/Moscow")
 
 
 class AlfaBrowserError(Exception):
-    def __init__(self, code):
+    def __init__(self, code, *, stage=None, cause=None, request=None, http_status=None):
         self.code = code
+        # Diagnostic metadata is deliberately bounded: never retain a URL,
+        # response, browser state or the original exception text here.
+        self.stage, self.cause = stage, cause
+        self.request, self.http_status = request, http_status
         super().__init__(code)
+
+
+def _browser_cause(error):
+    # Playwright has its own TimeoutError. Compare only the class hierarchy;
+    # do not inspect messages, which may contain URLs, cookies or form values.
+    classes = {kind.__name__ for kind in type(error).__mro__}
+    if "TimeoutError" in classes:
+        return "timeout"
+    if "TargetClosedError" in classes:
+        return "browser_closed"
+    return "browser_error"
 
 
 def _public_dns(host):
@@ -694,21 +709,25 @@ class AlfaMaxBrowser:
         host = urlsplit(normalize_origin(origin)).hostname
         _public_dns(host)
         manager = browser = context = None
+        stage = "start_driver"
         try:
             manager = sync_playwright().start()
+            stage = "launch_browser"
             browser = manager.chromium.launch(
                 headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
             )
+            stage = "open_context"
             context = browser.new_context(storage_state=storage_state, locale="ru-RU", timezone_id="Europe/Moscow")
             context.route("**/*", AlfaMaxBrowser._route_factory(origin))
+            stage = "open_page"
             page = context.new_page()
             return manager, browser, context, page
         except AlfaBrowserError:
             AlfaMaxBrowser._close(manager, browser, context)
             raise
-        except Exception:
+        except Exception as error:
             AlfaMaxBrowser._close(manager, browser, context)
-            raise AlfaBrowserError("browser_unavailable") from None
+            raise AlfaBrowserError("browser_unavailable", stage=stage, cause=_browser_cause(error)) from None
 
     @staticmethod
     def _close(manager, browser, context):
@@ -841,37 +860,46 @@ class AlfaMaxBrowser:
             ):
                 raise AlfaBrowserError("invalid_response")
         manager = browser = context = None
+        stage, request = "open_browser", None
         try:
             manager, browser, context, page = self._open(origin, state)
             results = []
             for branch, direction, page_number in requests:
+                request = (branch, direction, page_number)
                 if on_progress:
                     on_progress()
                 try:
                     address = _history_url(origin, branch, direction, page_number)
                     try:
+                        stage = "navigation"
                         response = page.goto(address, wait_until="domcontentloaded", timeout=20000)
+                        stage = "check_session"
                         self._check_origin(page, origin)
                         if response is None or response.status != 200:
-                            raise AlfaBrowserError("crm_unavailable")
+                            raise AlfaBrowserError("crm_unavailable", http_status=response.status if response else None)
+                        stage = "parse_page"
                         result = parse_history_html(
                             response.text(), origin=origin, branch=branch,
                             direction=direction, page=page_number,
                         )
                     except AlfaBrowserError:
                         raise
-                    except Exception:
-                        raise AlfaBrowserError("crm_unavailable") from None
+                    except Exception as error:
+                        raise AlfaBrowserError("crm_unavailable", cause=_browser_cause(error)) from None
                     results.append(result)
                 except AlfaBrowserError as error:
+                    error.stage, error.request = error.stage or stage, request
                     if not continue_on_error or error.code not in {"invalid_response", "crm_unavailable"}:
                         raise
                     results.append({"error": error.code})
+            stage = "save_session"
             return results, context.storage_state()
-        except AlfaBrowserError:
+        except AlfaBrowserError as error:
+            error.stage = error.stage or stage
+            error.request = error.request or request
             raise
-        except Exception:
-            raise AlfaBrowserError("crm_unavailable") from None
+        except Exception as error:
+            raise AlfaBrowserError("crm_unavailable", stage=stage, cause=_browser_cause(error), request=request) from None
         finally:
             self._close(manager, browser, context)
 
