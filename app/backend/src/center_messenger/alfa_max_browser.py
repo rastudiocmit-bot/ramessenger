@@ -100,8 +100,15 @@ def _message_time(cell):
         visible,
     )
     if not match:
-        return None
-    hour, minute, second, fraction, day, month, year = match.groups()
+        match = re.search(
+            r"(\d{2})\.(\d{2})\.(\d{4}).*?(\d{2}):(\d{2})"
+            r"(?::(\d{2})(?:[.,](\d{1,6}))?)?", visible,
+        )
+        if not match:
+            return None
+        day, month, year, hour, minute, second, fraction = match.groups()
+    else:
+        hour, minute, second, fraction, day, month, year = match.groups()
     try:
         return datetime(
             int(year),
@@ -266,7 +273,7 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
         key = row.get("data-key", "")
         cells = row.find_all("td", recursive=False)
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", key) or len(cells) < 5:
-            continue
+            _reject_history_response("history_row_identity", branch, direction, page)
         customers = []
         seen = set()
         for anchor in row.select("a[href]"):
@@ -291,7 +298,8 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
         )
         when = _message_time(cells[4])
         if not when:
-            continue
+            # Advancing past an unparsed timestamp permanently lost messages.
+            _reject_history_response("history_row_time", branch, direction, page)
         links = []
         for anchor in cells[3].select("a[href]"):
             name = " ".join(anchor.get_text(" ", strip=True).split()) or "Вложение"
@@ -677,6 +685,7 @@ class AlfaMaxBrowser:
         sync_playwright = AlfaMaxBrowser._playwright()
         host = urlsplit(normalize_origin(origin)).hostname
         _public_dns(host)
+        manager = browser = context = None
         try:
             manager = sync_playwright().start()
             browser = manager.chromium.launch(
@@ -687,8 +696,10 @@ class AlfaMaxBrowser:
             page = context.new_page()
             return manager, browser, context, page
         except AlfaBrowserError:
+            AlfaMaxBrowser._close(manager, browser, context)
             raise
         except Exception:
+            AlfaMaxBrowser._close(manager, browser, context)
             raise AlfaBrowserError("browser_unavailable") from None
 
     @staticmethod
@@ -812,7 +823,7 @@ class AlfaMaxBrowser:
         results, next_state = self.read_histories(origin, state, [(branch, direction, page_number)])
         return results[0], next_state
 
-    def read_histories(self, origin, state, requests):
+    def read_histories(self, origin, state, requests, *, on_progress=None):
         origin = normalize_origin(origin)
         for branch, direction, page_number in requests:
             if (
@@ -826,6 +837,8 @@ class AlfaMaxBrowser:
             manager, browser, context, page = self._open(origin, state)
             results = []
             for branch, direction, page_number in requests:
+                if on_progress:
+                    on_progress()
                 address = _history_url(origin, branch, direction, page_number)
                 response = page.goto(address, wait_until="domcontentloaded", timeout=20000)
                 self._check_origin(page, origin)

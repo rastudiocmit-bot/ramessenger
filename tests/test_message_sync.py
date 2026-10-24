@@ -1,0 +1,488 @@
+"""Regression tests for browser-polled CRM history and chat reads.
+
+Set CM_TEST_DATABASE_URL to an isolated PostgreSQL database. Each test rolls
+back its data; the suite creates and removes its own randomly named schema.
+"""
+
+import importlib.util
+import json
+import os
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+from uuid import UUID, uuid4
+
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import create_engine, text
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "app/backend/src"))
+
+from center_messenger.alfa_max import AlfaMaxConnections, AlfaMaxWorker, _history_page_batch
+from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser, _message_time, parse_history_html
+from bs4 import BeautifulSoup
+from center_messenger.chat_api import ChatReader, SendInput
+from center_messenger.chat_store import changed, project_event, refresh_unread
+from center_messenger.crm_api import DirectoryReader
+from center_messenger.auth_security import AuthError
+
+
+class PageTests(unittest.TestCase):
+    def test_last_older_page_finishes_backfill(self):
+        latest = {"messages": [], "has_more": True}
+        oldest = {"messages": [], "has_more": False}
+        self.assertEqual(_history_page_batch(latest, 5, oldest), ([latest, oldest], 0))
+
+    def test_browser_parser_preserves_stable_identity_and_exact_time(self):
+        html = '''<table class="crm-table"><tbody>
+          <tr data-key="9007199254740993"><td></td><td>
+            <a href="/company/2/customer/view?id=7">Клиент</a></td>
+            <td>Клиент</td><td>Привет</td>
+            <td><time datetime="2026-10-24T03:10:11.123456+03:00">03:10</time></td>
+          </tr></tbody></table>'''
+        result = parse_history_html(html, origin="https://test.s20.online", branch=2,
+                                    direction="receive")
+        self.assertEqual(result["messages"][0]["record_id"], "9007199254740993")
+        self.assertEqual(result["messages"][0]["occurred_at"],
+                         datetime(2026, 10, 24, 0, 10, 11, 123456, tzinfo=UTC))
+
+    def test_browser_does_not_silently_advance_past_an_unparsed_row(self):
+        html = '<table class="crm-table"><tbody><tr data-key="1"><td></td><td></td><td></td><td>Hello</td><td>unknown</td></tr></tbody></table>'
+        with self.assertRaises(AlfaBrowserError) as error:
+            parse_history_html(html, origin="https://test.s20.online", branch=1, direction="receive")
+        self.assertEqual(error.exception.code, "invalid_response")
+
+    def test_failed_browser_start_releases_its_playwright_manager(self):
+        manager = Mock()
+        manager.chromium.launch.side_effect = RuntimeError("cannot launch")
+        factory = Mock()
+        factory.return_value.start.return_value = manager
+        with patch.object(AlfaMaxBrowser, "_playwright", return_value=factory), \
+             patch("center_messenger.alfa_max_browser._public_dns"):
+            with self.assertRaises(AlfaBrowserError):
+                AlfaMaxBrowser._open("https://test.s20.online")
+        manager.stop.assert_called_once()
+
+    def test_visible_crm_date_can_precede_the_time(self):
+        cell = BeautifulSoup('<td>24.10.2026 03:10:11,123456</td>', 'html.parser').td
+        self.assertEqual(_message_time(cell), datetime(2026, 10, 24, 0, 10, 11, 123456, tzinfo=UTC))
+
+    def test_browser_renews_the_lease_before_each_history_navigation(self):
+        manager, browser, context, page, progress = [Mock() for _ in range(5)]
+        page.goto.return_value = SimpleNamespace(status=200, text=lambda: '<table class="crm-table"></table>')
+        context.storage_state.return_value = {"cookies": [{"name": "test"}]}
+        with patch.object(AlfaMaxBrowser, "_open", return_value=(manager, browser, context, page)), \
+             patch.object(AlfaMaxBrowser, "_check_origin"):
+            results, state = AlfaMaxBrowser().read_histories(
+                "https://test.s20.online", {}, [(1, "receive", 0), (1, "sent", 0)], on_progress=progress)
+        self.assertEqual(progress.call_count, 2)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(state, context.storage_state.return_value)
+        context.close.assert_called_once()
+
+
+@unittest.skipUnless(os.environ.get("CM_TEST_DATABASE_URL"), "isolated PostgreSQL URL required")
+class MessageSyncTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        url = os.environ["CM_TEST_DATABASE_URL"].replace("postgres://", "postgresql+psycopg://", 1)
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+        cls.engine = create_engine(url)
+        cls.db = cls.engine.connect()
+        cls.schema = "message_test_" + uuid4().hex
+        cls.db.execute(text("DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='cm_app') "
+                            "THEN CREATE ROLE cm_app; END IF; END $$"))
+        cls.db.execute(text(f'CREATE SCHEMA "{cls.schema}"'))
+        cls.db.execute(text(f'SET search_path TO "{cls.schema}",public'))
+        context = MigrationContext.configure(cls.db)
+        context._ensure_version_table()
+        with Operations.context(context):
+            for path in sorted((ROOT / "app/backend/migrations/versions").glob("*.py")):
+                spec = importlib.util.spec_from_file_location(path.stem, path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                module.upgrade()
+        cls.db.commit()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.db.rollback()
+        cls.db.execute(text(f'DROP SCHEMA "{cls.schema}" CASCADE'))
+        cls.db.commit()
+        cls.db.close()
+        cls.engine.dispose()
+
+    def setUp(self):
+        self.transaction = self.db.begin()
+        self.workspace, self.channel, self.crm, self.run, self.contact, self.user = [uuid4() for _ in range(6)]
+        self.at = datetime(2026, 10, 24, 0, 0, tzinfo=UTC)
+        self.db.execute(text("INSERT INTO workspaces(id,name) VALUES (:id,'Test')"), {"id": self.workspace})
+        self.db.execute(text("INSERT INTO auth_users(id,email,display_name,password_hash) "
+                             "VALUES (:id,:email,'Operator','unused')"),
+                        {"id": self.user, "email": f"{self.user}@example.test"})
+        for connection, kind in [(self.channel, "alfa_max_browser"), (self.crm, "alfa_crm")]:
+            self.db.execute(text("INSERT INTO connections(workspace_id,id,kind,name,status) "
+                                 "VALUES (:w,:id,:kind,'Test','active')"),
+                            {"w": self.workspace, "id": connection, "kind": kind})
+        self.db.execute(text("INSERT INTO alfa_settings(workspace_id,connection_id,origin,api_email,secret_ciphertext) "
+                             "VALUES (:w,:c,'https://test.s20.online','test@example.test','test')"),
+                        {"w": self.workspace, "c": self.crm})
+        self.db.execute(text("INSERT INTO alfa_max_settings(workspace_id,connection_id,crm_connection_id,email,state,session_ciphertext) "
+                             "VALUES (:w,:c,:crm,'test@example.test','active','test')"),
+                        {"w": self.workspace, "c": self.channel, "crm": self.crm})
+        self.db.execute(text("INSERT INTO alfa_sync_runs(workspace_id,id,connection_id,settings_version,requested_by,state) "
+                             "VALUES (:w,:r,:c,1,:u,'succeeded')"),
+                        {"w": self.workspace, "r": self.run, "c": self.crm, "u": self.user})
+        for branch in (1, 2):
+            self.db.execute(text("INSERT INTO alfa_branches(workspace_id,connection_id,external_id,name) "
+                                 "VALUES (:w,:c,:b,:name)"),
+                            {"w": self.workspace, "c": self.crm, "b": branch, "name": f"Branch {branch}"})
+        self.add_customer(self.contact, 1, 7)
+        self.snapshot = {"run": self.run, "connection_id": self.crm}
+        published = patch.object(DirectoryReader, "_published", return_value=self.snapshot)
+        self.published = published.start()
+        self.addCleanup(published.stop)
+
+        @contextmanager
+        def transaction(*args, **kwargs):
+            with self.db.begin_nested():
+                yield self.db
+
+        self.accounts = SimpleNamespace(transaction=transaction, throttle=Mock())
+        self.service = AlfaMaxConnections(SimpleNamespace(accounts=self.accounts, vault=Mock()), browser=Mock())
+        maximum = SimpleNamespace(chat_transaction=transaction, accounts=self.accounts)
+        self.reader = ChatReader(SimpleNamespace(max=maximum, alfa_max=self.service))
+
+    def tearDown(self):
+        self.transaction.rollback()
+
+    def add_customer(self, contact, branch, customer):
+        self.db.execute(text("INSERT INTO contacts(workspace_id,id,display_name) VALUES (:w,:id,'Parent') "
+                             "ON CONFLICT DO NOTHING"), {"w": self.workspace, "id": contact})
+        self.db.execute(text("INSERT INTO alfa_customers(workspace_id,run_id,branch_id,external_id,name,status,contact_id) "
+                             "VALUES (:w,:r,:b,:id,'Child','client',:contact)"),
+                        {"w": self.workspace, "r": self.run, "b": branch, "id": customer, "contact": contact})
+        self.db.execute(text("INSERT INTO alfa_directory(workspace_id,run_id,contact_id,display_name,phones,emails,search_text) "
+                             "VALUES (:w,:r,:id,'Parent','[]','[]','parent') ON CONFLICT DO NOTHING"),
+                        {"w": self.workspace, "r": self.run, "id": contact})
+
+    def row(self, record="1", *, direction="in", branch=1, customer=7, actor=None, body="Hello", at=None):
+        return {"record_id": record, "crm_order": int(record), "direction": direction,
+                "customers": [{"branch_id": branch, "customer_id": customer, "name": "Child", "status": "client"}],
+                "attachments": [], "actor_name": "Operator" if direction == "out" else "Parent",
+                "actor_type": actor or ("human" if direction == "out" else "contact"),
+                "actor_id": "42" if direction == "out" else None, "failed": False,
+                "text": body, "occurred_at": at or self.at}
+
+    def project(self, *rows, branch=1):
+        self.service._project_page(self.db, self.workspace, self.channel, self.crm, branch, rows)
+
+    def messages(self):
+        return self.db.execute(text("SELECT * FROM messages WHERE workspace_id=:w "
+                                    "AND payload->>'superseded_by' IS NULL ORDER BY occurred_at,id"),
+                               {"w": self.workspace}).mappings().all()
+
+    def conversation(self):
+        return self.db.execute(text("SELECT * FROM conversations WHERE workspace_id=:w "
+                                    "AND last_inbound_at IS NOT NULL"), {"w": self.workspace}).mappings().one()
+
+    def local_reply(self, conversation, *, seconds=5):
+        command, message = uuid4(), uuid4()
+        self.db.execute(text("INSERT INTO send_commands(workspace_id,id,conversation_id,client_request_id,payload,payload_hash,state) "
+                             "VALUES (:w,:id,:c,:request,CAST(:payload AS jsonb),:hash,'accepted')"),
+                        {"w": self.workspace, "id": command, "c": conversation, "request": str(uuid4()),
+                         "payload": json.dumps({"text": "Reply", "conversation_id": str(conversation)}), "hash": "0" * 64})
+        self.db.execute(text("INSERT INTO messages(workspace_id,id,conversation_id,direction,actor_type,text,payload,occurred_at,send_command_id) "
+                             "VALUES (:w,:id,:c,'out','human','Reply',CAST(:p AS jsonb),:at,:command)"),
+                        {"w": self.workspace, "id": message, "c": conversation,
+                         "p": json.dumps({"source": "center_messenger_alfa_max", "crm_branch": 1, "customer_id": 7}),
+                         "at": self.at + timedelta(seconds=seconds), "command": command})
+        return message
+
+    def test_repeated_page_is_idempotent(self):
+        self.project(self.row())
+        first_seq = self.conversation()["inbound_seq"]
+        self.project(self.row())
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.conversation()["inbound_seq"], first_seq)
+
+    def test_same_text_and_timestamp_are_distinct_source_messages(self):
+        self.project(self.row("1"), self.row("2"))
+        self.assertEqual(len(self.messages()), 2)
+
+    def test_contact_lookup_includes_customer_branch(self):
+        other = uuid4()
+        self.add_customer(other, 2, 7)
+        self.project(self.row(branch=2), branch=2)
+        self.assertEqual(self.conversation()["contact_id"], other)
+
+    def test_linking_an_imported_customer_moves_the_same_message(self):
+        self.published.return_value = None
+        self.project(self.row())
+        original = self.messages()[0]
+        self.published.return_value = self.snapshot
+        self.project(self.row())
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.messages()[0]["id"], original["id"])
+        self.assertEqual(self.conversation()["contact_id"], self.contact)
+        self.assertEqual(self.messages()[0]["conversation_id"], self.conversation()["id"])
+
+    def test_local_reply_matches_a_crm_employee_id(self):
+        self.project(self.row())
+        message = self.local_reply(self.conversation()["id"])
+        self.project(self.row("20", direction="out", body="Reply", at=self.at + timedelta(seconds=10)))
+        self.assertEqual(len(self.messages()), 2)
+        self.assertEqual(self.db.execute(text("SELECT message_id FROM source_records "
+                                             "WHERE workspace_id=:w AND external_record_id='out:1:20'"),
+                                        {"w": self.workspace}).scalar_one(), message)
+
+    def test_two_crm_rows_cannot_claim_one_local_send(self):
+        self.project(self.row())
+        self.local_reply(self.conversation()["id"])
+        outgoing = self.row("20", direction="out", body="Reply", at=self.at + timedelta(seconds=5))
+        outgoing["actor_id"] = None
+        self.project(outgoing, outgoing | {"record_id": "21", "crm_order": 21})
+        self.assertEqual(len(self.messages()), 3)
+
+    def test_history_pages_use_crm_order_for_equal_timestamps(self):
+        rows = [self.row(str(i), body=f"Message {i}") for i in range(1, 46)]
+        self.project(*rows)
+        conversation = self.conversation()["id"]
+        collected, kwargs = [], {}
+        while True:
+            result = self.reader.history(None, self.workspace, conversation, **kwargs)
+            collected = result["messages"] + collected
+            if not result["has_more"]:
+                break
+            first = result["messages"][0]
+            kwargs = {"before_time": first["occurred_at"], "before_id": UUID(first["id"])}
+        self.assertEqual([str(m["crm_order"]) for m in collected], [str(i) for i in range(1, 46)])
+
+    def test_listing_preview_is_the_last_visible_message(self):
+        self.project(self.row("1", body="Question"),
+                     self.row("2", body="Automated reminder", direction="out", actor="automation",
+                              at=self.at + timedelta(minutes=1)))
+        result = self.reader.listing(None, self.workspace)
+        self.assertEqual(result["conversations"][0]["preview"], "Automated reminder")
+
+    def test_worker_persists_progress_instead_of_restoring_old_cursor(self):
+        cursor = self.run_worker({"projection_version": 2, "1:receive": 1, "1:sent": 1})
+        self.assertEqual(cursor["1:receive"], 2)
+
+    def run_worker(self, cursor, page_result=None, browser_effect=None):
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) WHERE workspace_id=:w"),
+                        {"w": self.workspace, "cursor": json.dumps(cursor)})
+        self.db.execute(text("INSERT INTO alfa_max_sync_queue(workspace_id,connection_id) VALUES (:w,:c) "
+                             "ON CONFLICT(workspace_id) DO UPDATE SET due_at='-infinity',lease_until='-infinity',lease_owner=NULL"),
+                        {"w": self.workspace, "c": self.channel})
+        self.service._row = Mock(side_effect=lambda db, w: db.execute(
+            text("SELECT *, 'https://test.s20.online' AS crm_origin FROM alfa_max_settings WHERE workspace_id=:w"),
+            {"w": w}).mappings().one())
+        self.service.sms_templates = Mock()
+        self.service.vault.seal_browser_state.return_value = "new-session"
+        self.service.browser.read_histories.side_effect = browser_effect or (
+            lambda origin, session, requests, **kwargs: (
+                [page_result(request) if page_result else {"messages": [], "has_more": True} for request in requests], {}))
+        worker = AlfaMaxWorker(self.service)
+        worker.run_next()
+        cursor = self.db.execute(text("SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w"),
+                                 {"w": self.workspace}).scalar_one()
+        return cursor
+
+    def test_completed_backfill_does_not_restart_on_every_poll(self):
+        cursor = self.run_worker({"projection_version": 2, "1:receive": 2},
+                                 page_result=lambda request: {"messages": [], "has_more": request[2] == 0})
+        self.assertEqual(cursor["1:receive"], 0)
+        self.assertTrue(cursor["complete:1:receive"])
+        self.service.browser.read_histories.reset_mock()
+        cursor = self.run_worker(cursor)
+        self.assertEqual(cursor["1:receive"], 0)
+        requests = self.service.browser.read_histories.call_args.args[2]
+        self.assertNotIn((1, "receive", 1), requests)
+
+    def test_legacy_history_replays_once_to_repair_existing_aliases(self):
+        cursor = self.run_worker({"1:receive": 9})
+        self.assertEqual(cursor["projection_version"], 2)
+        self.assertEqual(cursor["1:receive"], 1)
+        self.assertNotIn((1, "receive", 9), self.service.browser.read_histories.call_args.args[2])
+
+    def test_new_message_burst_reopens_backfill_near_the_head(self):
+        cursor = self.run_worker({"projection_version": 2, "1:receive": 0,
+                                  "complete:1:receive": True, "head:1:receive": "old"},
+                                 page_result=lambda request: {"messages": [self.row("10")], "has_more": True})
+        self.assertEqual(cursor["1:receive"], 1)
+        self.assertFalse(cursor["complete:1:receive"])
+
+    def test_settings_change_during_browser_read_cannot_publish_stale_history(self):
+        def changed_settings(origin, session, requests, **kwargs):
+            self.db.execute(text("UPDATE alfa_max_settings SET version=version+1 WHERE workspace_id=:w"),
+                            {"w": self.workspace})
+            return ([{"messages": [self.row()], "has_more": False} for _ in requests], {})
+        cursor = self.run_worker({"projection_version": 2}, browser_effect=changed_settings)
+        self.assertEqual(cursor, {"projection_version": 2})
+        self.assertEqual(self.messages(), [])
+
+    def test_loading_old_history_does_not_invalidate_a_current_reply(self):
+        self.project(self.row("20"))
+        current = self.conversation()["inbound_seq"]
+        self.project(self.row("1", at=self.at - timedelta(days=1)), self.row("2"))
+        self.assertEqual(self.conversation()["inbound_seq"], current)
+
+    def test_cursor_ahead_of_restored_database_resets_to_current_history(self):
+        self.project(self.row())
+        result = self.reader.history(None, self.workspace, self.conversation()["id"], after_seq=10_000)
+        self.assertTrue(result["reset"])
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertLess(result["next_seq"], 10_000)
+
+    def test_max_bot_replayed_create_does_not_duplicate(self):
+        bot = uuid4()
+        self.db.execute(text("INSERT INTO connections(workspace_id,id,kind,name) VALUES (:w,:c,'max_bot','Bot')"),
+                        {"w": self.workspace, "c": bot})
+        event = {"update_type": "message_created", "timestamp": 1792800000000,
+                 "message": {"timestamp": 1792800000000,
+                             "sender": {"user_id": 10, "is_bot": False, "first_name": "Parent"},
+                             "recipient": {"chat_type": "dialog", "user_id": 99},
+                             "body": {"mid": "stable-mid", "text": "Hello"}}}
+        project_event(self.db, self.workspace, bot, 99, event)
+        project_event(self.db, self.workspace, bot, 99, event)
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_late_send_confirmation_removes_already_imported_echo(self):
+        self.project(self.row())
+        conversation = self.conversation()["id"]
+        message = self.local_reply(conversation)
+        self.db.execute(text("UPDATE send_commands SET state='sending' WHERE workspace_id=:w"),
+                        {"w": self.workspace})
+        outgoing = self.row("20", direction="out", body="Reply", at=self.at + timedelta(seconds=5))
+        self.project(outgoing)
+        echo = next(m["id"] for m in self.messages() if m["direction"] == "out" and m["id"] != message)
+        before = self.reader.history(None, self.workspace, conversation)["next_seq"]
+        self.db.execute(text("UPDATE send_commands SET state='accepted' WHERE workspace_id=:w"),
+                        {"w": self.workspace})
+        self.project(outgoing)
+        self.assertEqual(len(self.messages()), 2)
+        delta = self.reader.history(None, self.workspace, conversation, after_seq=before)
+        self.assertIn(str(echo), delta["removed_ids"])
+        self.assertEqual([m["id"] for m in delta["messages"]], [str(message)])
+
+    def test_moved_message_is_removed_from_old_history_cache(self):
+        self.published.return_value = None
+        self.project(self.row())
+        message = self.messages()[0]
+        old = self.reader.history(None, self.workspace, message["conversation_id"])
+        self.published.return_value = self.snapshot
+        self.project(self.row())
+        delta = self.reader.history(None, self.workspace, message["conversation_id"], after_seq=old["next_seq"])
+        self.assertEqual(delta["messages"], [])
+        self.assertEqual(delta["removed_ids"], [str(message["id"])])
+
+    def test_unread_count_includes_new_message_in_the_same_second(self):
+        self.project(self.row("1"))
+        conversation = self.conversation()["id"]
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation)
+        self.project(self.row("2", body="Another question"))
+        listing = self.reader.listing(None, self.workspace)
+        self.assertTrue(listing["conversations"][0]["unread"])
+        self.assertEqual(listing["conversations"][0]["unread_count"], 1)
+
+    def test_import_restores_distinct_rows_previously_collapsed_by_content(self):
+        self.project(self.row("1"))
+        message = self.messages()[0]
+        self.db.execute(text("INSERT INTO source_records(workspace_id,id,connection_id,message_id,namespace,external_record_id) "
+                             "VALUES (:w,:id,:c,:m,'alfa_max','in:1:2')"),
+                        {"w": self.workspace, "id": uuid4(), "c": self.channel, "m": message["id"]})
+        self.project(self.row("2"))
+        self.assertEqual(len(self.messages()), 2)
+
+    def test_message_serialization_keeps_crm_bigint_and_attachment_names(self):
+        self.project(self.row("9007199254740993") | {"attachments": [{"name": "schedule.pdf"}]})
+        result = self.reader.history(None, self.workspace, self.conversation()["id"])
+        message = result["messages"][0]
+        self.assertEqual(message["crm_order"], "9007199254740993")
+        self.assertEqual(message["attachments"], ["file"])
+        self.assertEqual(message["attachment_names"], ["schedule.pdf"])
+
+    def test_one_verified_parent_has_one_chat_across_branches(self):
+        self.add_customer(self.contact, 2, 9)
+        self.project(self.row("1"))
+        self.project(self.row("2", branch=2, customer=9, body="Second branch"), branch=2)
+        self.assertEqual(len({m["conversation_id"] for m in self.messages()}), 1)
+        self.assertEqual(self.reader.listing(None, self.workspace)["total"], 1)
+
+    def test_old_branch_chats_merge_with_pending_sends_and_handled_state(self):
+        self.project(self.row("1"))
+        canonical = self.conversation()["id"]
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, canonical)
+        old = uuid4()
+        self.db.execute(text("INSERT INTO conversations(workspace_id,id,connection_id,contact_id,external_chat_id,peer_name) "
+                             "VALUES (:w,:id,:c,:contact,:external,'Parent')"),
+                        {"w": self.workspace, "id": old, "c": self.channel,
+                         "contact": self.contact, "external": f"alfa-contact:2:{self.contact}"})
+        pending = self.local_reply(old)
+        self.project(self.row("1"))
+        messages = self.messages()
+        self.assertTrue(all(m["conversation_id"] == canonical for m in messages))
+        self.assertEqual(self.db.execute(text("SELECT conversation_id FROM send_commands WHERE workspace_id=:w"),
+                                        {"w": self.workspace}).scalar_one(), canonical)
+        self.assertFalse(self.reader.listing(None, self.workspace)["conversations"][0]["unread"])
+        redirected = self.reader.history(None, self.workspace, old)
+        self.assertEqual(redirected["conversation"]["id"], str(canonical))
+        self.assertIn(str(pending), [m["id"] for m in redirected["messages"]])
+
+    def test_merging_proven_provider_echo_retains_local_send(self):
+        self.project(self.row("1"))
+        canonical = self.conversation()["id"]
+        outgoing = self.row("20", direction="out", body="Reply", at=self.at + timedelta(seconds=5))
+        self.project(outgoing)
+        old = uuid4()
+        self.db.execute(text("INSERT INTO conversations(workspace_id,id,connection_id,contact_id,external_chat_id,peer_name) "
+                             "VALUES (:w,:id,:c,:contact,:external,'Parent')"),
+                        {"w": self.workspace, "id": old, "c": self.channel,
+                         "contact": self.contact, "external": f"alfa-contact:2:{self.contact}"})
+        local = self.local_reply(old)
+        self.db.execute(text("UPDATE messages SET provider_message_id='alfa:out:1:20' WHERE workspace_id=:w AND id=:id"),
+                        {"w": self.workspace, "id": local})
+        self.project(self.row("1"))
+        self.assertEqual(len(self.messages()), 2)
+        self.assertIn(local, [m["id"] for m in self.messages()])
+        self.assertEqual(self.db.execute(text("SELECT message_id FROM source_records WHERE workspace_id=:w "
+                                             "AND external_record_id='out:1:20'"),
+                                        {"w": self.workspace}).scalar_one(), local)
+
+    def test_automation_is_not_correlated_to_a_human_send(self):
+        self.project(self.row("1"))
+        self.local_reply(self.conversation()["id"])
+        self.project(self.row("20", direction="out", body="Reply", actor="automation",
+                              at=self.at + timedelta(seconds=5)))
+        self.assertEqual(len(self.messages()), 3)
+        self.assertEqual(sum(m["actor_type"] == "automation" for m in self.messages()), 1)
+
+    def test_retry_of_a_send_in_a_merged_chat_is_still_idempotent(self):
+        self.project(self.row("1"))
+        old = uuid4()
+        self.db.execute(text("INSERT INTO conversations(workspace_id,id,connection_id,contact_id,external_chat_id,peer_name) "
+                             "VALUES (:w,:id,:c,:contact,:external,'Parent')"),
+                        {"w": self.workspace, "id": old, "c": self.channel,
+                         "contact": self.contact, "external": f"alfa-contact:2:{self.contact}"})
+        self.local_reply(old)
+        command = self.db.execute(text("SELECT * FROM send_commands WHERE workspace_id=:w"),
+                                  {"w": self.workspace}).mappings().one()
+        self.project(self.row("1"))
+        model = SendInput(request_id=UUID(command["client_request_id"]), text="Reply", seen_inbound_seq=0)
+        result = self.reader.send(SimpleNamespace(user_id=self.user), self.workspace, old, model)
+        self.assertEqual(result["command_id"], str(command["id"]))
+        with self.assertRaises(AuthError) as error:
+            self.reader.send(SimpleNamespace(user_id=self.user), self.workspace, old,
+                             model.model_copy(update={"text": "Different message"}))
+        self.assertEqual(error.exception.status, 409)
+
+
+if __name__ == "__main__":
+    unittest.main()

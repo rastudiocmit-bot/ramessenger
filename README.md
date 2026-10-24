@@ -40,8 +40,16 @@ curl --fail --silent --show-error http://127.0.0.1:8100/health/ready
 
 ```bash
 python3 -m compileall -q app/backend/src app/backend/migrations scripts
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+npm ci --ignore-scripts
+npm test
 docker run --rm --entrypoint alembic <image> -c /app/alembic.ini history
 ```
+
+Для проверок импорта/чтения сообщений задайте `CM_TEST_DATABASE_URL` с адресом
+отдельной тестовой PostgreSQL. Набор создаёт случайную схему и применяет в ней
+все миграции. Без этого адреса интеграционные проверки явно пропускаются.
+Для тестов интерфейса требуется Node.js 24; Node не требуется рабочему серверу.
 
 ## Репозиторий и развёртывание
 
