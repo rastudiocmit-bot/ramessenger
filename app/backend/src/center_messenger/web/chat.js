@@ -822,13 +822,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const left = daysBetween(today, item.end);
       if (left >= 0 && left <= 7) notes.append(note("warn", left === 0 ? "Абонемент заканчивается сегодня" : `Абонемент заканчивается через ${left} ${plural(left, "день", "дня", "дней")}`, `${subName(item)} · до ${familyDate(item.end)}`, "warn"));
     }
-    if (known(student.balance) && Number(student.balance) < 0) notes.append(note("wallet", `Задолженность ${familyMoney(Math.abs(Number(student.balance)))}`, "Баланс по абонементам отрицательный", "danger"));
+    if (known(student.balance) && Number(student.balance) < 0) notes.append(note("wallet", `Задолженность ${familyMoney(Math.abs(Number(student.balance)))}`, "Баланс по абонементам отрицательный", "debt"));
     if (notes.childNodes.length) detail.append(notes);
 
     const paid = cards.filter(card => known(card.paid_lesson_count)), paidTotal = paid.reduce((sum, card) => sum + Number(card.paid_lesson_count), 0);
     const negative = known(student.balance) && Number(student.balance) < 0;
     detail.append(el("div", "family-stats",
-      stat("Баланс", known(student.balance) ? familyMoney(student.balance) : "—", known(student.balance) ? "" : "требует уточнения", negative ? "danger" : ""),
+      stat("Баланс", known(student.balance) ? familyMoney(student.balance) : "—", known(student.balance) ? "" : "требует уточнения", negative ? "negative" : ""),
       stat("Оплачено", paid.length ? `${paidTotal} ${plural(paidTotal, "занятие", "занятия", "занятий")}` : "—", paid.length ? "к посещению" : "нет данных"),
       stat("Абонементы", String(subs.length), subs.length ? plural(subs.length, "активный", "активных", "активных") : "нет активных")));
 

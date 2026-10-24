@@ -864,7 +864,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-tool[hidden]{display:none}
 .is-refreshing #chat-details-refresh svg{animation:family-spin .9s linear infinite}
 
-.family-scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:0 14px 16px;
+.family-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding:0 14px 16px;
   scrollbar-width:thin;scrollbar-color:var(--line) transparent;-webkit-overflow-scrolling:touch}
 .family-block{padding:0 0 10px}
 .family-block[hidden]{display:none}
@@ -914,22 +914,24 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-notes{display:grid;gap:4px;margin-bottom:10px}
 .family-note{display:flex;align-items:flex-start;gap:8px;padding:6px 10px 6px 9px;border-radius:9px;border-left:3px solid currentColor}
 .family-note .family-ic{color:inherit;margin-top:1px}
-.family-note-text{min-width:0;font-size:12.5px;line-height:1.4}
+.family-note-text{min-width:0;font-size:12.5px;line-height:1.4;white-space:normal}
 .family-note-text strong{font-weight:650}
 .family-note-text span{color:var(--muted);overflow-wrap:anywhere}
 .family-note-text span::before{content:" · "}
 .family-note.next{background:var(--primary-tint);color:var(--primary-ink)}
 .family-note.warn{background:var(--st-unlinked-bg);color:var(--st-unlinked-ink)}
-.family-note.danger{background:color-mix(in srgb,var(--danger) 10%,var(--surface));color:var(--danger)}
+.family-note.debt{background:color-mix(in srgb,var(--danger) 10%,var(--surface));color:var(--danger)}
 
-.family-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line-soft);border-radius:11px;
+.family-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line-soft);border-radius:11px;overflow:hidden;
   background:var(--surface-2)}
 .family-stat{min-width:0;padding:7px 10px}
 .family-stat+.family-stat{border-left:1px solid var(--line-soft)}
 .family-stat span,.family-stat strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .family-stat span{font-size:11px;color:var(--muted)}
 .family-stat strong{font-size:14.5px;font-weight:650;margin-top:1px;font-variant-numeric:tabular-nums}
-.family-stat.danger strong{color:var(--danger)}
+/* Negative balance: the cell turns red and both the label and the sum go white. */
+.family-stat.negative{background:#b83f4e}
+.family-stat.negative span,.family-stat.negative strong{color:#fff}
 
 .family-part{margin-top:14px}
 .family-list{border:1px solid var(--line-soft);border-radius:11px;overflow:hidden;background:var(--surface)}

@@ -39,6 +39,8 @@ const { fixture } = require('./browser_fixture.cjs');
       // Chat filters moved to Profile: nothing next to search opens settings any more.
       assert.equal(await page.locator('#chat-search-wrap button').count(), 0);
       await page.locator('#chat-person-open').click(); await page.waitForFunction(() => document.querySelector('#chat-details-name').textContent === 'Анна Смирнова');
+      // Nothing in the card may push it wider than its column (a nowrap note once did).
+      assert.ok(await page.evaluate(() => { const s = document.querySelector('.family-scroll'); return s.scrollWidth <= s.clientWidth + 1; }), 'Client card overflows sideways');
       await page.locator('[data-close="chat-details-dialog"]').click();
       // A closed client card must leave nothing on screen (it once stayed visible under the list).
       await page.waitForFunction(() => { const d = document.querySelector('#chat-details-dialog'); return !d.open && d.getBoundingClientRect().width === 0; });
