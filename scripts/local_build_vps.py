@@ -80,6 +80,35 @@ def restore_api(image):
     if not wait_ready(image):
         raise RuntimeError("Previous API not ready after schema rollback: manual intervention required")
 
+SELF_FILES=(("scripts/local_build_vps.py",ROOT/"local_build_vps.py"),
+            ("scripts/github_promote_vps.py",ROOT/"github_promote_vps.py"))
+
+def self_update(sha):
+    """Install this script and its helper from the exact commit being deployed.
+
+    The server already builds and runs whatever main contains, so taking the
+    deploy scripts from the same commit adds no new trust; it means changes to
+    the deploy procedure ship like any other change. Re-executes once.
+    """
+    if os.environ.get("CM_SELF_UPDATED")==sha:
+        return
+    changed=False
+    for source,dest in SELF_FILES:
+        body=run("gh","api",f"repos/{REPO}/contents/{source}?ref={sha}",
+                 "-H","Accept: application/vnd.github.raw",timeout=60)+"\n"
+        compile(body,source,"exec")
+        if dest.exists() and dest.read_text()==body:
+            continue
+        tmp=dest.with_suffix(".new")
+        tmp.write_text(body)
+        os.chmod(tmp,0o700)
+        os.replace(tmp,dest)
+        announce("SELF-UPDATED",dest.name,"from",sha[:12])
+        changed=True
+    if changed:
+        os.execve(sys.executable,[sys.executable,str(ROOT/"local_build_vps.py"),*sys.argv[1:]],
+                  dict(os.environ,CM_SELF_UPDATED=sha))
+
 def backup():
     destdir=ROOT/"rollback"
     destdir.mkdir(mode=0o700,exist_ok=True)
@@ -112,6 +141,7 @@ def main(preview):
     if preview:
         announce("PREVIEW: no clone, build or changes")
         return
+    self_update(sha)
     if current==target:
         s["last_deployed_sha"]=sha
         safe_state(s)
