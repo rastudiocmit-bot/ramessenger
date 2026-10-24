@@ -3,7 +3,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
   let sections = {}, summaryTimer = null, summaryRequest = 0, context = null, contextEpoch = null;
   const icon = name => window.CenterIcon(name);
   const definition = [
-    ["summary", "Сводка", "chart"], ["messages", "Чаты", "chats"], ["queue", "Нужен ответ", "queue"],
+    ["messages", "Чаты", "chats"], ["summary", "Сводка", "chart"], ["queue", "Нужен ответ", "queue"],
     ["clients", "Клиенты", "people"], ["team", "Сотрудники", "team"],
     ["connections", "Подключения", "plug"], ["overview", "Организация", "building"],
     ["security", "Безопасность", "shield"], ["profile", "Профиль", "user"]

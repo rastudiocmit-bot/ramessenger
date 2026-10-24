@@ -1,7 +1,7 @@
 "use strict";
 (() => {
   const $ = (selector, root = document) => root.querySelector(selector);
-  const state = { user: null, csrf: null, workspaces: [], workspace: null, pane: new URLSearchParams(location.search).get("view") === "messages" ? "messages" : "summary", chatView: "all", invite: null, alfa: null, alfaBusy: false, alfaMax: null, alfaMaxBusy: false, epoch: 0 };
+  const state = { user: null, csrf: null, workspaces: [], workspace: null, pane: "messages", chatView: "all", invite: null, alfa: null, alfaBusy: false, alfaMax: null, alfaMaxBusy: false, epoch: 0 };
   const roles = { owner: "Владелец", admin: "Администратор", branch_manager: "Руководитель филиала", operator: "Оператор", observer: "Наблюдатель" };
   let toastTimer;
 
@@ -34,6 +34,7 @@
   }
   function clearSession(message = "") {
     state.epoch += 1; state.user = null; state.csrf = null; state.workspaces = []; state.workspace = null;
+    state.pane = "messages"; state.chatView = "all";
     document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
     clearPasswords();
     clearPrivateViews();
@@ -138,7 +139,7 @@
     const sections = grantedSections();
     sections.profile = true; sections.queue = sections.messages;
     sections.summary = sections.overview && sections.messages && state.workspace?.role !== "operator";
-    if (!sections[state.pane]) state.pane = ["summary", "messages", "clients", "overview", "security", "profile"].find(key => sections[key]);
+    if (!sections[state.pane]) state.pane = ["messages", "summary", "clients", "overview", "security", "profile"].find(key => sections[key]);
     if (state.pane !== "connections") alfaMaxProgress.reset();
 
     if (state.pane !== "clients") directory.leave();
