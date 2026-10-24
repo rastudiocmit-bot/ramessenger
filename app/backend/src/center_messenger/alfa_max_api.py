@@ -68,9 +68,9 @@ def sync(workspace_id: UUID, request: Request):
 
 
 @router.get("/sync-progress")
-def sync_progress(workspace_id: UUID, request: Request):
+def sync_progress(workspace_id: UUID, request: Request, activity_only: bool = False):
     service(request)
-    return request.app.state.alfa_max.progress(identity(request), workspace_id)
+    return request.app.state.alfa_max.progress(identity(request), workspace_id, activity_only=activity_only)
 
 
 @router.delete("", status_code=204)

@@ -91,7 +91,7 @@
   function initials(name) { return name.trim().split(/\s+/).slice(0, 2).map(part => part[0] || "").join("").toLocaleUpperCase("ru"); }
   function date(value) {
     const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? "—" : new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(parsed);
+    return Number.isNaN(parsed.getTime()) ? "—" : new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: state.workspace?.timezone || "Europe/Moscow" }).format(parsed);
   }
   function deviceLabel(raw) {
     const browser = /Edg\//.test(raw) ? "Microsoft Edge" : /OPR\//.test(raw) ? "Opera" : /Firefox\//.test(raw) ? "Firefox" : /Chrome\//.test(raw) ? "Chrome" : /Safari\//.test(raw) ? "Safari" : "Браузер";
@@ -397,6 +397,21 @@
   function connectionSummary(selector, text, mode) {
     const label = $(selector); label.textContent = text; label.closest(".connection-tile").dataset.state = mode;
   }
+  function connectionView(view) {
+    state.connectionsView = view;
+    for (const name of ["monitor", "settings"]) {
+      show($("#connections-" + name + "-view"), name === view);
+      $("#connections-" + name + "-tab").setAttribute("aria-selected", String(name === view));
+      $("#connections-" + name + "-tab").tabIndex = name === view ? 0 : -1;
+    }
+  }
+  for (const button of document.querySelectorAll("[data-connection-view]")) button.addEventListener("click", () => connectionView(button.dataset.connectionView));
+  $(".connection-tabs").addEventListener("keydown", event => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const view = event.key === "Home" ? "monitor" : event.key === "End" ? "settings" : state.connectionsView === "settings" ? "monitor" : "settings";
+    connectionView(view); $("#connections-" + view + "-tab").focus();
+  });
   function alfaButtons() {
     const ready = Boolean(state.alfa?.vault_ready), configured = Boolean(state.alfa?.configured);
     $("#alfa-form").querySelectorAll("input,button").forEach(control => { control.disabled = !ready || state.alfaBusy; });
@@ -467,6 +482,7 @@
 
   function resetAlfaMax() {
     alfaMaxProgress.reset();
+    connectionView("monitor"); show($("#history-monitor-empty"), false);
     state.alfaMax = null; state.alfaMaxBusy = false;
     $("#alfa-max-connect-form").reset(); $("#alfa-max-otp-form").reset();
     $("#alfa-max-status").textContent = "Не подключено";
@@ -497,6 +513,7 @@
     const workspace = state.workspace;
     const payload = await api("/workspaces/" + workspace.id + "/integrations/alfa-max");
     if (workspace.id !== state.workspace?.id) return;
+    const previousState = state.alfaMax?.state;
     state.alfaMax = payload;
     const labels = {
       not_configured: "Не подключено",
@@ -518,12 +535,15 @@
     const details = [];
     if (payload.last_sync_at) details.push("Последняя синхронизация: " + date(payload.last_sync_at));
     if (payload.crm_configured && payload.branches?.length) details.push("Филиалов: " + payload.branches.length);
-    if (!payload.crm_configured) details.push("Сначала настройте подключение AlfaCRM выше.");
+    if (!payload.crm_configured) details.push("Сначала настройте подключение AlfaCRM в соседнем блоке.");
     else if (!payload.branches?.length) details.push("Сначала загрузите филиалы AlfaCRM.");
     $("#alfa-max-info").textContent = details.join(" · ");
     notice(!payload.vault_ready ? "На сервере не настроен ключ хранения веб-сессий." : (payload.error || ""), $("#alfa-max-error"));
     alfaMaxButtons();
-    if (payload.configured && payload.state !== "not_configured") alfaMaxProgress.start();
+    const hasSession = payload.configured && payload.state !== "not_configured";
+    show($("#history-monitor-empty"), !hasSession);
+    if (previousState !== payload.state && payload.state !== "active") connectionView("settings");
+    if (hasSession) alfaMaxProgress.start();
     else { alfaMaxProgress.reset(); connectionSummary("#alfa-history-summary", "Сначала подключите MAX", "waiting"); }
   }
   async function alfaMaxAction(action, success) {

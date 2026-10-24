@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from center_messenger.accounts import audit
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser
 from center_messenger.alfa_repair import REPAIR_BATCH, customer_directory, reconcile_messages, repair_batch, resolve_customer
+from center_messenger.alfa_monitor import AlfaSyncMonitor
 from center_messenger.alfa_history import (
     advance_history, history_coverage, history_pending, plan_history,
     reconcile_history, retry_history, verify_saved_pages,
@@ -74,6 +75,7 @@ def _source_record_id(item, branch):
 class AlfaMaxConnections:
     def __init__(self, alfa, browser=None):
         self.alfa, self.accounts, self.vault = alfa, alfa.accounts, alfa.vault
+        self.monitor = AlfaSyncMonitor()
         self.browser = browser or AlfaMaxBrowser()
         self._sms_templates = []
         self._sms_templates_at = None
@@ -207,7 +209,7 @@ class AlfaMaxConnections:
             }
         ]
 
-    def progress(self, actor, workspace):
+    def progress(self, actor, workspace, *, activity_only=False):
         # A read-only snapshot keeps counters and cursors consistent without
         # waiting for, or blocking, the projector's exclusive workspace lock.
         with self._transaction(actor, workspace, snapshot=True) as db:
@@ -225,11 +227,24 @@ class AlfaMaxConnections:
             cursor = dict(row["history_cursor"] or {})
             queue = db.execute(
                 text(
-                    "SELECT due_at,lease_until,lease_owner IS NOT NULL AND lease_until>clock_timestamp() AS running "
+                    "SELECT CASE WHEN isfinite(due_at) THEN due_at END AS due_at,"
+                    "CASE WHEN isfinite(lease_until) THEN lease_until END AS lease_until,"
+                    "lease_owner,lease_owner IS NOT NULL AND lease_until>clock_timestamp() AS running "
                     "FROM alfa_max_sync_queue WHERE workspace_id=:w AND connection_id=:c"
                 ),
                 {"w": workspace, "c": row["connection_id"]},
             ).mappings().one_or_none()
+            live = self.monitor.snapshot(workspace, row["connection_id"], queue["lease_owner"]) if queue and queue["running"] else None
+            worker = dict(live or cursor.get("activity") or {}, live=live is not None)
+            base = {"configured": True, "state": self.public(row)["state"],
+                    "syncing": bool(queue and queue["running"]), "scheduled": queue is not None,
+                    "next_attempt_at": queue["due_at"] if queue else None,
+                    "lease_expires_at": queue["lease_until"] if queue and queue["running"] else None,
+                    "worker": worker, "last_sync_at": row["last_sync_at"],
+                    "client_repair": cursor.get("client_repair"),
+                    "error": ERRORS.get(row["last_error_code"]), "error_code": row["last_error_code"]}
+            if activity_only:
+                return base | {"activity_only": True, "backfill_pending": history_pending(cursor)}
             counts = db.execute(
                 text(
                     "SELECT count(DISTINCT c.id) FILTER(WHERE " + visible_message() + ") AS conversations,"
@@ -251,23 +266,13 @@ class AlfaMaxConnections:
             for stream in coverage["streams"]:
                 stream["branch_name"] = names[stream["branch_id"]]
                 stream["error"] = ERRORS.get(stream["error_code"])
-            return {
-                "configured": True,
-                "state": self.public(row)["state"],
-                "syncing": bool(queue and queue["running"]),
-                "scheduled": queue is not None,
-                "next_attempt_at": queue["due_at"] if queue else None,
-                "lease_expires_at": queue["lease_until"] if queue and queue["running"] else None,
-                "worker": cursor.get("activity"),
+            return base | {
                 "messages": counts["messages"],
                 "stored_messages": counts["stored_messages"],
                 "conversations": counts["conversations"],
                 "cursor": cursor,
-                "last_sync_at": row["last_sync_at"],
                 "oldest_at": counts["oldest_at"],
                 "newest_at": counts["newest_at"],
-                "error": ERRORS.get(row["last_error_code"]),
-                "error_code": row["last_error_code"],
                 **coverage,
             }
 
@@ -614,14 +619,14 @@ class AlfaMaxConnections:
                  "at": handled["handled_at"], "user": handled["handled_by"]},
             )
 
-    def _project_page(self, db, workspace, channel, crm_connection, branch, rows):
+    def _project_page(self, db, workspace, channel, crm_connection, branch, rows, *, on_progress=None):
         snapshot = DirectoryReader._published(db, workspace)
         directory = customer_directory(db, workspace, snapshot, [
             customer["customer_id"] for item in rows for customer in item.get("customers", []) if customer])
         touched = set()
         verified_conversations = set()
         merged_contacts = set()
-        for item in rows:
+        for item_index, item in enumerate(rows):
             customers = {}
             for raw_customer in item.get("customers") or []:
                 customer = dict(raw_customer) if raw_customer else None
@@ -651,6 +656,17 @@ class AlfaMaxConnections:
                 identity, conversation_id, display = self._message_identity(
                     UUID(str(channel)), customer, branch
                 )
+                client = {"name": display, "contact_id": str(customer["contact_id"]) if customer and customer.get("contact_id") else None,
+                          "cards": [{"customer_id": str(c["customer_id"]), "branch_id": str(c["branch_id"]),
+                                     "name": c.get("name") or ""} for c in records if c]}
+                detail = {"client": client, "record_id": str(item["record_id"]),
+                          "position": item_index + 1, "position_total": len(rows),
+                          "occurred_at": item["occurred_at"].isoformat(), "message_direction": item["direction"]}
+                def notify(result=None):
+                    if on_progress:
+                        event = {"kind": "message", **detail, "result": result} if result else None
+                        on_progress(detail | {"operation": "message_checked" if result else "save_message", "event": event})
+                notify()
                 external = identity
                 conversation_id = db.execute(
                     text(
@@ -889,6 +905,7 @@ class AlfaMaxConnections:
                             {"w": workspace, "id": best["command_id"]},
                         )
                         changed(db, workspace, conversation_id, best["id"])
+                        notify("matched_send")
                         continue
                 if existing:
                     merged = dict(existing["payload"]) | payload
@@ -921,6 +938,7 @@ class AlfaMaxConnections:
                             },
                         )
                         changed(db, workspace, conversation_id, existing["id"])
+                    notify("checked")
                     continue
                 message_id = uuid4()
                 provider_id = f"alfa:{source_id}"
@@ -980,6 +998,7 @@ class AlfaMaxConnections:
                         {"w": workspace, "conv": conversation_id, "at": item["occurred_at"],
                          "order": item.get("crm_order") or 0, "message": message_id},
                     )
+                notify("imported")
         for conversation_id in touched:
             if conversation_id in verified_conversations:
                 reconcile_messages(self, db, workspace, channel, conversation_id)
@@ -1126,7 +1145,8 @@ class AlfaMaxWorker:
                 {"w": workspace, "c": connection, "lease": lease},
             )
             if activity is not None:
-                self._activity(db, workspace, connection, activity)
+                self.service.monitor.update(workspace, connection, lease, activity)
+                self._activity(db, workspace, connection, self.service.monitor.snapshot(workspace, connection, lease) or activity)
 
     def run_next(self):
         import time
@@ -1139,6 +1159,8 @@ class AlfaMaxWorker:
         phase = "load_settings"
         sync_start = time.monotonic()
         activity = {"started_at": datetime.now(UTC).isoformat(), "phase": "repair"}
+        observe = lambda value: self.service.monitor.update(workspace, connection, lease, value)
+        snapshot = lambda committed=False: self.service.monitor.snapshot(workspace, connection, lease, committed=committed) or dict(activity)
         try:
             with self._transaction(workspace, connection, lease) as db:
                 row = self.service._row(db, workspace)
@@ -1152,10 +1174,11 @@ class AlfaMaxWorker:
                     self._release(db, workspace, connection, lease, 300)
                     return True
                 crm_connection = row["crm_connection_id"]
+                self.service.monitor.begin(workspace, connection, lease, (row["history_cursor"] or {}).get("activity"), activity)
                 phase = "repair_saved_history"
                 repair_cursor = dict(row["history_cursor"] or {})
-                if repair_batch(self.service, db, workspace, connection, repair_cursor):
-                    repair_cursor["activity"] = activity | {"updated_at": datetime.now(UTC).isoformat()}
+                if repair_batch(self.service, db, workspace, connection, repair_cursor, on_progress=observe):
+                    repair_cursor["activity"] = snapshot(True)
                     db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) "
                                     "WHERE workspace_id=:w"), {"w": workspace, "cursor": json.dumps(repair_cursor)})
                     row = dict(row) | {"history_cursor": repair_cursor}
@@ -1189,8 +1212,11 @@ class AlfaMaxWorker:
                 cursor, requests = plan_history(original_cursor, branches)
                 origin = row["crm_origin"]
                 settings_version = row["version"]
-                activity.update(phase="reading", completed_pages=0, total_pages=len(requests))
-                self._activity(db, workspace, connection, activity)
+                activity.update(phase="reading", operation="read_page", client=None, record_id=None,
+                                position=None, position_total=None, completed_pages=0, total_pages=len(requests))
+                observe(activity)
+                self._activity(db, workspace, connection, snapshot(True))
+            self.service.monitor.committed(workspace, connection, lease)
             if not branches:
                 raise AlfaBrowserError("settings_changed")
             phase = "read_history"
@@ -1208,7 +1234,7 @@ class AlfaMaxWorker:
             results, session = self.service.browser.read_histories(
                 origin, session, requests, on_progress=heartbeat, continue_on_error=True
             )
-            updates = [(branch, result["messages"]) for (branch, _, _), result in zip(requests, results, strict=True)
+            updates = [(request, result["messages"]) for request, result in zip(requests, results, strict=True)
                        if not result.get("error")]
             heartbeat()
             self.service.sms_templates(origin, session, branches[0])
@@ -1227,9 +1253,10 @@ class AlfaMaxWorker:
                        != {k: v for k, v in original_cursor.items() if k != "activity"}
                 ):
                     raise AlfaBrowserError("settings_changed")
-                for branch, records in updates:
+                for (branch, direction, page), records in updates:
+                    observe({"phase": "projecting", "branch_id": str(branch), "direction": direction, "page": page})
                     self.service._project_page(
-                        db, workspace, connection, crm_connection, branch, records
+                        db, workspace, connection, crm_connection, branch, records, on_progress=observe
                     )
                 verify_saved_pages(db, workspace, connection, requests, results)
                 advance_history(cursor, requests, results)
@@ -1257,8 +1284,9 @@ class AlfaMaxWorker:
                 page_error = next((result["error"] for result in results if result.get("error")), None)
                 status_error = page_error or next((cursor.get(f"error:{key}") for key in cursor["streams"]
                                                    if cursor.get(f"error:{key}")), None)
-                cursor["activity"] = activity | {"phase": "waiting", "completed_pages": len(requests),
-                                                 "updated_at": datetime.now(UTC).isoformat()}
+                observe({"phase": "waiting", "operation": "waiting", "client": None,
+                         "completed_pages": len(requests)})
+                cursor["activity"] = snapshot(True)
                 db.execute(
                     text(
                         "UPDATE alfa_max_settings SET session_ciphertext=:session,"
@@ -1290,8 +1318,10 @@ class AlfaMaxWorker:
                 else 300
             )
             try:
+                self.service.monitor.rollback(workspace, connection, lease)
+                observe({"phase": "error", "operation": "error", "client": None, "error_code": code})
                 with self._transaction(workspace, connection, lease) as db:
-                    self._activity(db, workspace, connection, activity | {"phase": "error", "error_code": code})
+                    self._activity(db, workspace, connection, snapshot())
                     if code == "reauth_required":
                         db.execute(
                             text(
@@ -1323,8 +1353,10 @@ class AlfaMaxWorker:
             import traceback
             code, delay = "internal", 120
             try:
+                self.service.monitor.rollback(workspace, connection, lease)
+                observe({"phase": "error", "operation": "error", "client": None, "error_code": code})
                 with self._transaction(workspace, connection, lease) as db:
-                    self._activity(db, workspace, connection, activity | {"phase": "error", "error_code": code})
+                    self._activity(db, workspace, connection, snapshot())
                     db.execute(
                         text(
                             "UPDATE alfa_max_settings SET last_error_code=:code,updated_at=now() "
@@ -1342,6 +1374,8 @@ class AlfaMaxWorker:
                     "AlfaCRM MAX history sync failed phase=%s exception=%s delay=%d\n%s",
                     phase, type(error).__name__, delay, traceback.format_exc(),
                 )
+        finally:
+            self.service.monitor.close(workspace, connection, lease)
         duration = time.monotonic() - sync_start
         logging.getLogger(__name__).info(
             "AlfaCRM MAX sync completed workspace=%s connection=%s duration=%.1fs",

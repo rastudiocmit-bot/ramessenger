@@ -77,7 +77,7 @@ test("completion continues periodic checks for later history changes", async t =
     streams: [{ branch_id: "1", direction: "receive", source_rows: 10, expected_rows: 10, complete: true, missing_rows: 0 }] }));
   await ui.app.start();
   assert.ok(ui.$("#alfa-max-progress").classList.contains("is-complete"));
-  assert.equal([...ui.timers.values()][0].delay, 15000);
+  assert.equal([...ui.timers.values()][0].delay, 1000);
 });
 test("concurrent refresh calls share one in-flight request", async t => {
   let finish;
@@ -170,4 +170,47 @@ test("an expired CRM session remains visible and keeps checking for reconnection
   assert.equal(ui.$('#alfa-max-progress').dataset.mode, 'error');
   assert.match(ui.$('#alfa-max-progress-text').textContent, /подключение/);
   assert.equal(ui.timers.size, 1);
+});
+
+test("light live updates keep saved counters and display exact CRM customer and message IDs safely", async t => {
+  let n = 0;
+  const ui = setup(t, () => ++n === 1 ? report() : { activity_only: true, configured: true, state: 'active', syncing: true,
+    worker: { live: true, phase: 'projecting', operation: 'save_message', record_id: '9007199254740997', position: 4, position_total: 20,
+      client: { name: '<img src=x onerror=alert(1)>', cards: [{ customer_id: '7001', branch_id: '2', name: 'Child' }] } } });
+  await ui.app.start(); await ui.poll();
+  assert.match(ui.calls[1][0], /activity_only=true/);
+  assert.equal(ui.$('[data-metric="messages"] strong').dataset.count, '82749');
+  assert.match(ui.$('#alfa-max-progress-client-subtitle').textContent, /7001/);
+  assert.match(ui.$('#alfa-max-progress-client-facts').textContent, /9007199254740997/);
+  assert.equal(ui.$('#alfa-max-progress-client-name').querySelector('img'), null);
+  assert.match(ui.$('#alfa-max-progress-client-label').textContent, /Обрабатываем сейчас/);
+});
+test("selected operation stays open while the current client changes and can return to live view", async t => {
+  let name = 'Current A';
+  const event = { id: 'entry-1', at: '2026-10-24T16:33:51Z', kind: 'message', client: { name: 'Earlier', cards: [{customer_id:'7',branch_id:'2'}] }, record_id:'100', result:'imported',committed:false };
+  const ui=setup(t,()=>report({syncing:true,worker:{live:true,phase:'projecting',operation:'save_message',client:{name,cards:[]},recent:[event]}}));
+  await ui.app.start(); ui.$('[data-event="entry-1"]').click();
+  assert.equal(ui.$('#alfa-max-progress-client-name').textContent,'Earlier');
+  name='Current B';event.committed=true;await ui.poll();
+  assert.equal(ui.$('#alfa-max-progress-client-name').textContent,'Earlier');
+  assert.match(ui.$('#alfa-max-progress-client-operation').textContent,/сохранено/);
+  ui.$('#alfa-max-progress-client-back').click();assert.equal(ui.$('#alfa-max-progress-client-name').textContent,'Current B');
+});
+test("each fifth live refresh reads full coverage and reset removes all previous customer details", async t => {
+  const ui=setup(t,()=>report({worker:{last_client:{name:'Private name',cards:[{customer_id:'77',branch_id:'1'}]}}}));
+  await ui.app.start();for(let n=0;n<5;n++)await ui.poll();
+  assert.deepEqual(ui.calls.map(c=>c[0].includes('activity_only=true')),[false,true,true,true,true,false]);
+  ui.app.reset();assert.doesNotMatch(ui.$('#alfa-max-progress-client').textContent,/Private name|ID 77/);
+});
+test("a persisted last client is never labelled as the currently running client", async t=>{
+  const ui=setup(t,()=>report({syncing:true,worker:{live:false,phase:'repair',client:{name:'Previous',cards:[]}}}));
+  await ui.app.start();assert.match(ui.$('#alfa-max-progress-client-label').textContent,/Последний/);
+  assert.equal(ui.$('#alfa-max-progress-client-live').dataset.live,'false');
+});
+test("reading a new page never attributes it to the preceding client and saving has its own phase", async t=>{
+  let phase='reading';
+  const ui=setup(t,()=>report({syncing:true,worker:{live:true,phase,operation:'read_page',page:22,last_client:{name:'Previous',cards:[{customer_id:'77',branch_id:'1'}]}}}));
+  await ui.app.start();assert.equal(ui.$('#alfa-max-progress-client-name').textContent,'Читаем журнал AlfaCRM');
+  assert.doesNotMatch(ui.$('#alfa-max-progress-client').textContent,/Previous|ID 77/);
+  phase='saving';await ui.poll();assert.match(ui.$('#alfa-max-progress-client-name').textContent,/Готовим сохранение/);
 });

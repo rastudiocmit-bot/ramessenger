@@ -108,6 +108,7 @@ def reconcile_messages(service, db, workspace, channel, conversation):
         key = (customers, row["occurred_at"], row["text"], row["actor_type"],
                json.dumps(payload.get("attachments", []), sort_keys=True, ensure_ascii=False), bool(payload.get("failed")))
         groups[key][str(payload["branch_id"])].append(row)
+    mirrors_updated = 0
     for branches in groups.values():
         for rows in branches.values():
             rows.sort(key=lambda row: (int(row["payload"]["crm_order"])
@@ -126,6 +127,7 @@ def reconcile_messages(service, db, workspace, channel, conversation):
                 else:
                     payload.update(crm_mirror=True, superseded_by=str(keeper["id"]))
                 if payload != row["payload"]:
+                    mirrors_updated += int(row["id"] != keeper["id"])
                     # Keep each journal row, original provider key and source
                     # reference for coverage and future reconciliation.
                     db.execute(text("UPDATE messages SET payload=CAST(:p AS jsonb),version=version+1 "
@@ -142,9 +144,11 @@ def reconcile_messages(service, db, workspace, channel, conversation):
         if not moved:
             break
     refresh_unread(db, workspace, conversation)
+    return {"checked_messages": len(records), "restored_ids": len(restored),
+            "hidden_duplicates": len(hidden), "mirrors_updated": mirrors_updated}
 
 
-def repair_batch(service, db, workspace, channel, cursor):
+def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None):
     snapshot = DirectoryReader._published(db, workspace)
     if not snapshot:
         return False
@@ -165,8 +169,8 @@ def repair_batch(service, db, workspace, channel, cursor):
         or previous.get("run") == run and not previous.get("mapping"))
     if same_mapping:
         if previous.get("complete"):
-            if previous.get("run") != run or previous.get("mapping") != mapping["fingerprint"]:
-                cursor["client_repair"] = previous | {"run": run, "mapping": mapping["fingerprint"]}
+            if previous.get("run") != run or previous.get("mapping") != mapping["fingerprint"] or "total" not in previous:
+                cursor["client_repair"] = previous | {"run": run, "mapping": mapping["fingerprint"], "total": mapping["total"]}
                 return True
             return False
         after, processed = previous.get("after"), previous.get("processed", 0)
@@ -189,6 +193,16 @@ def repair_batch(service, db, workspace, channel, cursor):
     more = len(contacts) > REPAIR_BATCH
     contacts = contacts[:REPAIR_BATCH]
     if contacts:
+        clients = defaultdict(list)
+        for row in db.execute(text(
+            "SELECT a.contact_id,a.external_id,a.name,a.branch_id,b.name AS branch_name,d.display_name "
+            "FROM alfa_customers a LEFT JOIN alfa_branches b ON b.workspace_id=a.workspace_id "
+            "AND b.connection_id=:crm AND b.external_id=a.branch_id LEFT JOIN alfa_directory d "
+            "ON d.workspace_id=a.workspace_id AND d.run_id=a.run_id AND d.contact_id=a.contact_id "
+            "WHERE a.workspace_id=:w AND a.run_id=:r AND a.contact_id=ANY(CAST(:ids AS uuid[])) "
+            "ORDER BY a.branch_id,a.external_id"
+        ), {"w": workspace, "r": snapshot["run"], "crm": snapshot["connection_id"], "ids": contacts}).mappings():
+            clients[row["contact_id"]].append(dict(row))
         ids = db.execute(text("SELECT DISTINCT external_id FROM alfa_customers WHERE workspace_id=:w "
                               "AND run_id=:r AND contact_id=ANY(CAST(:ids AS uuid[]))"),
                          {"w": workspace, "r": snapshot["run"], "ids": contacts}).scalars().all()
@@ -210,8 +224,22 @@ def repair_batch(service, db, workspace, channel, cursor):
             "WHERE m.workspace_id=c.workspace_id AND m.conversation_id=c.id) OR EXISTS(SELECT 1 FROM send_commands s "
             "WHERE s.workspace_id=c.workspace_id AND s.conversation_id=c.id))"
         ), {"w": workspace, "channel": channel, "contacts": contacts}).scalars())
-        for contact in contacts:
+        for index, contact in enumerate(contacts):
+            cards = clients[contact]
+            client = {"name": next((c["display_name"] for c in cards if c["display_name"]),
+                                   cards[0]["name"] if cards else "Клиент без имени"),
+                      "contact_id": str(contact), "cards": [
+                          {"customer_id": str(c["external_id"]), "name": c["name"],
+                           "branch_id": str(c["branch_id"]), "branch_name": c["branch_name"]} for c in cards]}
+            detail = {"phase": "repair", "client": client, "position": processed + index + 1,
+                      "position_total": mapping["total"], "record_id": None, "operation": "check_client"}
+            if on_progress:
+                on_progress(detail)
             if contact not in active_contacts:
+                if on_progress:
+                    on_progress(detail | {"operation": "client_checked", "event": {
+                        "kind": "repair", "client": client, "position": detail["position"],
+                        "result": "no_history", "checked_messages": 0}})
                 continue
             external = f"alfa-contact:{contact}"
             canonical = uuid5(UUID(str(channel)), external)
@@ -239,7 +267,11 @@ def repair_batch(service, db, workspace, channel, cursor):
                            {"w": workspace, "c": canonical, "customer": str(identity), "ids": json.dumps([identity]), "p": json.dumps({
                                "customer_branch_id": primary, "crm_global_verified": True,
                                "crm_primary_branch": primary})})
-            reconcile_messages(service, db, workspace, channel, canonical)
+            summary = reconcile_messages(service, db, workspace, channel, canonical)
+            if on_progress:
+                on_progress(detail | {"operation": "client_checked", "event": {
+                    "kind": "repair", "client": client, "position": detail["position"],
+                    "result": "checked", **summary}})
     cursor["client_repair"] = {"version": REPAIR_VERSION, "run": run, "processed": processed + len(contacts),
                                "after": str(contacts[-1]) if contacts else after, "complete": not more,
                                "total": mapping["total"], "mapping": mapping["fingerprint"],

@@ -15,9 +15,9 @@ const root = path.join(__dirname, "../app/backend/src/center_messenger/web");
       const originalFetch = window.fetch.bind(window), timeout = window.setTimeout.bind(window);
       window.progressTest = { requests: 0, aborts: 0, offline: false };
       // Accelerate only the status request deadline and its polling delays.
-      window.setTimeout = (callback, delay, ...args) => timeout(callback, [15000, 5000, 2000, 4000].includes(delay) ? 100 : delay, ...args);
+      window.setTimeout = (callback, delay, ...args) => timeout(callback, [15000, 5000, 2000, 4000, 1000].includes(delay) ? 100 : delay, ...args);
       window.fetch = (url, options) => {
-        if (String(url).endsWith("/sync-progress") && ++window.progressTest.requests === 3) {
+        if (new URL(url, location.origin).pathname.endsWith("/sync-progress") && ++window.progressTest.requests === 3) {
           return new Promise((resolve, reject) => options.signal.addEventListener("abort", () => {
             window.progressTest.aborts += 1;
             reject(new DOMException("Synthetic stalled response", "AbortError"));
