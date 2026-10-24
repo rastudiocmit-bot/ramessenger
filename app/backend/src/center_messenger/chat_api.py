@@ -15,8 +15,9 @@ from center_messenger.alfa_max import ERRORS as ALFA_MAX_ERRORS
 from center_messenger.alfa_history import history_pending
 from center_messenger.auth_security import AuthError, InputModel
 from center_messenger.chat_store import changed, refresh_unread
-from center_messenger.chat_queue import PROJECTION_VERSION, queue_state_sql, preview as queue_preview, materialize_legacy_handled
+from center_messenger.chat_queue import PROJECTION_VERSION, queue_state_sql, cached_state_sql, preview as queue_preview, materialize_legacy_handled
 from center_messenger.crm_api import DirectoryReader, search_query
+from center_messenger.chat_list_window import ListWindows
 from center_messenger.max_client import ERRORS as MAX_ERRORS
 from center_messenger.max_client import MaxChannelInput, MaxSettingsInput
 from center_messenger.max_connections import fingerprint
@@ -28,7 +29,7 @@ ERRORS = {**MAX_ERRORS, **ALFA_MAX_ERRORS}
 
 # Cached columns are used only after the resumable repair has completed.
 # During repair the same policy supplies live values, so no stale zero is shown.
-QUEUE_READY = f"(cn.capabilities->'chat_queue_projection'->>'version'='{PROJECTION_VERSION}' AND cn.capabilities->'chat_queue_projection'->>'complete'='true')"
+QUEUE_READY = f"(cn.capabilities->'chat_queue_projection'->>'version' IN ('1','{PROJECTION_VERSION}') AND cn.capabilities->'chat_queue_projection'->>'complete'='true')"
 EFFECTIVE_UNREAD = "coalesce(q.needs_reply,c.needs_reply)"
 PRIORITY_AT = "CASE WHEN q.unanswered_count IS NOT NULL THEN q.priority_at ELSE c.last_message_at END"
 QUEUE_COLUMNS = ",".join("q." + field for field in (
@@ -70,6 +71,7 @@ class ChatReader:
     def __init__(self, messaging):
         self.messaging, self.max = messaging, messaging.max
         self.alfa_max = messaging.alfa_max
+        self.list_windows = ListWindows()
 
     def _can_write(self, db, actor, workspace):
         return self.max.accounts._workspace(db, actor, workspace)["role"] != "observer"
@@ -350,6 +352,8 @@ class ChatReader:
         status=None,
         page=0,
         through_page=None,
+        window=None,
+        window_token=None,
     ):
         with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
             # Avoid per-poll JIT compilation of the bounded correlated policy.
@@ -370,6 +374,35 @@ class ChatReader:
                 + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 + "%",
             }
+            previous, window_scope, fingerprint = None, None, None
+            if window is not None:
+                params.update(offset=0, limit=window)
+                window_scope = (str(workspace), str(getattr(actor, "user_id", None)),
+                         str(connection), view, query, branch, status, writable)
+                # Check authorization on every request, even unchanged views.
+                # This is bounded to lightweight indexed/derived rows; no message
+                # policy or finance requests run on an unchanged poll.
+                fingerprint = db.execute(text("SELECT "
+                    "(SELECT coalesce(max(seq),0)::text FROM message_changes WHERE workspace_id=:w)||':'||"
+                    "(SELECT md5(coalesce(jsonb_agg(jsonb_build_array(c.id,c.peer_name,c.contact_id,p.display_name,"
+                    "c.revision,c.needs_reply,c.last_message_at,c.inbound_seq) ORDER BY c.id)::text,'')) "
+                    "FROM conversations c LEFT JOIN contacts p ON p.workspace_id=c.workspace_id AND p.id=c.contact_id "
+                    "WHERE c.workspace_id=:w)||':'||"
+                    "(SELECT md5(coalesce(jsonb_agg(jsonb_build_array(cn.id,cn.name,cn.kind,cn.status,cn.capabilities,"
+                    "s.enabled,s.subscription_confirmed,am.state,am.crm_connection_id,am.session_ciphertext IS NOT NULL,"
+                    "am.history_cursor,am.last_error_code,ax.version,ax.secret_ciphertext IS NOT NULL) ORDER BY cn.id)::text,'')) "
+                    "FROM connections cn LEFT JOIN max_settings s ON s.workspace_id=cn.workspace_id AND s.connection_id=cn.id "
+                    "LEFT JOIN alfa_max_settings am ON am.workspace_id=cn.workspace_id AND am.connection_id=cn.id "
+                    "LEFT JOIN alfa_settings ax ON ax.workspace_id=cn.workspace_id AND ax.connection_id=cn.id "
+                    "WHERE cn.workspace_id=:w)||':'||"
+                    "(SELECT md5(coalesce(jsonb_agg(jsonb_build_array(connection_id,external_id,available,name) "
+                    "ORDER BY connection_id,external_id)::text,'')) FROM alfa_branches WHERE workspace_id=:w)"),
+                    {"w": workspace}).scalar_one()
+                fingerprint += ':' + str(snapshot['run'] if snapshot else '')
+                previous = self.list_windows.previous(window_token, window_scope)
+                unchanged = self.list_windows.unchanged(previous, fingerprint, window)
+                if unchanged:
+                    return unchanged
             where = "c.workspace_id=:w AND c.kind='direct' AND "
             where += ("(c.peer_user_id IS NOT NULL OR (cn.kind='alfa_max_browser' "
                       "AND am.connection_id IS NOT NULL AND EXISTS(SELECT 1 FROM messages available WHERE available.workspace_id=c.workspace_id AND available.conversation_id=c.id)))")
@@ -459,7 +492,7 @@ class ChatReader:
                 "(SELECT coalesce(max(seq),0) FROM message_changes ch WHERE ch.workspace_id=c.workspace_id "
                 "AND ch.conversation_id=c.id) AS seen_change_seq,"
                 + QUEUE_COLUMNS + " " + joins + " JOIN selected ON selected.id=c.id "
-                "CROSS JOIN LATERAL (" + queue_state_sql() + ") q "
+                "CROSS JOIN LATERAL (" + cached_state_sql() + ") q "
                 "ORDER BY selected.effective_unread DESC,selected.priority_at DESC NULLS LAST,c.id"
             ), params).mappings())
             families = {}
@@ -506,14 +539,15 @@ class ChatReader:
                         "can_send": bool(self._meta(row)["can_send"] and writable),
                     }
                 )
-            return {
+            payload = {
                 "conversations": result,
                 "total": counts["total"],
                 "unread": counts["unread"],
                 "lead_unread": 0,
                 "page": page,
-                "has_more": (page + 1) * 30 < counts["total"],
+                "has_more": (window if window is not None else (page + 1) * 30) < counts["total"],
             }
+            return self.list_windows.publish(previous, window_scope, fingerprint, window, payload) if window is not None else payload
 
     def history(
         self, actor, workspace, conversation, *, before_time=None, before_id=None, after_seq=None
@@ -841,6 +875,8 @@ def chats(
     status: Literal["client", "lead", "archive"] | None = None,
     page: int = Query(default=0, ge=0, le=2000),
     through_page: int | None = Query(default=None, ge=0, le=2000),
+    window: int | None = Query(default=None, ge=30, le=60000),
+    window_token: UUID | None = None,
 ):
     _, reader = components(request)
     return reader.listing(
@@ -853,6 +889,8 @@ def chats(
         status=status,
         page=page,
         through_page=through_page,
+        window=window,
+        window_token=str(window_token) if window_token else None,
     )
 
 
@@ -950,7 +988,7 @@ def history(
 
 
 @router.get("/chats/{conversation_id}/family")
-def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request):
+def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request, auto: bool = False, cached_only: bool = False):
     _, reader = components(request)
     actor = identity(request)
     with reader.max.chat_transaction(actor, workspace_id, snapshot=True) as db:
@@ -958,7 +996,19 @@ def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request):
         contact, conversation = row["contact_id"], row["id"]
         if contact is None:
             raise AuthError(404, "Диалог пока не связан с карточкой CRM.")
-    return request.app.state.directory.detail(actor, workspace_id, contact, conversation=conversation)
+    return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, auto=auto, cached_only=cached_only)
+
+
+@router.post("/chats/{conversation_id}/family/refresh", status_code=202)
+def refresh_chat_family(workspace_id: UUID, conversation_id: UUID, request: Request):
+    _, reader = components(request)
+    actor = identity(request, mutation=True)
+    with reader.max.chat_transaction(actor, workspace_id, snapshot=True) as db:
+        row = reader._conversation(db, workspace_id, conversation_id)
+        contact, conversation = row["contact_id"], row["id"]
+        if contact is None:
+            raise AuthError(404, "Диалог пока не связан с карточкой CRM.")
+    return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, force=True)
 
 
 @router.post("/chats/{conversation_id}/messages", status_code=202)

@@ -12,7 +12,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   const sendLabels = { queued: "В очереди", sending: "Отправляем…", accepted: "Принято MAX", delivered: "Доставлено", read: "Прочитано", failed: "Не отправлено", unknown: "Результат неизвестен", cancelled: "Отменено" };
   let generation = 0, listSeq = 0, selectionSeq = 0, linkSeq = 0, cardSeq = 0, detailsSeq = 0;
   let family = null, familySelected = null, familyBusy = false;
-  const familyAttempted = new Set();
+  let familyTimer = null;
+  const familyCache = new Map();
+  let listToken = null, listTask = null;
   let channels = [], items = [], selected = null, page = 0, hasMore = false;
   let timer, searchTimer, linkTimer, pollBusy = false, actionBusy = false, historyBusy = false, listLoading = false, listRetryRequired = false;
   let notifyTimer, notifySeq = null, notifyEpoch = null, notifyTarget = null, notifyBusy = false;
@@ -31,10 +33,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     control.addEventListener("click", handler); return control;
   }
   function reset() {
-    generation += 1; listSeq += 1; selectionSeq += 1; linkSeq += 1; cardSeq += 1; detailsSeq += 1; family = null; familySelected = null; familyBusy = false; familyAttempted.clear();
+    generation += 1; listSeq += 1; selectionSeq += 1; linkSeq += 1; cardSeq += 1; detailsSeq += 1; family = null; familySelected = null; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     clearTimeout(timer); clearTimeout(searchTimer); clearTimeout(linkTimer); clearTimeout(notifyTimer);
     notifyTimer = null; notifyBusy = false; notifySeq = null; notifyEpoch = null; notifyTarget = null; show($("#chat-new-marker"), false);
-    cache.clear(); channels = []; items = []; selected = null; page = 0; hasMore = false;
+    cache.clear(); familyCache.clear(); listToken = null; listTask = null; channels = []; items = []; selected = null; page = 0; hasMore = false;
     pollBusy = false; actionBusy = false; historyBusy = false; listLoading = false; listRetryRequired = false; lastList = ""; linkConversation = null; tokenChannel = null;
     ["#chat-list", "#chat-history", "#chat-link-results", "#max-channels"].forEach(id => $(id).replaceChildren());
     ["#chat-error", "#max-error", "#max-token-error", "#chat-link-error"].forEach(id => notice("", $(id)));
@@ -157,8 +159,16 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function renderList(force = false) {
     items.sort(compareConversations);
     const signature = JSON.stringify([items, selected]); if (!force && signature === lastList) return; lastList = signature;
-    const list = $("#chat-list"), scroller = $(".chat-list-scroll"), top = scroller.scrollTop; list.replaceChildren();
+    const list = $("#chat-list"), scroller = $(".chat-list-scroll"), top = scroller.scrollTop;
+    const bounds = scroller.getBoundingClientRect();
+    const anchor = [...list.children].find(row => row.getBoundingClientRect().bottom > bounds.top);
+    const position = anchor ? { id: anchor.dataset.key, top: anchor.getBoundingClientRect().top - bounds.top } : null;
+    const existing = new Map([...list.children].map(row => [row.dataset.key, row]));
+    const wanted = [];
     for (const item of items) {
+      const key = JSON.stringify([item, item.id === selected, dayKey(new Date())]);
+      const previous = existing.get(item.id);
+      if (previous?.listKey === key) { wanted.push(previous); continue; }
       const row = node("div", undefined, `row chat-row${item.unread ? " unread waiting" : ""}${item.id === selected ? " selected" : ""}`); row.dataset.id = item.id; row.setAttribute("aria-current", String(item.id === selected));
       const avatar = button("", `contact-avatar ava ${item.status}${item.unread ? " pulsing" : ""} status-${item.status}`, () => openCards(item));
       avatar.title = item.contact_id ? `Открыть карточку АльфаCRM: ${item.name}` : "Связать диалог с контактом АльфаCRM"; avatar.setAttribute("aria-label", avatar.title);
@@ -185,9 +195,18 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (meta.childNodes.length) body.append(meta);
       row.append(avatar, body); const wrap = node("div", undefined, "row-wrap");
       const action = node("div", "Обработано", "row-action"); action.prepend(icon("check"));
-      wrap.append(action, row); list.append(wrap); wireSwipe(row, item);
+      wrap.dataset.key = item.id; wrap.listKey = key;
+      wrap.append(action, row); wanted.push(wrap); wireSwipe(row, item);
     }
-    scroller.scrollTop = top;
+    let cursor = list.firstChild;
+    for (const row of wanted) {
+      if (row === cursor) cursor = cursor.nextSibling;
+      else list.insertBefore(row, cursor);
+    }
+    const retained = new Set(wanted);
+    for (const row of [...list.children]) if (!retained.has(row)) row.remove();
+    const restored = position && wanted.find(row => row.dataset.key === position.id);
+    scroller.scrollTop = restored && top > 0 ? top + restored.getBoundingClientRect().top - bounds.top - position.top : top;
   }
   function listTime(item) {
     if (!item.last_message_at) return "";
@@ -213,7 +232,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         if (!valid(epoch, gen)) return;
         if (result.conversation) mergeMeta(result.conversation);
         renderList(true);
-        await loadList(false, true);
+        await loadList(false, true, true);
         if (selected === item.id) await loadHistory(item.id);
       } catch (error) { if (valid(epoch, gen)) fail(error); }
       finally { if (valid(epoch, gen)) { actionBusy = false; renderHeader(); } }
@@ -251,24 +270,48 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function maybeLoadMore() {
     const scroller = $(".chat-list-scroll");
     if (!active() || !hasMore || listLoading || listRetryRequired || !scroller) return;
-    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 180) {
+    if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < Math.max(900, scroller.clientHeight * 2.5)) {
       loadList(true).catch(error => fail(error));
     }
   }
-  async function loadList(append = false, preservePages = false) {
-    if (append && (listLoading || listRetryRequired || !hasMore)) return;
+  function loadList(append = false, preservePages = false, refresh = false) {
+    if (listLoading) {
+      const pending = listTask || Promise.resolve(), epoch = state.epoch, gen = generation;
+      // A mutation needs a snapshot taken after its commit, even when an older
+      // append/poll was already in flight. Ordinary polling shares that request.
+      return refresh ? pending.catch(() => {}).then(() => valid(epoch, gen) && active() ? loadList(append, preservePages, true) : undefined) : pending;
+    }
+    const request = loadListPage(append, preservePages);
+    listTask = request;
+    request.finally(() => { if (listTask === request) listTask = null; }).catch(() => {});
+    return request;
+  }
+  async function loadListPage(append = false, preservePages = false) {
+    if (append && (listRetryRequired || !hasMore)) return;
     const epoch = state.epoch, gen = generation, seq = ++listSeq;
     const targetPage = append ? page + 1 : preservePages ? page : 0;
-    // Refresh the whole loaded prefix in one server snapshot. Keeping stale
-    // lower pages after messages move between unread/all skipped conversations.
-    const params = new URLSearchParams({ through_page: targetPage });
+    // The server patches an exact ordered prefix. A moving dialog cannot
+    // leave a hole between independently fetched offset pages.
+    const params = new URLSearchParams({ through_page: targetPage, window: (targetPage + 1) * 90 });
+    if ((append || preservePages) && listToken) params.set("window_token", listToken);
     for (const [key, id] of [["q", "chat-search"], ["branch", "chat-branch"], ["status", "chat-status"], ["connection", "chat-channel"]]) if ($(`#${id}`).value) params.set(key, $(`#${id}`).value);
     listLoading = true;
     if (append) updateListLoader({ loading: true });
     try {
       const payload = await api(`${chatPath()}?${params}`);
       if (!valid(epoch, gen) || seq !== listSeq || !active()) return;
-      items = payload.conversations;
+      if (payload.window_token) {
+        listToken = payload.window_token;
+        if (!payload.not_modified) {
+          const known = new Map((payload.reset ? [] : items).map(item => [item.id, item]));
+          for (const item of payload.conversations) {
+            const old = known.get(item.id);
+            known.set(item.id, old && !currentMeta(item, old) ? { ...item, ...old } : item);
+          }
+          items = payload.order.map(id => known.get(id));
+          if (items.some(item => !item)) { listToken = null; throw new Error("Обновите список диалогов."); }
+        }
+      } else { items = payload.conversations; listToken = null; }
       page = payload.page;
       hasMore = payload.has_more;
       listRetryRequired = false;
@@ -283,14 +326,18 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
           : "Диалогов по этому запросу пока нет. Новые сообщения появятся после обращения клиента к боту.";
       $("#chat-visible-count").textContent = payload.total ? `${items.length} из ${payload.total}` : "";
       $("#chat-unread-count").textContent = String(payload.unread); show($("#chat-unread-count"), payload.unread > 0);
-      if (!selected && items.length) await select((items.find(item => item.unread) || items[0]).id, false);
+      if (!selected && items.length) {
+        // Release scrolling/polling before a slow timeline or card finishes.
+        listLoading = false;
+        if (hasMore) requestAnimationFrame(maybeLoadMore);
+        await select((items.find(item => item.unread) || items[0]).id, false);
+      }
       else if (selected && currentItem()) renderHeader();
-      if (hasMore) requestAnimationFrame(() => maybeLoadMore());
     } catch (error) {
       if (append && valid(epoch, gen) && seq === listSeq) { listRetryRequired = true; updateListLoader({ failed: true }); }
       throw error;
     } finally {
-      if (seq === listSeq) listLoading = false;
+      if (seq === listSeq) { listLoading = false; if (hasMore && !listRetryRequired) requestAnimationFrame(maybeLoadMore); }
     }
   }
   function renderHeader() {
@@ -543,9 +590,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       $("#chat-history").replaceChildren(node("p", "Открываем переписку…", "empty"));
       $("#chat-person").replaceChildren(node("strong", currentItem()?.name || "MAX"));
     }
+    if (keepDetails && selected === id && active()) openDetails({ auto: true }).catch(error => fail(error));
     try { await loadHistory(id, data.loaded ? "delta" : "initial"); }
     catch (error) { if (selected === id && active()) fail(error); }
-    if (keepDetails && selected === id && active()) openDetails({ auto: true }).catch(error => fail(error));
   }
   async function enter() {
     const epoch = state.epoch, gen = generation;
@@ -595,7 +642,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       await api(`${chatPath(id)}/messages`, { method: "POST", data: payload });
       if (!valid(epoch, gen)) return;
       acknowledged = true; data.pending = null; data.draft = ""; if (selected === id) { $("#chat-input").value = ""; resizeCompose(); }
-      await loadHistory(id); if (selected === id) renderMessages(id, { bottom: true }); await loadList();
+      await loadHistory(id); if (selected === id) renderMessages(id, { bottom: true }); await loadList(false, true, true);
     } catch (error) {
       if (!valid(epoch, gen)) return;
       // HTTP rejection is definite; loss of the HTTP response keeps the same UUID.
@@ -660,6 +707,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function filtersChanged() {
     renderFilterChip();
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
+    listToken = null; listTask = null;
     selected = null; historyBusy = false; listLoading = false; listRetryRequired = false; hasMore = false; page = 0;
     updateListLoader();
     listSeq += 1; selectionSeq += 1; clearTimeout(searchTimer); notice("", $("#chat-error"));
@@ -730,7 +778,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }
       renderList(true); renderHeader();
       toast(result.conversation?.unread ? "Просмотренные сообщения обработаны. Есть новые входящие." : "Диалог отмечен как обработанный.");
-      loadList(false, true).catch(error => fail(error));
+      loadList(false, true, true).catch(error => fail(error));
     } catch (error) { if (valid(epoch, gen)) { fail(error); if (error.status === 409) await loadHistory(id).catch(() => {}); } }
     finally { if (valid(epoch, gen)) { actionBusy = false; renderHeader(); } }
   }
@@ -837,6 +885,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const selected = students.find(student => student.id === familySelected) || students[0];
     const times = (selected?.cards || []).map(card => card.refreshed_at).filter(Boolean).sort();
     $("#chat-details-sync").textContent = times.length ? `Сведения из CRM обновлены ${date(times[0])}` : synced && !Number.isNaN(synced.getTime()) ? `Справочник CRM от ${date(family.snapshot_at)}` : "Справочник CRM";
+    if (family.cache) {
+      const info = family.cache;
+      const updated = info.updated_at ? `Карточка обновлена ${date(info.updated_at)}` : `Готовим карточку · ${info.cached_sources} из ${info.sources}`;
+      $("#chat-details-sync").textContent = info.error || `${updated}${info.refreshing ? " · обновляем на сервере" : info.overdue ? " · ожидает обновления" : " · каждые 30 минут"}`;
+      detailsDialog.classList.toggle("is-refreshing", Boolean(info.refreshing));
+    }
     $("#chat-details-count").textContent = students.length > 1 ? String(students.length) : "";
     const list = $("#chat-details-children"), detail = $("#chat-details-student"); list.replaceChildren(); detail.replaceChildren();
     detailsDialog.querySelector(".family-kids-block").hidden = students.length < 2;
@@ -844,7 +898,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (!students.some(student => student.id === familySelected)) familySelected = students[0].id;
     for (const student of students) {
       const chosen = student.id === familySelected, status = (student.cards || [])[0]?.status;
-      const kid = button("", "family-kid", () => { if (familySelected === student.id) return; familySelected = student.id; renderFamily(); refreshSelected(false).catch(error => fail(error)); });
+      const kid = button("", "family-kid", () => { if (familySelected === student.id) return; familySelected = student.id; renderFamily(); });
       kid.setAttribute("aria-pressed", String(chosen));
       kid.title = `${student.name}${statuses[status] ? ` · ${statuses[status]}` : ""}`;
       kid.append(firstName(student.name), node("small", familyAge(student.dob)));
@@ -852,6 +906,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     }
     const student = students.find(person => person.id === familySelected), cards = student.cards || [];
     const today = familyToday(), subs = activeSubscriptions(cards), groups = student.groups || [];
+    const subscriptionsReady = cards.every(card => Array.isArray(card.subscriptions));
+    const lessonsReady = cards.every(card => Array.isArray(card.lessons));
     const born = familyDate(student.dob);
     detail.append(el("div", "family-kid-head",
       el("div", "family-kid-name", node("h3", student.name), node("p", [familyAge(student.dob), born && `род. ${born}`].filter(Boolean).join(" · "), "family-sub")),
@@ -866,6 +922,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (left >= 0 && left <= 7) notes.append(note("warn", left === 0 ? "Абонемент заканчивается сегодня" : `Абонемент заканчивается через ${left} ${plural(left, "день", "дня", "дней")}`, `${subName(item)} · до ${familyDate(item.end)}`, "warn"));
     }
     if (known(student.balance) && Number(student.balance) < 0) notes.append(note("wallet", `Задолженность ${familyMoney(Math.abs(Number(student.balance)))}`, "Общий баланс клиента отрицательный", "debt"));
+    if (!subscriptionsReady || !lessonsReady) notes.prepend(note("clock", "Готовим подробную карточку", "Абонементы и занятия загружаются на сервере. Уже полученные сведения доступны ниже.", ""));
     if (notes.childNodes.length) detail.append(notes);
 
     const paid = cards.filter(card => known(card.paid_lesson_count)), paidTotal = paid.reduce((sum, card) => sum + Number(card.paid_lesson_count), 0);
@@ -873,7 +930,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     detail.append(el("div", "family-stats",
       stat("Баланс", known(student.balance) ? familyMoney(student.balance) : "—", known(student.balance) ? "Общий баланс в AlfaCRM: базовый счёт и абонементы" : "требует уточнения", negative ? "negative" : ""),
       stat("Оплачено", paid.length ? `${paidTotal} ${plural(paidTotal, "занятие", "занятия", "занятий")}` : "—", paid.length ? "к посещению" : "нет данных"),
-      stat("Абонементы", String(subs.length), subs.length ? plural(subs.length, "активный", "активных", "активных") : "нет активных")));
+      stat("Абонементы", subscriptionsReady ? String(subs.length) : "—", !subscriptionsReady ? "загружаем" : subs.length ? plural(subs.length, "активный", "активных", "активных") : "нет активных")));
 
     if (subs.length) {
       const rows = el("div", "family-list");
@@ -891,10 +948,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     for (const group of groups) {
       const linked = (group.subscriptions || []).filter(item => !item.archived && (!item.begin || item.begin <= today) && (!item.end || item.end >= today)), previous = group.previous_lesson;
       const mark = !previous ? null : previous.attended === true ? node("span", "Был", "family-mark ok") : previous.attended === false ? node("span", "Не был", "family-mark miss") : node("span", "Не отмечено", "family-mark");
-      const pay = linked.length ? linked.map(item => `${item.balance === null || item.balance === undefined ? "Остаток не указан" : familyMoney(item.balance)} · ${item.end ? `до ${familyDate(item.end)}` : "срок не указан"}`).join("\n") : "Не привязана к абонементу";
+      const pay = linked.length ? linked.map(item => `${item.balance === null || item.balance === undefined ? "Остаток не указан" : familyMoney(item.balance)} · ${item.end ? `до ${familyDate(item.end)}` : "срок не указан"}`).join("\n") : subscriptionsReady ? "Не привязана к абонементу" : "Сведения загружаются";
       const facts = el("dl", "family-facts",
-        fact("Прошлое", previous ? node("span", dayLabel(previous.date, previous.time)) : node("span", "За год занятий не было", "family-muted"), mark),
-        fact("Следующее", group.next_lesson ? node("span", dayLabel(group.next_lesson.date, group.next_lesson.time)) : node("span", "Не запланировано на 90 дней", "family-muted")),
+        fact("Прошлое", previous ? node("span", dayLabel(previous.date, previous.time)) : node("span", lessonsReady ? "За год занятий не было" : "Сведения загружаются", "family-muted"), mark),
+        fact("Следующее", group.next_lesson ? node("span", dayLabel(group.next_lesson.date, group.next_lesson.time)) : node("span", lessonsReady ? "Не запланировано на 90 дней" : "Сведения загружаются", "family-muted")),
         fact("Оплата", node("span", pay, linked.length ? "" : "family-muted")));
       if (linked.length) facts.lastChild.title = linked.map(item => `${subName(item)}: ${item.balance === null || item.balance === undefined ? "остаток не указан" : familyMoney(item.balance)}${item.end ? ` · до ${familyDate(item.end)}` : ""}`).join("\n");
       groupCards.append(el("article", "family-group",
@@ -915,30 +972,47 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       detail.append(part(cards.length > 1 ? "Филиалы" : "Филиал", rows));
     }
   }
+  function rememberFamily(contact, value) {
+    if (familyCache.size >= 40) familyCache.delete(familyCache.keys().next().value);
+    familyCache.set(contact, { value, at: Date.now() });
+  }
+  function watchFamily(conversation, contact, epoch, gen, seq) {
+    clearTimeout(familyTimer);
+    if (!family?.cache || (!family.cache.refreshing && !family.cache.auto_refresh)) return;
+    // Poll prepared facts only; the server owns CRM work and the 30-minute clock.
+    const delay = family.cache.refreshing ? (family.cache.error ? 30000 : 3000) : 60000;
+    familyTimer = setTimeout(async () => {
+      if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation || !active()) return;
+      try {
+        const updated = await api(`${chatPath(conversation)}/family?cached_only=true`);
+        if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation) return;
+        family = updated; rememberFamily(contact, updated); renderFamily();
+      } catch (_) { /* Keep the last good card during a temporary outage. */ }
+      if (valid(epoch, gen) && seq === detailsSeq) watchFamily(conversation, contact, epoch, gen, seq);
+    }, delay);
+  }
   async function refreshSelected(force) {
-    if (!isAdmin()) return;
-    if (familyBusy || !family || !familySelected) return;
-    const student = family.students.find(item => item.id === familySelected);
-    if (!student) return;
-    const target = student.cards.filter(card => force || card.needs_refresh).filter(card => !familyAttempted.has(`${student.id}:${card.branch_id}:${card.id}`) || force);
-    if (!target.length) return;
-    const epoch = state.epoch, gen = generation, seq = detailsSeq, conversation = selected;
-    familyBusy = true; $("#chat-details-refresh").disabled = true; detailsDialog.classList.add("is-refreshing");
+    if (!force || !isAdmin() || familyBusy || !family) return;
+    const epoch = state.epoch, gen = generation, seq = detailsSeq, conversation = selected, contact = family.id;
+    familyBusy = true; $("#chat-details-refresh").disabled = true;
     try {
-      for (const card of target) {
-        if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
-        familyAttempted.add(`${student.id}:${card.branch_id}:${card.id}`);
-        $("#chat-details-sync").textContent = `Обновляем сведения · ${card.branch_name}`;
-        const updated = await api(`${base()}/directory/contacts/${family.id}/students/${student.id}/cards/${card.branch_id}/${card.id}/refresh`, { method: "POST" });
-        if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
-        family = updated; renderFamily();
-      }
-    } catch (error) {
-      if (valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) { renderFamily(); toast(error.message, true); }
-    } finally {
-      familyBusy = false; $("#chat-details-refresh").disabled = !isAdmin(); detailsDialog.classList.remove("is-refreshing");
-      if (familySelected !== student.id && valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) refreshSelected(false).catch(error => fail(error));
-    }
+      const updated = await api(`${chatPath(conversation)}/family/refresh`, { method: "POST" });
+      if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation) return;
+      family = updated; rememberFamily(contact, updated); renderFamily(); watchFamily(conversation, contact, epoch, gen, seq);
+    } catch (error) { if (valid(epoch, gen) && seq === detailsSeq) toast(error.message, true); }
+    finally { if (valid(epoch, gen) && seq === detailsSeq) { familyBusy = false; $("#chat-details-refresh").disabled = !isAdmin(); } }
+  }
+  function familyDeferred() {
+    family = null; clearTimeout(familyTimer); familyTimer = null;
+    detailsDialog.classList.remove("is-loading", "is-refreshing");
+    $("#chat-details-name").textContent = currentItem()?.name || "Карточка клиента";
+    $("#chat-details-avatar").textContent = initialsOf(currentItem()?.name || "");
+    $("#chat-details-sync").textContent = "Карточка загружается по вашему запросу";
+    $("#chat-details-badges").replaceChildren(); $("#chat-details-contact").replaceChildren();
+    $("#chat-details-children").replaceChildren(); $("#chat-details-count").textContent = "";
+    detailsDialog.querySelector(".family-kids-block").hidden = true;
+    $("#chat-details-refresh").hidden = true;
+    $("#chat-details-student").replaceChildren(button("Открыть карточку клиента", "family-link-btn", () => openDetails().catch(error => fail(error))));
   }
   function familySkeleton() {
     $("#chat-details-avatar").textContent = ""; $("#chat-details-avatar").className = "ava family-ava me";
@@ -948,7 +1022,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-details-student").replaceChildren(node("div", undefined, "family-skel tall"), node("div", undefined, "family-skel"), node("div", undefined, "family-skel tall"));
   }
   function familyPending(name) {
-    detailsSeq += 1; family = null; familySelected = null; familyAttempted.clear();
+    detailsSeq += 1; family = null; familySelected = null; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     $("#chat-details-name").textContent = name || "Загружаем сведения…";
     detailsDialog.classList.add("is-loading"); detailsDialog.classList.remove("is-refreshing"); familySkeleton();
   }
@@ -965,21 +1039,27 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (isAdmin()) { const link = button("Связать с CRM", "family-link-btn", () => openLink(selected)); detail.append(link); }
   }
   async function openDetails(options = {}) {
-    const data = cache.get(selected), contactId = data?.meta?.contact_id;
-    if (!data?.meta) return;
+    const meta = { ...cache.get(selected)?.meta, ...currentItem() }, contactId = meta.contact_id;
+    if (!selected || !meta) return;
     if (!contactId && !options.auto && !pinnedDocked()) { openLink(selected); return; }
     const epoch = state.epoch, gen = generation, conversation = selected;
     const refresh = $("#chat-details-refresh"); refresh.hidden = !isAdmin() || !contactId; refresh.disabled = !isAdmin();
-    familyPending(); const seq = detailsSeq;
+    familyPending(meta.name); const seq = detailsSeq;
     clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing"); presentDetails();
     if (!contactId) { familyUnlinked(); return; }
+    if (options.auto && !meta.unread) { familyDeferred(); return; }
+    const saved = familyCache.get(contactId);
+    if (saved) { family = saved.value; renderFamily(); }
     try {
-      const result = await api(`${chatPath(conversation)}/family`);
+      const result = await api(`${chatPath(conversation)}/family${options.auto ? "?auto=true" : ""}`);
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
-      family = result; renderFamily(); refreshSelected(false).catch(error => fail(error));
+      if (result.deferred) { familyDeferred(); return; }
+      family = result; rememberFamily(contactId, result); renderFamily();
+      watchFamily(conversation, contactId, epoch, gen, seq);
     } catch (error) {
       if (valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) {
         detailsDialog.classList.remove("is-loading");
+        if (family) { $("#chat-details-sync").textContent = "Сохранённая карточка · обновление временно недоступно"; return; }
         $("#chat-details-name").textContent = error.message;
         $("#chat-details-contact").replaceChildren(); $("#chat-details-student").replaceChildren(node("p", "Сведения не загрузились. Попробуйте открыть карточку ещё раз.", "family-empty"));
       }
@@ -1068,7 +1148,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (quietCloses > 0) { quietCloses -= 1; return; }
     if (detailsDialog.open) return; // A late event from a close that a reopen has already replaced.
     detailsDialog.classList.remove("is-refreshing");
-    detailsSeq += 1; family = null; renderPin();
+    detailsSeq += 1; family = null; clearTimeout(familyTimer); familyTimer = null; renderPin();
   });
   async function openCards(item) {
     if (!item.contact_id) return openLink(item.id);
@@ -1118,7 +1198,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     actionBusy = true;
     try {
       await api(`${chatPath(id)}/contact`, { method: "PUT", data: { contact_id: contact } });
-      if (valid(epoch, gen)) { $("#chat-link-dialog").close(); await loadHistory(id); await loadList(); }
+      if (valid(epoch, gen)) { $("#chat-link-dialog").close(); await loadHistory(id); await loadList(false, true, true); }
     } catch (error) { if (valid(epoch, gen)) fail(error, $("#chat-link-error")); }
     finally { if (valid(epoch, gen)) actionBusy = false; }
   }

@@ -66,6 +66,21 @@ def main():
                 assert len(listing['conversations']) == pages*30
                 assert len({c['id'] for c in listing['conversations']}) == pages*30
             reads.append({'rows':pages*30,'milliseconds':timings,'queries':counts})
+        windows = []
+        prior = None
+        for size in (90,180,360):
+            started = time.perf_counter()
+            listing = fixture.reader.listing(None,workspace,window=size,window_token=prior)
+            load_ms = round((time.perf_counter()-started)*1000,2)
+            started = time.perf_counter()
+            unchanged = fixture.reader.listing(None,workspace,window=size,window_token=listing['window_token'])
+            unchanged_ms = round((time.perf_counter()-started)*1000,2)
+            assert unchanged['not_modified'] and not unchanged['conversations']
+            assert len(listing['order']) == size
+            windows.append({'loaded_rows':size,'transferred_rows':len(listing['conversations']),
+                'milliseconds':load_ms,'unchanged_ms':unchanged_ms,
+                'unchanged_bytes':len(json.dumps(unchanged,default=str).encode())})
+            prior = listing['window_token']
         identifier = db.execute(text('SELECT id FROM conversations WHERE workspace_id=:w ORDER BY id LIMIT 1'),params).scalar_one()
         query_count = 0; started = time.perf_counter()
         db.execute(text("UPDATE messages SET payload=payload||jsonb_build_object('failed',true) WHERE workspace_id=:w AND conversation_id=:c AND actor_type='human'"), {'w':workspace,'c':identifier})
@@ -74,7 +89,7 @@ def main():
         print(json.dumps({'database':db.execute(text('SELECT version()')).scalar_one(),
                           'conversations':3741,'messages':52374,
                           'initial_live_read_ms':initial_live_ms,'repair_ms':round(repair_ms,2),'batches':len(batches),'max_batch_ms':round(max(batches),2),
-                          'prefix_reads':reads,'one_message_update':update},indent=2))
+                          'prefix_reads':reads,'window_reads':windows,'one_message_update':update},indent=2))
     finally:
         fixture.tearDown()
         fixture.doCleanups()
