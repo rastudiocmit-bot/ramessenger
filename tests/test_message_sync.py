@@ -257,6 +257,7 @@ class MessageSyncTests(unittest.TestCase):
         collected, kwargs = [], {}
         while True:
             result = self.reader.history(None, self.workspace, conversation, **kwargs)
+            self.assertEqual(result["total"], 45)
             collected = result["messages"] + collected
             if not result["has_more"]:
                 break
@@ -371,6 +372,7 @@ class MessageSyncTests(unittest.TestCase):
         delta = self.reader.history(None, self.workspace, conversation, after_seq=before)
         self.assertIn(str(echo), delta["removed_ids"])
         self.assertEqual([m["id"] for m in delta["messages"]], [str(message)])
+        self.assertEqual(delta["total"], 2)
 
     def test_moved_message_is_removed_from_old_history_cache(self):
         self.published.return_value = None
@@ -482,6 +484,29 @@ class MessageSyncTests(unittest.TestCase):
             self.reader.send(SimpleNamespace(user_id=self.user), self.workspace, old,
                              model.model_copy(update={"text": "Different message"}))
         self.assertEqual(error.exception.status, 409)
+
+    def test_one_saved_message_reports_that_older_crm_history_is_loading(self):
+        self.project(self.row())
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) WHERE workspace_id=:w"),
+                        {"w": self.workspace, "cursor": json.dumps({"projection_version": 2, "1:receive": 4})})
+        conversation = self.conversation()["id"]
+        result = self.reader.history(None, self.workspace, conversation)
+        self.assertEqual(result["total"], 1)
+        self.assertTrue(result["conversation"]["history_loading"])
+        self.assertFalse(result["has_more"])
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) WHERE workspace_id=:w"),
+                        {"w": self.workspace, "cursor": json.dumps({"projection_version": 2, "1:receive": 0,
+                                                                  "complete:1:receive": True})})
+        result = self.reader.history(None, self.workspace, conversation)
+        self.assertFalse(result["conversation"]["history_loading"])
+
+    def test_crm_history_error_is_visible_in_the_conversation_metadata(self):
+        self.project(self.row())
+        self.db.execute(text("UPDATE alfa_max_settings SET last_error_code='network' WHERE workspace_id=:w"),
+                        {"w": self.workspace})
+        meta = self.reader.history(None, self.workspace, self.conversation()["id"])["conversation"]
+        self.assertIn("AlfaCRM", meta["history_error"])
+        self.assertIsNotNone(self.reader.listing(None, self.workspace)["conversations"][0]["history_error"])
 
 
 if __name__ == "__main__":

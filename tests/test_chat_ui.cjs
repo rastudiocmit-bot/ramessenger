@@ -25,14 +25,14 @@ function history(id, messages = [], extra = {}) {
   return { conversation: { ...conversation(1), id }, messages, next_seq: 100,
     has_more: false, more_changes: false, removed_ids: [], ...extra };
 }
-function setup(t, handler, { conversations = [conversation(1)] } = {}) {
+function setup(t, handler, { conversations = [conversation(1)], autoFrames = false } = {}) {
   const dom = new JSDOM(markup, { url: "https://messenger.example.test", runScripts: "outside-only",
     pretendToBeVisual: true });
   const { window } = dom, timers = new Map(), calls = [];
-  let timerId = 0;
+  let timerId = 0, closed = false;
   window.setTimeout = (callback, delay) => { timers.set(++timerId, { callback, delay }); return timerId; };
   window.clearTimeout = id => timers.delete(id);
-  window.requestAnimationFrame = () => 0;
+  window.requestAnimationFrame = callback => autoFrames ? setImmediate(() => { if (!closed) callback(); }) : 0;
   window.matchMedia = () => ({ matches: true });
   window.eval(source);
   const $ = selector => window.document.querySelector(selector);
@@ -63,7 +63,7 @@ function setup(t, handler, { conversations = [conversation(1)] } = {}) {
     show: (element, visible = true) => { element.hidden = !visible; },
     notice: (value, element) => { if (element) element.textContent = value; },
     toast: () => {}, date: value => value, confirm: async () => true, renderPane: async () => {} });
-  t.after(() => { app.reset(); dom.window.close(); });
+  t.after(() => { closed = true; app.reset(); dom.window.close(); });
   const poll = async () => {
     const entry = [...timers.entries()].find(([, timer]) => timer.delay === 2500);
     assert.ok(entry, "chat poll must be scheduled");
@@ -236,4 +236,77 @@ test("both existing drafts survive a branch chat merge", async t => {
   merged = true;
   await ui.poll();
   assert.equal(ui.$("#chat-input").value, "First draft\n\nSecond draft");
+});
+
+test("a single short message automatically loads older pages without a scroll", async t => {
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    const before = url.searchParams.get("before_id");
+    if (before === identifier(8)) return history(identifier(1), [message(5), message(6), message(7)], { total: 8, has_more: true });
+    if (before === identifier(5)) return history(identifier(1), [message(1), message(2), message(3), message(4)], { total: 8 });
+    return history(identifier(1), [message(8)], { total: 8, has_more: true });
+  }, { autoFrames: true });
+  Object.defineProperties(ui.$("#chat-stream"), {
+    clientHeight: { get: () => 500 },
+    scrollHeight: { get: () => 100 + ui.ids().length * 60 }
+  });
+  await ui.app.enter();
+  await flush();
+  assert.deepEqual(ui.ids(), Array.from({ length: 8 }, (_, i) => identifier(i + 1)));
+});
+
+test("older history has a retry button and retains visible messages after an error", async t => {
+  let attempts = 0;
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    if (url.searchParams.has("before_id")) {
+      if (++attempts === 1) throw new Error("Temporary history error");
+      return history(identifier(1), [message(1)], { total: 2 });
+    }
+    return history(identifier(1), [message(2)], { total: 2, has_more: true });
+  });
+  await ui.app.enter();
+  ui.$("#chat-history-more").click();
+  await flush();
+  assert.deepEqual(ui.ids(), [identifier(2)]);
+  assert.match(ui.$("#chat-history-more").textContent, /Повторить/);
+  ui.$("#chat-history-more").click();
+  await flush();
+  assert.deepEqual(ui.ids(), [identifier(1), identifier(2)]);
+  assert.equal(ui.$("#chat-history-more").hidden, true);
+});
+
+test("all fifty messages remain visible after paging one client history", async t => {
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    const before = url.searchParams.get("before_id");
+    const end = before ? Number(before.slice(-12)) - 1 : 50;
+    const start = Math.max(1, end - 19);
+    return history(identifier(1), Array.from({ length: end - start + 1 }, (_, i) => message(start + i)),
+      { total: 50, has_more: start > 1 });
+  });
+  await ui.app.enter();
+  assert.equal(ui.ids().length, 20);
+  ui.$("#chat-history-more").click();
+  await flush();
+  ui.$("#chat-history-more").click();
+  await flush();
+  assert.deepEqual(ui.ids(), Array.from({ length: 50 }, (_, i) => identifier(i + 1)));
+  assert.match(ui.$("#chat-history-note").textContent, /50/);
+});
+
+test("one imported message shows that AlfaCRM history is still loading", async t => {
+  const ui = setup(t, url => {
+    if (!url.pathname.endsWith("/messages")) return;
+    const delta = url.searchParams.has("after_seq");
+    const result = history(identifier(1), delta ? [message(2), message(3)] : [message(1)],
+      { total: delta ? 3 : 1, next_seq: delta ? 102 : 100 });
+    result.conversation.history_loading = !delta;
+    return result;
+  });
+  await ui.app.enter();
+  assert.match(ui.$("#chat-history-note").textContent, /Загружаем.*AlfaCRM/);
+  await ui.poll();
+  assert.equal(ui.ids().length, 3);
+  assert.doesNotMatch(ui.$("#chat-history-note").textContent, /Загружаем/);
 });

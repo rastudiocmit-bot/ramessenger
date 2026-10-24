@@ -39,6 +39,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-layout").classList.remove("has-selection", "list-collapsed");
     show($("#chat-empty")); show($("#chat-more"), false); show($("#chat-retry"), false); show($("#chat-handled"), false); show($("#chat-details"), false); show($("#chat-unread-count"), false);
     $("#chat-visible-count").textContent = ""; $("#chat-sync-state").textContent = "История на сервере";
+    show($("#chat-history-more"), false); show($("#chat-history-status"), false); $("#chat-history-note").textContent = "";
     show($("#chat-blank")); show($("#chat-stream"), false); show($("#chat-compose"), false);
     $("#chat-person").replaceChildren(node("strong", "Выберите диалог"), node("small", "Новые сообщения и ваши ответы"));
     document.querySelectorAll("[data-chat-view]").forEach(el => el.classList.toggle("active", el.dataset.chatView === view));
@@ -238,8 +239,47 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const at = value(a), bt = value(b), ao = order(a), bo = order(b);
     return at < bt ? -1 : at > bt ? 1 : ao < bo ? -1 : ao > bo ? 1 : a.id.localeCompare(b.id);
   }
+  function renderHistoryControls(data) {
+    const more = $("#chat-history-more"), status = $("#chat-history-status");
+    show(more, Boolean(data.more || data.olderError));
+    more.disabled = Boolean(data.olderLoading);
+    more.textContent = data.olderLoading ? "Загрузка истории…" : data.olderError ? "Повторить загрузку истории" : "Загрузить более ранние сообщения";
+    show(status, Boolean(data.olderLoading || data.olderError));
+    status.textContent = data.olderError || (data.olderLoading ? "Загружаем сообщения…" : "");
+    $("#chat-stream").setAttribute("aria-busy", String(Boolean(data.olderLoading)));
+    const total = Math.max(data.total || 0, data.messages.size);
+    const count = `Показано сообщений: ${data.messages.size} из ${total}.`;
+    const progress = data.meta?.history_error ? ` История AlfaCRM пока загружена не полностью. ${data.meta.history_error}`
+      : data.meta?.history_loading ? " Загружаем более раннюю историю из AlfaCRM…" : "";
+    $("#chat-history-note").textContent = count + progress;
+  }
+  function maybeFillHistory() {
+    const data = cache.get(selected), stream = $("#chat-stream");
+    if (!active() || !data?.more || data.olderLoading || data.olderError || historyBusy || stream.hidden) return;
+    // A short timeline has no scrollbar, so it cannot produce an upward scroll
+    // event. Fill the visible area instead of stranding the reader on one row.
+    if (stream.clientHeight > 0 && stream.scrollHeight <= stream.clientHeight + 1) loadOlder();
+  }
+  async function loadOlder({ retry = false } = {}) {
+    const id = selected, data = cache.get(id);
+    if (!active() || !data?.more || data.olderLoading || historyBusy || (data.olderError && !retry)) return;
+    const epoch = state.epoch, gen = generation, choice = selectionSeq;
+    data.olderLoading = true; data.olderError = ""; historyBusy = true;
+    renderHistoryControls(data); renderHeader();
+    try { await loadHistory(id, "older"); }
+    catch (error) {
+      if (valid(epoch, gen) && selected === id && choice === selectionSeq && !ignored(error)) data.olderError = error.message;
+    } finally {
+      data.olderLoading = false;
+      if (valid(epoch, gen) && selected === id && choice === selectionSeq) {
+        historyBusy = false; renderHistoryControls(data); renderHeader();
+        if (!data.olderError) requestAnimationFrame(maybeFillHistory);
+      }
+    }
+  }
   function renderMessages(id, { bottom = false, older = false } = {}) {
     const data = cache.get(id); if (id !== selected || !data) return;
+    renderHistoryControls(data);
     const renderKey = `${id}/${data.next}/${data.meta?.revision}/${data.messages.size}/${data.more}`;
     if (!bottom && !older && data.renderKey === renderKey) { renderHeader(); return; }
     data.renderKey = renderKey;
@@ -302,6 +342,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (older) stream.scrollTop = previousTop + stream.scrollHeight - previousHeight;
     else if (bottom || nearBottom) stream.scrollTop = stream.scrollHeight;
     renderHeader();
+    requestAnimationFrame(maybeFillHistory);
   }
   function reconcilePending(data) {
     if (!data.pending) return;
@@ -349,6 +390,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const old = data.messages.get(message.id); if (!old || old.version <= message.version) data.messages.set(message.id, message);
     }
     for (const removed of result.removed_ids || []) data.messages.delete(removed);
+    data.total = result.total ?? data.messages.size;
     // Earlier pages must not advance the live cursor past unseen intervening updates.
     if (mode !== "older") data.next = result.reset ? result.next_seq : Math.max(data.next, result.next_seq);
     if (!data.loaded || mode === "older") data.more = result.has_more;
@@ -434,17 +476,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-compose").addEventListener("submit", event => { event.preventDefault(); submit(); });
   $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; resizeCompose(); unlockSound(); });
   $("#chat-input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(min-width: 761px)").matches) { event.preventDefault(); submit(); } });
-  $("#chat-stream").addEventListener("scroll", () => {
-    if (historyBusy || !selected || !active()) return;
-    const stream = $("#chat-stream");
-    if (stream.scrollTop > 180) return;
-    const data = cache.get(selected);
-    if (!data || !data.more) return;
-    const epoch = state.epoch, gen = generation;
-    historyBusy = true;
-    loadHistory(selected, "older").catch(error => { if (valid(epoch, gen)) fail(error); })
-      .finally(() => { if (valid(epoch, gen)) historyBusy = false; });
-  }, { passive: true });
+  $("#chat-stream").addEventListener("scroll", () => { if ($("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
+  $("#chat-history-more").addEventListener("click", () => loadOlder({ retry: true }));
   function filtersChanged() {
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
     selected = null; historyBusy = false; listLoading = false; listRetryRequired = false; hasMore = false; page = 0;

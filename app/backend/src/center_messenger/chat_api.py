@@ -157,6 +157,8 @@ class ChatReader:
             db.execute(
                 text(
                     "SELECT c.*,cn.name AS channel_name,cn.kind AS channel_kind,"
+                    "am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
+                    "am.last_error_code AS crm_history_error,"
                     "CASE WHEN cn.kind='alfa_max_browser' THEN "
                     "(am.state='active' AND am.session_ciphertext IS NOT NULL AND EXISTS("
                     "SELECT 1 FROM alfa_settings ax WHERE ax.workspace_id=c.workspace_id "
@@ -202,6 +204,16 @@ class ChatReader:
 
     @staticmethod
     def _meta(row):
+        cursor = row.get("crm_history_cursor") or {}
+        loading = (
+            row.get("channel_kind") == "alfa_max_browser"
+            and row.get("crm_history_state") == "active"
+            and (cursor.get("projection_version") != 2 or any(
+                isinstance(value, int) and not isinstance(value, bool) and value > 0
+                for key, value in cursor.items() if key.count(":") == 1
+                and key.split(":")[-1] in {"receive", "sent"}
+            ))
+        )
         return {
             "id": str(row["id"]),
             "connection_id": str(row["connection_id"]),
@@ -212,6 +224,8 @@ class ChatReader:
             "inbound_seq": row["inbound_seq"],
             "revision": row["revision"],
             "can_send": bool(row["can_send"]) and row["channel_status"] == "active",
+            "history_loading": bool(loading),
+            "history_error": ALFA_MAX_ERRORS.get(row.get("crm_history_error")),
         }
 
     @staticmethod
@@ -359,6 +373,8 @@ class ChatReader:
                     text(
                         "SELECT c.*,cn.name AS "
                         "channel_name,coalesce(p.display_name,c.peer_name) AS display_name,"
+                        "cn.kind AS channel_kind,am.history_cursor AS crm_history_cursor,"
+                        "am.state AS crm_history_state,am.last_error_code AS crm_history_error,"
                         "CASE WHEN cn.kind='alfa_max_browser' THEN "
                         "(am.state='active' AND am.session_ciphertext IS NOT NULL AND EXISTS("
                         "SELECT 1 FROM alfa_settings ax WHERE ax.workspace_id=c.workspace_id "
@@ -476,6 +492,10 @@ class ChatReader:
                 params,
             ).scalar_one()
             where = "m.workspace_id=:w AND m.conversation_id=:c"
+            total = db.execute(
+                text("SELECT count(*) FROM messages m WHERE " + where +
+                     " AND m.payload->>'superseded_by' IS NULL"), params,
+            ).scalar_one()
             removed_ids = []
             reset = after_seq is not None and after_seq > end
             if reset:
@@ -529,6 +549,7 @@ class ChatReader:
             return {
                 "conversation": self._meta(row),
                 "messages": [self._message(r) for r in records],
+                "total": total,
                 "removed_ids": removed_ids,
                 "reset": reset,
                 "next_seq": next_seq,
