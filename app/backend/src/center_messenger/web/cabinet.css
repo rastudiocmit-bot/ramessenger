@@ -1165,3 +1165,36 @@ body:has(#cabinet[hidden]){overflow:auto}
 .ai-agent-versions li .text-button{justify-self:start;min-height:0;padding:4px 0}
 .ai-providers{display:flex;flex-direction:column;gap:16px;min-width:0}.ai-providers>.settings-card{margin:0!important;min-width:0}
 .ai-deepseek-note{margin:2px 0 14px}
+
+/* Press and hold: a large centred microphone, then the text with a send countdown. */
+.voice-btn{touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.voice-hold{position:fixed;inset:0;z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;
+  padding:24px 16px calc(24px + env(safe-area-inset-bottom));background:rgba(9,22,34,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+  pointer-events:none;animation:voice-hold-in .14s ease-out}
+.voice-hold[hidden]{display:none}
+.voice-hold[data-phase="preview"]{pointer-events:auto}
+@keyframes voice-hold-in{from{opacity:0}}
+.voice-hold-stage{display:flex;flex-direction:column;align-items:center;gap:16px;color:#fff;text-align:center}
+.voice-hold-orb{--level:0;position:relative;width:168px;height:168px;display:grid;place-items:center}
+.voice-hold-ring{position:absolute;inset:0;border-radius:50%;background:var(--send);opacity:.28;
+  transform:scale(calc(1 + var(--level) * .45));transition:transform .12s linear}
+.voice-hold-mic{position:relative;width:132px;height:132px;border-radius:50%;display:grid;place-items:center;color:#fff;
+  background:var(--send);box-shadow:0 14px 40px var(--send-glow), inset 0 1px 0 rgba(255,255,255,.25);transition:background .15s, transform .15s}
+.voice-hold-mic svg{width:58px;height:58px}
+.voice-hold[data-phase="cancel"] .voice-hold-mic{background:#d9463e;transform:scale(.9)}
+.voice-hold[data-phase="cancel"] .voice-hold-ring{background:#d9463e}
+.voice-hold[data-phase="working"] .voice-hold-ring{opacity:.35;animation:voice-hold-pulse 1s ease-in-out infinite}
+@keyframes voice-hold-pulse{50%{transform:scale(1.25);opacity:.12}}
+.voice-hold-time{font-size:30px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:.01em}
+.voice-hold[data-phase="working"] .voice-hold-time,.voice-hold[data-phase="preview"] .voice-hold-stage{display:none}
+.voice-hold-hint{font-size:15px;font-weight:550;opacity:.92;max-width:300px;line-height:1.45;white-space:pre-line}
+.voice-hold-card{width:min(440px,100%);background:var(--surface,#fff);color:var(--ink,#11202d);border-radius:22px;padding:20px 18px 16px;
+  box-shadow:0 24px 60px rgba(0,0,0,.35)}
+.voice-hold-card[hidden]{display:none}
+.voice-hold-text{margin:0 0 16px;font-size:18px;line-height:1.45;white-space:pre-wrap;overflow-wrap:anywhere;max-height:45vh;overflow:auto}
+.voice-hold-bar{height:4px;border-radius:2px;background:var(--sunken);overflow:hidden;margin-bottom:16px}
+.voice-hold-bar i{display:block;height:100%;background:var(--send);transform-origin:left;animation:voice-hold-count linear forwards}
+@keyframes voice-hold-count{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+.voice-hold-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.voice-hold-actions .btn{height:52px;min-height:0;font-size:16px;font-weight:650;border-radius:14px}
+@media (prefers-reduced-motion:reduce){.voice-hold,.voice-hold-ring{animation:none!important;transition:none}}

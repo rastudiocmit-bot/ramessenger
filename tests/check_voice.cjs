@@ -120,6 +120,61 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await phone.locator('#chat-voice-done').click();
     await phone.waitForFunction(() => document.querySelector('#chat-input').value.length > 0);
     assert.equal(await visible(phone, '#chat-send'), true);
+
+    // Press and hold: big microphone, release → text preview → sent by itself after the countdown.
+    const sent = () => phoneData.mutations.filter(m => m.path.endsWith('/messages'));
+    const holdMic = async ms => {
+      const box = await phone.locator('#chat-voice').boundingBox();
+      await phone.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await phone.mouse.down();
+      await phone.waitForSelector('#voice-hold[data-phase="recording"]'); await phone.waitForTimeout(ms);
+      return box;
+    };
+    await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
+    const before = sent().length, heard = phoneData.ai.transcribe.length;
+    await holdMic(1200);
+    const orbBox = await phone.locator('.voice-hold-mic').boundingBox();
+    assert.ok(Math.abs(orbBox.x + orbBox.width / 2 - 195) < 2 && orbBox.width >= 120, 'large microphone in the middle');
+    await save(phone, 'voice-hold-recording');
+    await phone.mouse.up();
+    await phone.waitForSelector('#voice-hold[data-phase="preview"]');
+    assert.equal(await phone.locator('.voice-hold-text').textContent(), 'Здравствуйте! Завтра занятие в 17:00.');
+    await save(phone, 'voice-hold-preview');
+    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 6000 });
+    await phone.waitForTimeout(300);
+    assert.equal(sent().length, before + 1, 'sent automatically after the countdown');
+    assert.equal(sent().at(-1).body.text, 'Здравствуйте! Завтра занятие в 17:00.');
+    assert.equal(phoneData.ai.transcribe.length, heard + 1);
+
+    // Slide up while holding → cancelled, nothing recognised or sent.
+    await phone.waitForSelector('#chat-voice:not([hidden])');
+    const box = await holdMic(600);
+    await phone.mouse.move(box.x + box.width / 2, box.y - 140);
+    await phone.waitForSelector('#voice-hold[data-phase="cancel"]'); await save(phone, 'voice-hold-cancel');
+    await phone.mouse.up(); await phone.waitForSelector('#voice-hold', { state: 'hidden' });
+    assert.equal(phoneData.ai.transcribe.length, heard + 1); assert.equal(sent().length, before + 1);
+
+    // «Изменить» puts the text into the field and sends nothing.
+    await holdMic(800); await phone.mouse.up();
+    await phone.waitForSelector('#voice-hold[data-phase="preview"]');
+    await phone.locator('.voice-hold-edit').click();
+    await phone.waitForSelector('#voice-hold', { state: 'hidden' });
+    assert.equal(await phone.locator('#chat-input').inputValue(), 'Здравствуйте! Завтра занятие в 17:00.');
+    await phone.waitForTimeout(3500); assert.equal(sent().length, before + 1, '«Изменить» never sends');
+
+    // A doubtful result (agent fallback) is never sent: it lands in the field.
+    await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
+    phoneData.ai.fallbackNext = 1;
+    await holdMic(800); await phone.mouse.up();
+    await phone.waitForSelector('#voice-hold', { state: 'hidden' });
+    await phone.waitForFunction(() => document.querySelector('#chat-input').value.includes('ну это'));
+    await phone.waitForTimeout(3500); assert.equal(sent().length, before + 1);
+
+    // A short tap still opens the old recording panel.
+    await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
+    await phone.locator('#chat-voice').tap(); await phone.waitForSelector('#chat-voice-panel[data-phase="recording"]');
+    assert.equal(await phone.locator('#voice-hold').isHidden(), true);
+    await phone.locator('#chat-voice-cancel').click();
+
     assert.deepEqual(phoneData.errors, []); assert.deepEqual(phoneData.unexpected, []);
     await phoneContext.close();
 

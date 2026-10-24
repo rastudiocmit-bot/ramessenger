@@ -13,7 +13,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
         { id: 'deepseek-v4-pro', title: 'DeepSeek V4 Pro', provider: 'deepseek', provider_title: 'DeepSeek' }],
       deepseek: { configured: false, key_hint: '', status: 'not_configured', error: null },
       tasks: [{ id: 'voice_input', title: 'Голосовой ввод' }], default_model: 'yandexgpt-5.1', default_prompt: 'Нормализуй текст, убери слова-паразиты.' },
-    agents: [], transcribe: [], failNext: 0 };
+    agents: [], transcribe: [], failNext: 0, fallbackNext: 0 };
   context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
   const conversations = Array.from({ length: 40 }, (_, n) => ({ id: 'client-' + n,
     name: n === 0 ? 'Анна Смирнова' : 'Клиент ' + String(n + 1).padStart(2, '0'), students: [n === 0 ? 'Миша, 6 лет' : 'Ученик ' + (n + 1)],
@@ -91,6 +91,8 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       if (ai.failNext > 0) { ai.failNext -= 1; return route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"Yandex Cloud сейчас недоступен. Повторите позже."}' }); }
       payload = { raw_text: 'ну это здравствуйте завтра занятие в пять', text: 'Здравствуйте! Завтра занятие в 17:00.', seconds: 1.5,
         agent: { id: 'agent-1', name: 'Чистовик' }, fallback: false, warning: null };
+      if (ai.fallbackNext > 0) { ai.fallbackNext -= 1; Object.assign(payload, { text: payload.raw_text, fallback: true,
+        warning: 'Текст вставлен без обработки: агент сейчас недоступен.' }); }
     }
     else if (p.endsWith('/summary')) payload = metrics;
     else if (p.endsWith('/chat-updates')) payload = { updates: [], next_seq: 4, has_more: false };
