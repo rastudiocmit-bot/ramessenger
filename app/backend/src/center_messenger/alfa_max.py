@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from center_messenger.accounts import audit
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser
+from center_messenger.alfa_repair import REPAIR_BATCH, customer_directory, reconcile_messages, repair_batch, resolve_customer
 from center_messenger.alfa_history import (
     advance_history, history_coverage, history_pending, plan_history,
     reconcile_history, retry_history, verify_saved_pages,
@@ -231,11 +232,13 @@ class AlfaMaxConnections:
             ).scalar_one_or_none()
             counts = db.execute(
                 text(
-                    "SELECT count(DISTINCT c.id) AS conversations,count(m.id) AS messages,"
-                    "min(m.occurred_at) AS oldest_at,max(m.occurred_at) AS newest_at "
+                    "SELECT count(DISTINCT c.id) FILTER(WHERE " + visible_message() + ") AS conversations,"
+                    "count(m.id) FILTER(WHERE " + visible_message() + ") AS messages,"
+                    "count(m.id) AS stored_messages,"
+                    "min(m.occurred_at) FILTER(WHERE " + visible_message() + ") AS oldest_at,"
+                    "max(m.occurred_at) FILTER(WHERE " + visible_message() + ") AS newest_at "
                     "FROM conversations c JOIN messages m ON m.workspace_id=c.workspace_id "
-                    "AND m.conversation_id=c.id WHERE c.workspace_id=:w AND c.connection_id=:c "
-                    "AND m.payload->>'superseded_by' IS NULL"
+                    "AND m.conversation_id=c.id WHERE c.workspace_id=:w AND c.connection_id=:c"
                 ),
                 {"w": workspace, "c": row["connection_id"]},
             ).mappings().one()
@@ -251,6 +254,7 @@ class AlfaMaxConnections:
                 "state": row["state"],
                 "syncing": running is not None,
                 "messages": counts["messages"],
+                "stored_messages": counts["stored_messages"],
                 "conversations": counts["conversations"],
                 "cursor": cursor,
                 "last_sync_at": row["last_sync_at"],
@@ -513,7 +517,10 @@ class AlfaMaxConnections:
     def _supersede(db, workspace, old, canonical):
         db.execute(
             text("UPDATE messages SET provider_message_id=NULL,"
-                 "payload=jsonb_set(payload,'{superseded_by}',to_jsonb(CAST(:canonical AS text))),"
+                 "payload=jsonb_set((payload-'crm_mirror')||CASE WHEN provider_message_id IS NOT NULL "
+                 "AND NOT (payload ? 'original_provider_message_id') THEN "
+                 "jsonb_build_object('original_provider_message_id',provider_message_id) ELSE '{}'::jsonb END,"
+                 "'{superseded_by}',to_jsonb(CAST(:canonical AS text))),"
                  "version=version+1 WHERE workspace_id=:w AND id=:old"),
             {"w": workspace, "old": old, "canonical": str(canonical)},
         )
@@ -593,22 +600,17 @@ class AlfaMaxConnections:
 
     def _project_page(self, db, workspace, channel, crm_connection, branch, rows):
         snapshot = DirectoryReader._published(db, workspace)
+        directory = customer_directory(db, workspace, snapshot, [
+            customer["customer_id"] for item in rows for customer in item.get("customers", []) if customer])
         touched = set()
+        verified_conversations = set()
         merged_contacts = set()
         for item in rows:
             customers = {}
             for raw_customer in item.get("customers") or []:
                 customer = dict(raw_customer) if raw_customer else None
                 if customer and snapshot:
-                    customer["contact_id"] = db.execute(
-                        text(
-                            "SELECT contact_id FROM alfa_customers WHERE workspace_id=:w "
-                            "AND run_id=:r AND branch_id=:branch AND external_id=:id "
-                            "AND contact_id IS NOT NULL"
-                        ),
-                        {"w": workspace, "r": snapshot["run"], "branch": customer["branch_id"],
-                         "id": customer["customer_id"]},
-                    ).scalar_one_or_none()
+                    customer = resolve_customer(customer, directory)
                 if not customer:
                     group = "unlinked"
                 elif customer.get("contact_id"):
@@ -659,12 +661,15 @@ class AlfaMaxConnections:
                         db, workspace, channel, customer["contact_id"], conversation_id
                     )
                     merged_contacts.add(customer["contact_id"])
+                if customer and customer.get("contact_id"):
+                    verified_conversations.add(conversation_id)
                 touched.add(conversation_id)
                 base_source_id = _source_record_id(item, branch)
                 prefix = base_source_id + "|recipient|"
                 source_keys = [base_source_id, prefix + "unlinked"] + [
-                    prefix + f"{r['branch_id']}:{r['customer_id']}"
+                    prefix + f"{seen_branch}:{r['customer_id']}"
                     for group_records in customers.values() for r in group_records if r
+                    for seen_branch in {r["branch_id"], r.get("observed_branch_id", r["branch_id"])}
                 ]
                 candidates = list(
                     db.execute(
@@ -683,7 +688,8 @@ class AlfaMaxConnections:
                 # A bulk journal row can name several unrelated parents. Its
                 # stable source identity must have one projection per recipient,
                 # while multiple cards of one verified parent share one bubble.
-                recipient_cards = {(r["branch_id"], r["customer_id"]) for r in records if r}
+                recipient_cards = {(seen_branch, r["customer_id"]) for r in records if r
+                                   for seen_branch in {r["branch_id"], r.get("observed_branch_id", r["branch_id"])}}
                 matching = [m for m in candidates if (
                     m["payload"].get("customer_branch_id"), m["payload"].get("customer_id")
                 ) in recipient_cards or m["conversation_id"] == conversation_id]
@@ -753,10 +759,14 @@ class AlfaMaxConnections:
                 payload = {
                     "source": "alfa_max",
                     "crm_record_id": str(item["record_id"]),
+                    "crm_identity_restored": False,
                     "branch_id": branch,
                     "crm_order": item.get("crm_order"),
                     "customer_branch_id": customer["branch_id"] if customer else None,
                     "customer_id": customer["customer_id"] if customer else None,
+                    "crm_global_verified": bool(customer) and all(r.get("global_id_verified", False) for r in records if r),
+                    "crm_customer_ids": sorted({r["customer_id"] for r in records if r}),
+                    "crm_primary_branch": min((r["branch_id"] for r in records if r), default=None),
                     "attachments": item["attachments"],
                     "actor_name": item["actor_name"],
                     "actor_type": item["actor_type"],
@@ -796,7 +806,9 @@ class AlfaMaxConnections:
                                 "w": workspace,
                                 "conv": conversation_id,
                                 "text": item["text"],
-                                "branch": str(customer["branch_id"]),
+                                # Match the actual sending journal independently
+                                # of the preferred branch for future replies.
+                                "branch": str(branch),
                                 "customer": str(customer["customer_id"]),
                                 "at": item["occurred_at"],
                                 "c": channel,
@@ -864,6 +876,9 @@ class AlfaMaxConnections:
                         continue
                 if existing:
                     merged = dict(existing["payload"]) | payload
+                    if merged.get("crm_mirror") and not payload["crm_global_verified"]:
+                        merged.pop("crm_mirror", None)
+                        merged.pop("superseded_by", None)
                     actor = item["actor_type"]
                     if existing["send_command_id"]:
                         merged["source"] = existing["payload"].get("source", "center_messenger_alfa_max")
@@ -950,7 +965,10 @@ class AlfaMaxConnections:
                          "order": item.get("crm_order") or 0, "message": message_id},
                     )
         for conversation_id in touched:
-            refresh_unread(db, workspace, conversation_id)
+            if conversation_id in verified_conversations:
+                reconcile_messages(self, db, workspace, channel, conversation_id)
+            else:
+                refresh_unread(db, workspace, conversation_id)
 
         logging.getLogger(__name__).debug(
             "AlfaCRM MAX history projected workspace=%s rows=%d touched_convs=%d",
@@ -1107,6 +1125,18 @@ class AlfaMaxWorker:
                     self._release(db, workspace, connection, lease, 300)
                     return True
                 crm_connection = row["crm_connection_id"]
+                phase = "repair_saved_history"
+                repair_cursor = dict(row["history_cursor"] or {})
+                if repair_batch(self.service, db, workspace, connection, repair_cursor):
+                    db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) "
+                                    "WHERE workspace_id=:w"), {"w": workspace, "cursor": json.dumps(repair_cursor)})
+                    row = dict(row) | {"history_cursor": repair_cursor}
+                    repair = repair_cursor["client_repair"]
+                    # Repair saved dialogs promptly, but interleave live CRM
+                    # reads so existing message cleanup cannot starve new ones.
+                    if not repair["complete"] and repair["processed"] % (REPAIR_BATCH * 3):
+                        self._release(db, workspace, connection, lease, 1)
+                        return True
                 phase = "open_session"
                 session = self.service.vault.open_browser_state(
                     workspace, connection, row["session_ciphertext"]

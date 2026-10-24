@@ -21,15 +21,19 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date }) {
   function render(payload) {
     const streams = payload.streams || [];
     const done = streams.filter(s => s.complete && !s.missing_rows).length;
-    const issue = payload.error || streams.find(s => s.error)?.error;
+    const issue = payload.error || streams.find(s => s.error)?.error
+      || (payload.unidentified_rows ? "Есть старые сообщения без подтверждённого исходного ID: " + payload.unidentified_rows : "");
     const paused = Boolean(payload.history_paused && !payload.backfill_pending);
     const complete = Boolean(payload.history_complete && !issue);
     classes({ complete, paused });
-    $("#alfa-max-progress-text").textContent = paused ? "Проверка архива приостановлена"
+    $("#alfa-max-progress-text").textContent = payload.client_repair && !payload.client_repair.complete
+      ? "Восстанавливаем историю клиентов: проверено " + payload.client_repair.processed
+      : paused ? "Проверка архива приостановлена"
       : issue ? "История загружена не полностью"
       : complete ? "Обход всей истории завершён" : "Загружаем историю за весь период…";
     const period = payload.oldest_at ? " · С " + date(payload.oldest_at) + " по " + date(payload.newest_at) : "";
-    lastDetail = "В базе сообщений: " + payload.messages + " · Диалогов: " + payload.conversations
+    lastDetail = "В переписках сообщений: " + payload.messages + " · Всего записей в базе: "
+      + (payload.stored_messages ?? payload.messages) + " · Диалогов: " + payload.conversations
       + " · Журналов проверено: " + done + " из " + streams.length + period
       + (payload.last_sync_at ? " · Последнее чтение: " + date(payload.last_sync_at) : "")
       + (issue ? " · " + issue : "");
@@ -43,6 +47,7 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date }) {
       if (stream.checked_at) value += " (" + date(stream.checked_at) + ")";
       if (stream.catchup_page) value += "; догружаем новые сообщения, страница " + (stream.catchup_page + 1);
       if (stream.retry) value += "; повторная проверка";
+      if (stream.unidentified_rows) value += "; без исходного ID: " + stream.unidentified_rows;
       if (stream.paused_until) value += (stream.missing_rows ? "; недостача " + stream.missing_rows : "; проверка приостановлена")
         + ", повтор после " + date(stream.paused_until);
       else if (stream.complete && !stream.missing_rows) value += "; проверено";

@@ -7,6 +7,7 @@ back its data; the suite creates and removes its own randomly named schema.
 import importlib.util
 import json
 import os
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,7 @@ from center_messenger.crm_api import DirectoryReader
 from center_messenger.auth_security import AuthError
 from center_messenger.database import log_database_error
 from center_messenger.history_audit import compare_source_history
+from center_messenger.alfa_repair import repair_batch
 from sqlalchemy.exc import OperationalError
 
 
@@ -681,8 +683,242 @@ class MessageSyncTests(unittest.TestCase):
                             {"w": self.workspace})
             return ([{"messages": [self.row()], "has_more": False} for _ in requests], {})
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION}, browser_effect=changed_settings)
+        self.assertTrue(cursor.pop("client_repair")["complete"])
         self.assertEqual(cursor, {"projection_version": PROJECTION_VERSION})
         self.assertEqual(self.messages(), [])
+
+    def test_journal_context_does_not_create_an_unlinked_copy_of_a_known_customer(self):
+        self.project(self.row("100", branch=2), branch=2)
+        message = self.messages()[0]
+        self.assertEqual(self.conversation()["contact_id"], self.contact)
+        self.assertEqual(message["payload"]["customer_branch_id"], 1)
+        self.assertEqual(message["payload"]["branch_id"], 2)
+
+    def test_incoming_branch_mirrors_retain_all_source_rows_and_one_visible_event(self):
+        for branch in (4, 2, 3, 1):
+            self.project(self.row(str(100 + branch), branch=branch), branch=branch)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.messages()[0]["payload"]["branch_id"], 1)
+        self.assertEqual(self.db.execute(text("SELECT count(*) FROM messages WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), 4)
+        self.assertEqual(self.db.execute(text("SELECT count(*) FROM source_records WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), 4)
+        cursor = {"projection_version": PROJECTION_VERSION, "streams": []}
+        for branch in (1, 2, 3, 4):
+            for direction in ("receive", "sent"):
+                key = f"{branch}:{direction}"
+                cursor["streams"].append(key)
+                cursor[f"complete:{key}"] = True
+                cursor[f"total:{key}"] = int(direction == "receive")
+        report = history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2, 3, 4])
+        self.assertTrue(report["history_complete"])
+        for branch in (1, 2, 3, 4):
+            result = {"messages": [self.row(str(100 + branch), branch=branch)], "has_more": False}
+            verify_saved_pages(self.db, self.workspace, self.channel, [(branch, "receive", 0)], [result])
+            self.assertNotIn("error", result)
+
+    def test_repeated_identical_messages_in_one_minute_survive_branch_mirror_reconciliation(self):
+        for branch in (2, 1):
+            for occurrence in range(2):
+                self.project(self.row(str(100 + occurrence * 4 + branch), branch=branch), branch=branch)
+        self.assertEqual(len(self.messages()), 2)
+        self.assertEqual({m["payload"]["branch_id"] for m in self.messages()}, {1})
+
+    def test_outgoing_and_different_customer_ids_are_not_branch_mirrors(self):
+        self.add_customer(self.contact, 2, 8)
+        self.project(self.row("101", branch=1))
+        self.project(self.row("102", branch=2, customer=8), branch=2)
+        self.project(self.row("201", direction="out", branch=1))
+        self.project(self.row("202", direction="out", branch=2), branch=2)
+        self.assertEqual(len(self.messages()), 4)
+
+    def test_same_number_assigned_to_different_crm_contacts_is_not_merged(self):
+        self.add_customer(uuid4(), 2, 7)
+        self.project(self.row("101", branch=1))
+        self.project(self.row("102", branch=2), branch=2)
+        self.assertEqual(len(self.messages()), 2)
+        self.assertEqual(len({m["conversation_id"] for m in self.messages()}), 2)
+        self.assertTrue(all(not m["payload"]["crm_global_verified"] for m in self.messages()))
+
+    def test_legacy_row_identity_is_recovered_and_exact_copy_hides_without_deletion(self):
+        self.project(self.row("100"))
+        current = self.messages()[0]
+        legacy_id = uuid4()
+        legacy = dict(current["payload"])
+        for key in ("crm_record_id", "crm_global_verified", "crm_customer_ids", "crm_identity_restored"):
+            legacy.pop(key, None)
+        self.db.execute(text("INSERT INTO messages(workspace_id,id,conversation_id,provider_message_id,"
+                             "direction,actor_type,text,payload,occurred_at) "
+                             "VALUES (:w,:id,:c,'legacy-provider','in','contact','Old text',CAST(:p AS jsonb),:at)"),
+                        {"w": self.workspace, "id": legacy_id, "c": current["conversation_id"],
+                         "p": json.dumps(legacy), "at": self.at})
+        self.project(self.row("100"))
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.messages()[0]["id"], current["id"])
+        old = self.db.execute(text("SELECT * FROM messages WHERE workspace_id=:w AND id=:id"),
+                              {"w": self.workspace, "id": legacy_id}).mappings().one()
+        self.assertEqual(old["payload"]["crm_record_id"], "100")
+        self.assertEqual(old["payload"]["superseded_by"], str(current["id"]))
+        self.assertEqual(old["payload"]["original_provider_message_id"], "legacy-provider")
+        self.assertEqual(old["text"], "Old text")
+
+    def test_existing_unlinked_chats_are_repaired_without_rereading_the_crm_archive(self):
+        self.published.return_value = None
+        for branch in (1, 2, 3, 4):
+            self.project(self.row(str(100 + branch), branch=branch), branch=branch)
+        old_ids = {m["conversation_id"] for m in self.messages()}
+        self.assertEqual(len(old_ids), 4)
+        self.published.return_value = self.snapshot
+        cursor = {"projection_version": PROJECTION_VERSION, "2:sent": 75}
+        self.assertTrue(repair_batch(self.service, self.db, self.workspace, self.channel, cursor))
+        self.assertTrue(cursor["client_repair"]["complete"])
+        self.assertEqual(cursor["2:sent"], 75)
+        self.assertEqual(len(self.messages()), 1)
+        listing = self.reader.listing(None, self.workspace)["conversations"]
+        self.assertEqual(len(listing), 1)
+        canonical = self.messages()[0]["conversation_id"]
+        for old in old_ids:
+            redirected = self.reader.history(None, self.workspace, old)
+            self.assertEqual(redirected["conversation"]["id"], str(canonical))
+        self.assertFalse(repair_batch(self.service, self.db, self.workspace, self.channel, cursor))
+
+    def test_handled_marker_follows_the_visible_incoming_copy(self):
+        self.project(self.row("102", branch=2), branch=2)
+        conversation = self.messages()[0]["conversation_id"]
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation)
+        self.project(self.row("101", branch=1))
+        self.assertEqual(len(self.messages()), 1)
+        handled = self.db.execute(text("SELECT handled_inbound_id FROM conversations WHERE workspace_id=:w AND id=:c"),
+                                  {"w": self.workspace, "c": conversation}).scalar()
+        self.assertEqual(handled, self.messages()[0]["id"])
+
+    def test_repair_settles_a_completed_journal_gap_after_recovering_legacy_ids(self):
+        self.project(self.row("100"))
+        self.db.execute(text("UPDATE messages SET payload=(payload-'crm_record_id')-'crm_global_verified' "
+                             "WHERE workspace_id=:w"), {"w": self.workspace})
+        cursor = {"projection_version": PROJECTION_VERSION, "streams": ["1:receive"], "1:receive": 9,
+                  "complete:1:receive": False, "total:1:receive": 1, "gap:1:receive": 1,
+                  "error:1:receive": "history_incomplete", "finished:1:receive": self.at.isoformat(),
+                  "started:1:receive": (self.at + timedelta(minutes=1)).isoformat()}
+        repair_batch(self.service, self.db, self.workspace, self.channel, cursor)
+        self.assertEqual(cursor["1:receive"], 0)
+        self.assertTrue(cursor["complete:1:receive"])
+        self.assertNotIn("gap:1:receive", cursor)
+        self.assertNotIn("error:1:receive", cursor)
+        self.assertEqual(self.messages()[0]["payload"]["crm_record_id"], "100")
+
+    def test_repair_does_not_cancel_a_periodic_scan_for_late_old_rows(self):
+        self.project(self.row("100"))
+        cursor = {"projection_version": PROJECTION_VERSION, "streams": ["1:receive"], "1:receive": 9,
+                  "complete:1:receive": False, "total:1:receive": 1,
+                  "finished:1:receive": self.at.isoformat(),
+                  "started:1:receive": (self.at + RECHECK_INTERVAL).isoformat()}
+        repair_batch(self.service, self.db, self.workspace, self.channel, cursor)
+        self.assertEqual(cursor["1:receive"], 9)
+        self.assertFalse(cursor["complete:1:receive"])
+
+    def test_preferred_customer_branch_is_available(self):
+        self.add_customer(self.contact, 2, 7)
+        self.db.execute(text("UPDATE alfa_branches SET available=false WHERE workspace_id=:w AND external_id=1"),
+                        {"w": self.workspace})
+        self.project(self.row("100", branch=2), branch=2)
+        self.assertEqual(self.messages()[0]["payload"]["customer_branch_id"], 2)
+
+    def test_outgoing_echo_uses_original_sending_branch_after_customer_routing_repair(self):
+        self.add_customer(self.contact, 2, 7)
+        self.project(self.row("1"))
+        local = self.local_reply(self.conversation()["id"])
+        self.db.execute(text("UPDATE messages SET payload=payload||CAST(:p AS jsonb) WHERE workspace_id=:w AND id=:id"),
+                        {"w": self.workspace, "id": local, "p": json.dumps({"crm_branch": 2})})
+        self.db.execute(text("UPDATE send_commands SET state='unknown' WHERE workspace_id=:w"), {"w": self.workspace})
+        self.project(self.row("20", direction="out", branch=1, body="Reply", at=self.at + timedelta(seconds=10)))
+        self.assertEqual(self.db.execute(text("SELECT state FROM send_commands WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), "unknown")
+        self.project(self.row("21", direction="out", branch=2, body="Reply", at=self.at + timedelta(seconds=10)), branch=2)
+        self.assertEqual(len(self.messages()), 3)
+        self.assertEqual(self.db.execute(text("SELECT message_id FROM source_records WHERE workspace_id=:w "
+                                             "AND external_record_id='out:2:21'"), {"w": self.workspace}).scalar(), local)
+        self.assertEqual(self.db.execute(text("SELECT state FROM send_commands WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), "accepted")
+
+    def test_client_repair_checkpoint_resumes_and_does_not_create_empty_dialogs(self):
+        self.project(self.row("100"))
+        for index in range(1, 22):
+            self.add_customer(UUID(int=index), 1, 700 + index)
+        cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 5})
+        self.assertFalse(cursor["client_repair"]["complete"])
+        self.assertEqual(cursor["client_repair"]["processed"], 20)
+        self.assertEqual(cursor["1:receive"], 5)
+        self.service.browser.read_histories.assert_not_called()
+        cursor = self.run_worker(cursor)
+        self.assertTrue(cursor["client_repair"]["complete"])
+        self.assertEqual(cursor["client_repair"]["processed"], 22)
+        self.assertEqual(cursor["1:receive"], 6)
+        self.service.browser.read_histories.assert_called_once()
+        self.assertEqual(self.db.execute(text("SELECT count(*) FROM conversations WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), 1)
+
+    def test_old_rows_without_identity_are_kept_and_reported_for_review(self):
+        self.project(self.row("100"))
+        self.db.execute(text("UPDATE messages SET payload=(payload-'crm_record_id')-'crm_order' WHERE workspace_id=:w"),
+                        {"w": self.workspace})
+        cursor = {"projection_version": PROJECTION_VERSION, "streams": ["1:receive"],
+                  "complete:1:receive": True, "complete:1:sent": True}
+        repair_batch(self.service, self.db, self.workspace, self.channel, cursor)
+        self.assertEqual(len(self.messages()), 1)
+        report = history_coverage(self.db, self.workspace, self.channel, cursor, [1])
+        self.assertFalse(report["history_complete"])
+        self.assertEqual(report["unidentified_rows"], 1)
+
+    def test_reported_four_branch_topology_repairs_saved_history_and_live_updates(self):
+        other = uuid4()
+        self.add_customer(other, 2, 8)
+        self.add_customer(self.contact, 2, 7)
+        self.published.return_value = None
+        source = defaultdict(list)
+        for branch in (1, 2, 3, 4):
+            for customer in (7, 8):
+                for event in range(3):
+                    row = self.row(str(10000 + customer * 100 + event * 4 + branch), branch=branch,
+                                   customer=customer, body=f"Private event {event}", at=self.at + timedelta(minutes=event))
+                    self.project(row, branch=branch)
+                    source[branch].append(row)
+        current = self.messages()
+        for message in current:
+            if message["occurred_at"] == self.at:
+                legacy = {key: value for key, value in message["payload"].items()
+                          if key not in {"crm_record_id", "crm_identity_restored", "crm_customer_ids"}}
+                self.db.execute(text("INSERT INTO messages(workspace_id,id,conversation_id,direction,actor_type,text,payload,occurred_at) "
+                                     "VALUES (:w,:id,:c,'in','contact',:body,CAST(:p AS jsonb),:at)"),
+                                {"w": self.workspace, "id": uuid4(), "c": message["conversation_id"],
+                                 "body": message["text"], "p": json.dumps(legacy), "at": self.at})
+        self.assertEqual(len(self.messages()), 32)
+        self.published.return_value = self.snapshot
+        cursor = {"projection_version": PROJECTION_VERSION, "streams": []}
+        for branch in (1, 2, 3, 4):
+            for direction in ("receive", "sent"):
+                key = f"{branch}:{direction}"
+                cursor["streams"].append(key)
+                cursor[f"complete:{key}"] = True
+                cursor[f"total:{key}"] = 6 if direction == "receive" else 0
+        repair_batch(self.service, self.db, self.workspace, self.channel, cursor)
+        self.assertEqual(len(self.messages()), 6)
+        self.assertEqual(len(self.reader.listing(None, self.workspace)["conversations"]), 2)
+        self.assertEqual(self.db.execute(text("SELECT count(*) FROM messages WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), 32)
+        self.assertEqual(self.db.execute(text("SELECT count(*) FROM source_records WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), 24)
+        self.assertTrue(history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2, 3, 4])["history_complete"])
+        for branch, rows in source.items():
+            result = {"messages": rows, "has_more": False}
+            verify_saved_pages(self.db, self.workspace, self.channel, [(branch, "receive", 0)], [result])
+            self.assertNotIn("error", result)
+            self.project(self.row(str(20000 + branch), branch=branch, body="New live event"), branch=branch)
+        self.assertEqual(len(self.messages()), 7)
+        self.assertEqual(sum(m["text"] == "New live event" for m in self.messages()), 1)
+        progress = self.service.progress(None, self.workspace)
+        self.assertEqual(progress["messages"], 7)
+        self.assertEqual(progress["stored_messages"], 36)
 
     def test_loading_old_history_does_not_invalidate_a_current_reply(self):
         self.project(self.row("20"))
