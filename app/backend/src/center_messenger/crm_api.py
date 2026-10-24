@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from center_messenger.accounts_api import identity, service
 from center_messenger.alfa_client import AlfaError
-from center_messenger.alfa_family import fetch_family_card, group_facts, subscriptions_balance
+from center_messenger.alfa_family import fetch_family_card, group_facts, customer_balance
 from center_messenger.alfa_sync import SyncOptions
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_directory import normalized_name, phone_number
@@ -355,6 +355,7 @@ class DirectoryReader:
                         "study_status": row["study_status"],
                         "legal_name": row["legal_name"],
                         "balance": str(row["balance"]) if row["balance"] is not None else None,
+                        "balance_updated_at": snapshot["finished_at"].isoformat() if snapshot["finished_at"] else None,
                         "paid_lesson_count": row["paid_lesson_count"],
                         "url": (
                             f"{snapshot['origin']}/company/{row['branch_id']}/customer/view"
@@ -379,6 +380,12 @@ class DirectoryReader:
                 for card in person["cards"]:
                     source = cached.get((int(card["branch_id"]), int(card["id"])))
                     if source:
+                        if snapshot["finished_at"] is None or source["refreshed_at"] >= snapshot["finished_at"]:
+                            card.update(
+                                balance=str(source["balance"]) if source["balance"] is not None else None,
+                                paid_lesson_count=source["paid_lesson_count"],
+                                balance_updated_at=source["refreshed_at"].isoformat(),
+                            )
                         card.update(
                             subscriptions=source["subscriptions"],
                             lessons=source["lessons"],
@@ -414,7 +421,7 @@ class DirectoryReader:
                     elif str(row["customer_id"]) not in existing["customer_ids"]:
                         existing["customer_ids"].append(str(row["customer_id"]))
             for person in people.values():
-                person["balance"] = subscriptions_balance(person["cards"])
+                person["balance"] = customer_balance(person["cards"])
                 group_facts(person["groups"], person["cards"], today=snapshot["today"])
             return {
                 "id": str(contact_id),

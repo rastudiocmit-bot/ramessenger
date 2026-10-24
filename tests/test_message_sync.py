@@ -1405,6 +1405,47 @@ class MessageSyncTests(unittest.TestCase):
         self.assertIn("AlfaCRM", meta["history_error"])
         self.assertIsNotNone(self.reader.listing(None, self.workspace)["conversations"][0]["history_error"])
 
+    def family_balance_fixture(self):
+        self.snapshot.update(origin='https://test.s20.online',version=1,finished_at=self.at+timedelta(hours=1),today=self.at.date())
+        student=uuid4()
+        self.db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES (:w,:id,'Child')"),{'w':self.workspace,'id':student})
+        self.db.execute(text("UPDATE alfa_customers SET student_id=:student,balance=3962.50,paid_lesson_count=3 WHERE workspace_id=:w"),{'w':self.workspace,'student':student})
+        return DirectoryReader(SimpleNamespace(_transaction=self.accounts.transaction,chat_transaction=self.accounts.transaction)),student
+
+    def test_family_balance_is_customer_total_before_any_subscription_cache_is_loaded(self):
+        reader,student=self.family_balance_fixture()
+        result=reader.detail(None,self.workspace,self.contact)
+        self.assertEqual(result['students'][0]['id'],str(student))
+        self.assertEqual(result['students'][0]['balance'],'3962.50')
+        self.assertNotIn('subscriptions',result['students'][0]['cards'][0])
+
+    def test_family_balance_and_paid_count_use_newer_live_customer_details(self):
+        reader,student=self.family_balance_fixture()
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,paid_lesson_count,subscriptions,refreshed_at) VALUES (:w,:c,1,7,1,4123.75,5,CAST(:subs AS jsonb),:at)"),{'w':self.workspace,'c':self.crm,'at':self.at+timedelta(hours=2),'subs':json.dumps([{'id':40,'balance':'2725.00'}])})
+        person=reader.detail(None,self.workspace,self.contact)['students'][0]
+        self.assertEqual(person['balance'],'4123.75')
+        self.assertEqual(person['cards'][0]['paid_lesson_count'],5)
+        self.assertEqual(person['cards'][0]['subscriptions'][0]['balance'],'2725.00')
+        self.assertEqual(person['cards'][0]['balance_updated_at'],(self.at+timedelta(hours=2)).isoformat())
+        # A newly published customer row supersedes an older detail-cache total.
+        self.snapshot['finished_at']=self.at+timedelta(hours=3)
+        person=reader.detail(None,self.workspace,self.contact)['students'][0]
+        self.assertEqual(person['balance'],'3962.50')
+        self.assertEqual(person['cards'][0]['paid_lesson_count'],3)
+
+    def test_family_balance_counts_global_customer_once_and_never_another_child(self):
+        reader,student=self.family_balance_fixture()
+        self.add_customer(self.contact,2,7)
+        sibling=uuid4()
+        self.db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES (:w,:id,'Sibling')"),{'w':self.workspace,'id':sibling})
+        self.add_customer(self.contact,1,8)
+        self.db.execute(text("UPDATE alfa_customers SET student_id=:student,balance=3962.50 WHERE workspace_id=:w AND external_id=7"),{'w':self.workspace,'student':student})
+        self.db.execute(text("UPDATE alfa_customers SET student_id=:student,balance=-100.25 WHERE workspace_id=:w AND external_id=8"),{'w':self.workspace,'student':sibling})
+        people={p['id']:p for p in reader.detail(None,self.workspace,self.contact)['students']}
+        self.assertEqual(people[str(student)]['balance'],'3962.50')
+        self.assertEqual(len(people[str(student)]['cards']),2)
+        self.assertEqual(people[str(sibling)]['balance'],'-100.25')
+
     def test_queue_uses_latest_unanswered_for_Arina_and_resets_wait_after_new_incoming(self):
         old = self.at - timedelta(days=12)
         self.project(self.row('1', body='Question 1', at=old), self.row('2', body='Question 2', at=old+timedelta(minutes=1)))
