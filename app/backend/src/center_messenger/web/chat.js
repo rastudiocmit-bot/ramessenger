@@ -42,6 +42,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-input").value = ""; $("#chat-search").value = ""; $("#chat-link-search").value = "";
     $("#chat-send").classList.remove("is-retry"); $("#chat-send").setAttribute("aria-label", "Отправить"); $("#chat-send").title = "Отправить";
     $("#chat-send-hint").hidden = true; $("#chat-send-hint").textContent = ""; resizeCompose();
+    $("#chat-chip-lead").textContent = ""; show($("#chat-chip-lead"), false);
     $("#chat-branch").replaceChildren(new Option("Все филиалы", ""));
     $("#chat-channel").replaceChildren(new Option("Все каналы MAX", "")); $("#chat-status").value = "";
     $("#max-form").reset(); $("#max-token-form").reset();
@@ -253,6 +254,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       $("#chat-visible-count").textContent = payload.total ? `${items.length} из ${payload.total}` : "";
       $("#chat-unread-count").textContent = String(payload.unread); show($("#chat-unread-count"), payload.unread > 0);
       if ($("#chat-chip-unread")) { $("#chat-chip-unread").textContent = String(payload.unread); show($("#chat-chip-unread"), payload.unread > 0); }
+      $("#chat-chip-lead").textContent = String(payload.lead_unread || 0);
+      $("#chat-chip-lead").setAttribute("aria-label", `Непрочитанных сообщений у лидов: ${payload.lead_unread || 0}`);
+      show($("#chat-chip-lead"), payload.lead_unread > 0);
       if (!selected && items.length) await select((items.find(item => item.unread) || items[0]).id, false);
       else if (selected && currentItem()) renderHeader();
       if (hasMore) requestAnimationFrame(() => maybeLoadMore());
@@ -424,6 +428,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       history.append(bubble);
     }
     show($("#chat-blank"), false); show(stream); show($("#chat-compose"));
+    resizeCompose();
     restoreScroll(position, { bottom, older, follow: true });
     renderHeader();
     requestAnimationFrame(maybeFillHistory);
@@ -564,10 +569,24 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     } finally { if (valid(epoch, gen)) { historyBusy = false; renderHeader(); } }
   }
   function resizeCompose() {
-    const input = $("#chat-input");
+    const input = $("#chat-input"); if (!input.clientWidth) return;
+    const position = rememberScroll();
     input.style.height = "auto";
-    input.style.height = `${Math.min(Math.max(input.scrollHeight, 44), 128)}px`;
+    input.style.height = `${Math.max(input.scrollHeight, 44)}px`;
+    restoreScroll(position, { follow: true });
+    const canvas = input.closest(".canvas");
+    if (canvas && document.activeElement === input && input.selectionEnd === input.value.length)
+      canvas.scrollTop = canvas.scrollHeight;
   }
+  if (typeof ResizeObserver !== "undefined") {
+    let width = 0;
+    new ResizeObserver(([entry]) => {
+      if (width !== entry.contentRect.width) {
+        width = entry.contentRect.width; if (width > 0) resizeCompose();
+      }
+    }).observe($("#chat-input").parentElement);
+  }
+  document.fonts?.addEventListener("loadingdone", resizeCompose);
   $("#chat-compose").addEventListener("submit", event => { event.preventDefault(); submit(); });
   $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; resizeCompose(); renderHeader(); unlockSound(); });
   $("#chat-templates").addEventListener("click", () => {
@@ -587,7 +606,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(min-width: 761px)").matches) { event.preventDefault(); submit(); } });
   $("#chat-stream").addEventListener("scroll", () => { if ($("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
   $("#chat-stream").addEventListener("wheel", event => { if (event.deltaY < 0 && $("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
-  window.addEventListener("resize", () => requestAnimationFrame(maybeFillHistory));
+  window.addEventListener("resize", () => requestAnimationFrame(() => { resizeCompose(); maybeFillHistory(); }));
   $("#chat-history-more").addEventListener("click", () => loadOlder({ retry: true }));
   function filtersChanged() {
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;

@@ -6,9 +6,9 @@
   <title>Личный кабинет · РазвивайсяMessenger</title>
   <script src="/assets/appearance.js?v=2.0"></script>
   <link rel="stylesheet" href="/assets/app.css?v=0.8.33">
-  <link rel="stylesheet" href="/assets/cabinet.css?v=2.0">
+  <link rel="stylesheet" href="/assets/cabinet.css?v=2.1">
   <script src="/assets/icons.js?v=1.0" defer=""></script><script src="/assets/directory.js?v=0.9.0" defer=""></script>
-  <script src="/assets/chat.js?v=0.9.0" defer=""></script>
+  <script src="/assets/chat.js?v=0.9.1" defer=""></script>
   <script src="/assets/alfa-progress.js?v=0.8.2" defer=""></script>
   <script src="/assets/cabinet.js?v=2.0" defer=""></script><script src="/assets/app.js?v=0.9.0" defer=""></script>
 </head>
@@ -58,7 +58,7 @@
   <div class="panes" id="cabinet-pages"><section class="pane messages-page" id="pane-messages" data-page="messages" hidden=""><div id="chat-layout" class="live-chat-layout">
 <section class="pane-list" aria-label="Диалоги"><div class="list-top"><div class="title-row"><span class="brand" role="img" aria-label="Развивайся — сообщения"></span><button id="chat-search-toggle" class="iconbtn" type="button" aria-label="Поиск" aria-expanded="false" data-icon="search"></button></div></div>
 <div class="search" id="chat-search-wrap" hidden=""><label><span class="sr">Поиск по диалогам</span><span data-icon="search"></span><input id="chat-search" type="search" placeholder="Родитель, ребёнок, телефон" autocomplete="off" enterkeyhint="search"></label><button id="chat-filters-open" class="iconbtn plain" type="button" aria-label="Фильтры диалогов" data-icon="cog"></button></div>
-<div class="chips" id="chat-chips"><button class="chip" type="button" data-chat-view="all" aria-pressed="true">Все</button><button class="chip" type="button" data-chat-view="unread" aria-pressed="false">Нужен ответ <span class="n" id="chat-chip-unread" hidden=""></span></button><button class="chip" type="button" data-chat-view="lead" aria-pressed="false">Лиды</button></div>
+<div class="chips" id="chat-chips"><button class="chip" type="button" data-chat-view="all" aria-pressed="true">Все</button><button class="chip" type="button" data-chat-view="unread" aria-pressed="false">Нужен ответ <span class="n" id="chat-chip-unread" hidden=""></span></button><button class="chip" type="button" data-chat-view="lead" aria-pressed="false">Лиды <span class="n" id="chat-chip-lead" hidden=""></span></button></div>
 <div id="chat-list-notice"><p id="chat-error" class="notice error" role="alert" hidden=""></p><button id="chat-new-marker" type="button" class="chat-new-marker" hidden="">Новое сообщение</button></div><div class="list-wrap"><div class="list-card"><div class="list chat-list-scroll"><div id="chat-list"></div><p id="chat-empty" class="empty">Здесь появятся новые сообщения подключённого MAX-бота.</p><div id="chat-more-slot" class="chat-list-loader"><div id="chat-more" class="chat-list-loader" role="status" aria-live="polite" hidden=""></div><button id="chat-retry" type="button" class="text-button" hidden="">Повторить</button><span id="chat-load-label">Загружаем диалоги…</span></div></div><div class="sr" id="chat-list-meta"><span id="chat-visible-count"></span><span id="chat-sync-state">История на сервере</span><span id="chat-unread-count" class="chat-total" hidden="">0</span></div></div></div></section>
 <section class="pane-chat" aria-label="Переписка"><div class="canvas">
 <div id="chat-blank" class="detail-placeholder"><span class="detail-placeholder-icon" aria-hidden="true">▤</span><h2>Диалог начинается здесь</h2><p>Одна переписка с родителем, даже если дети занимаются в разных филиалах.</p><button id="chat-go-connections" class="secondary" type="button">Подключить MAX-бота</button></div>

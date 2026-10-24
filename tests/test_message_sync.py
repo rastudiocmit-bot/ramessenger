@@ -1090,6 +1090,35 @@ class MessageSyncTests(unittest.TestCase):
         self.assertTrue(listing["conversations"][0]["unread"])
         self.assertEqual(listing["conversations"][0]["unread_count"], 1)
 
+    def test_lead_counter_counts_messages_beyond_the_loaded_page_and_active_chip(self):
+        self.project(self.row("1"), self.row("2", body="Second question"))
+        for n in range(35):
+            self.add_customer(uuid4(), 1, 100+n)
+            self.project(self.row(str(100+n), customer=100+n, body=f"Lead {n}"))
+        self.db.execute(text("UPDATE alfa_customers SET status='lead' WHERE workspace_id=:w"), {"w": self.workspace})
+        listing = self.reader.listing(None, self.workspace)
+        self.assertEqual(len(listing["conversations"]), 30)
+        self.assertTrue(listing["has_more"])
+        self.assertEqual(listing["lead_unread"], 37)
+        self.assertEqual(self.reader.listing(None, self.workspace, page=1)["lead_unread"], 37)
+        self.assertEqual(self.reader.listing(None, self.workspace, status="client")["lead_unread"], 37)
+        self.assertEqual(self.reader.listing(None, self.workspace, branch=2)["lead_unread"], 0)
+        self.assertEqual(self.reader.listing(None, self.workspace, connection=uuid4())["lead_unread"], 0)
+        self.assertEqual(self.reader.listing(None, self.workspace, query="Not present")["lead_unread"], 0)
+
+    def test_lead_counter_honors_handled_messages_and_confirmed_replies(self):
+        self.project(self.row("1"), self.row("2", body="Second question"))
+        self.db.execute(text("UPDATE alfa_customers SET status='lead' WHERE workspace_id=:w"), {"w": self.workspace})
+        self.assertEqual(self.reader.listing(None, self.workspace)["lead_unread"], 2)
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, self.conversation()["id"])
+        self.assertEqual(self.reader.listing(None, self.workspace)["lead_unread"], 0)
+        self.project(self.row("3", body="New question"))
+        self.assertEqual(self.reader.listing(None, self.workspace, view="unread")["lead_unread"], 1)
+        self.project(self.row("4", direction="out", actor="automation", at=self.at+timedelta(minutes=1)))
+        self.assertEqual(self.reader.listing(None, self.workspace)["lead_unread"], 1)
+        self.project(self.row("5", direction="out", at=self.at+timedelta(minutes=2)))
+        self.assertEqual(self.reader.listing(None, self.workspace)["lead_unread"], 0)
+
     def test_import_restores_distinct_rows_previously_collapsed_by_content(self):
         self.project(self.row("1"))
         message = self.messages()[0]

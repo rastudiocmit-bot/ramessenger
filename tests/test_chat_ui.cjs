@@ -106,6 +106,24 @@ test("big CRM keys and sub-millisecond times render without precision loss", asy
   assert.deepEqual(ui.ids(), [identifier(2), identifier(1), identifier(3)]);
 });
 
+test("lead chip uses the server total beyond loaded rows and clears after an update", async t => {
+  let leadUnread = 47;
+  const ui = setup(t, url => url.pathname.endsWith("/chats") ? {
+    conversations: [conversation(1)], total: 120, unread: 50, lead_unread: leadUnread,
+    page: 0, has_more: true
+  } : undefined);
+  await ui.app.enter();
+  assert.equal(ui.$("#chat-chip-lead").textContent, "47");
+  assert.equal(ui.$("#chat-chip-lead").hidden, false);
+  ui.$('[data-chat-view="lead"]').click(); await flush();
+  assert.equal(ui.$("#chat-chip-lead").textContent, "47");
+  assert.ok(ui.calls.some(url => url.searchParams.get("status") === "lead"));
+  leadUnread = 0; await ui.poll();
+  assert.equal(ui.$("#chat-chip-lead").hidden, true);
+  ui.app.reset();
+  assert.equal(ui.$("#chat-chip-lead").textContent, "");
+});
+
 test("older history cursor uses the same order as the rendered stream", async t => {
   let cursor;
   const ui = setup(t, url => {
