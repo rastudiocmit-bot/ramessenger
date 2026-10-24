@@ -98,7 +98,8 @@ def main(argv=None):
                         "SELECT DISTINCT m.payload->>'crm_record_id' FROM messages m JOIN conversations c "
                         "ON c.workspace_id=m.workspace_id AND c.id=m.conversation_id "
                         "WHERE m.workspace_id=:w AND c.connection_id=:c AND m.payload->>'branch_id'=:branch "
-                        "AND m.direction=:direction AND m.payload->>'superseded_by' IS NULL "
+                        "AND m.direction=:direction AND (m.payload->>'superseded_by' IS NULL "
+                        "OR m.payload->>'crm_mirror'='true') "
                         "AND m.payload->>'crm_record_id' IS NOT NULL"
                     ), {"w": workspace, "c": settings["connection_id"], "branch": str(args.branch),
                         "direction": "in" if args.direction == "receive" else "out"}).scalars())

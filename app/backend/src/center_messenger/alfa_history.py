@@ -11,6 +11,8 @@ MAX_PAGE_FAILURES = 3
 
 
 def history_pending(cursor):
+    if cursor.get("client_repair") and not cursor["client_repair"].get("complete"):
+        return True
     if cursor.get("projection_version") != PROJECTION_VERSION or not cursor.get("streams"):
         return True
     return any(
@@ -79,7 +81,7 @@ def verify_saved_pages(db, workspace, connection, requests, results):
         "JOIN messages m ON m.workspace_id=s.workspace_id AND m.id=s.message_id "
         "WHERE s.workspace_id=:w AND s.connection_id=:c AND s.namespace='alfa_max' "
         "AND s.external_record_id=ANY(CAST(:keys AS text[])) "
-        "AND m.payload->>'superseded_by' IS NULL"
+        "AND (m.payload->>'superseded_by' IS NULL OR m.payload->>'crm_mirror'='true')"
     ), {"w": workspace, "c": connection, "keys": list(expected)}).mappings().all()
     saved = {expected[row["external_record_id"]] for row in rows
              if expected[row["external_record_id"]] == (row["branch"], row["record"], row["direction"])}
@@ -98,11 +100,12 @@ def history_coverage(db, workspace, connection, cursor, branches):
     rows = db.execute(text(
         "SELECT m.payload->>'branch_id' AS branch,m.direction,"
         "count(DISTINCT m.payload->>'crm_record_id') AS source_rows,"
+        "count(*) FILTER(WHERE m.payload->>'crm_record_id' IS NULL AND m.send_command_id IS NULL "
+        "AND m.payload->>'source'='alfa_max') AS unidentified_rows,"
         "min(m.occurred_at) AS oldest_at,max(m.occurred_at) AS newest_at "
         "FROM messages m JOIN conversations c ON c.workspace_id=m.workspace_id "
         "AND c.id=m.conversation_id WHERE m.workspace_id=:w AND c.connection_id=:c "
-        "AND m.payload->>'crm_record_id' IS NOT NULL "
-        "AND m.payload->>'superseded_by' IS NULL GROUP BY 1,2"
+        "AND (m.payload->>'superseded_by' IS NULL OR m.payload->>'crm_mirror'='true') GROUP BY 1,2"
     ), {"w": workspace, "c": connection}).mappings().all()
     saved = {(row["branch"], row["direction"]): row for row in rows}
     streams = []
@@ -118,6 +121,7 @@ def history_coverage(db, workspace, connection, cursor, branches):
                         and not cursor.get(f"catchup:{key}") and not cursor.get(f"error:{key}"))
             streams.append({"branch_id": str(branch), "direction": direction,
                             "source_rows": count, "expected_rows": expected,
+                            "unidentified_rows": row.get("unidentified_rows", 0),
                             "missing_rows": missing, "complete": complete,
                             "next_page": cursor.get(key, 0),
                             "catchup_page": cursor.get(f"catchup:{key}", 0),
@@ -131,15 +135,20 @@ def history_coverage(db, workspace, connection, cursor, branches):
                             "missing_ids": cursor.get(f"missing_ids:{key}", []),
                             "error_code": cursor.get(f"error:{key}")})
     return {"streams": streams,
-            "history_complete": bool(streams) and all(s["complete"] and not s["missing_rows"] for s in streams),
-            "totals_verified": bool(streams) and all(s["expected_rows"] is not None and not s["missing_rows"] for s in streams),
+            "history_complete": bool(streams) and all(s["complete"] and not s["missing_rows"] and not s["unidentified_rows"] for s in streams)
+                                and not (cursor.get("client_repair") and not cursor["client_repair"].get("complete")),
+            "totals_verified": bool(streams) and all(s["expected_rows"] is not None and not s["missing_rows"]
+                                                     and not s["unidentified_rows"] for s in streams),
             "backfill_pending": history_pending(cursor),
-            "history_paused": any(s["paused_until"] for s in streams)}
+            "history_paused": any(s["paused_until"] or s["unidentified_rows"] for s in streams),
+            "unidentified_rows": sum(s["unidentified_rows"] for s in streams),
+            "client_repair": cursor.get("client_repair")}
 
 
 def plan_history(original, branches, now=None):
     now = now or datetime.now(UTC)
-    cursor = dict(original) if original.get("projection_version") == PROJECTION_VERSION else {}
+    cursor = dict(original) if original.get("projection_version") == PROJECTION_VERSION else {
+        key: original[key] for key in ("client_repair",) if key in original}
     cursor["projection_version"] = PROJECTION_VERSION
     cursor["streams"] = [f"{branch}:{direction}" for branch in branches for direction in ("receive", "sent")]
     requests = []

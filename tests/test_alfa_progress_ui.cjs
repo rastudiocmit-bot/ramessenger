@@ -111,3 +111,14 @@ test("leaving connections prevents status polling while reading messages", async
   assert.equal(ui.timers.size, 0);
   assert.ok(ui.$("#alfa-max-progress").hidden);
 });
+test("saved-history repair displays its checkpoint rather than a stalled archive count", async t => {
+  const ui = setup(t, () => report({ client_repair: { processed: 60, complete: false } }));
+  await ui.app.start();
+  assert.match(ui.$("#alfa-max-progress-text").textContent, /Восстанавливаем историю клиентов: проверено 60/);
+  assert.equal(ui.timers.size, 1);
+});
+test("visible messages and retained database records have separate counters", async t => {
+  const ui = setup(t, () => report({ messages: 6, stored_messages: 32 }));
+  await ui.app.start();
+  assert.match(ui.$("#alfa-max-progress-detail").textContent, /В переписках сообщений: 6 · Всего записей в базе: 32/);
+});
