@@ -1,0 +1,161 @@
+/* ===========================================================================
+   РазвивайсяMessenger — слой редизайна.
+   Подключается ПОСЛЕ app.css и только переопределяет оформление.
+   Разметку, классы и скрипты кабинета не меняет.
+   Версия 1.1 — актуальная разметка, явный выбор темы в настройках.
+   =========================================================================== */
+
+/* --- 1. Палитра -------------------------------------------------------- */
+:root{
+  color-scheme:light;
+  --primary:#087f78; --primary-deep:#066b66;
+  --accent:#2c7fba;            /* действия: отправка, активный фильтр */
+  --accent-deep:#2574ad;
+  --accent-lit:#6cb4e4;        /* блик на кнопке отправки */
+  --mark:#3d8dc4;              /* счётчики и метки «ждёт ответа» */
+  --mark-ink:#235f88;
+  --mark-tint:#e8f2fa;
+  --bubble-out:#d7efdb; --bubble-out-ink:#16301f;
+  --sys-ink:#3b5a4f;           /* контраст системных плашек: 5.2:1 вместо 2.9:1 */
+  --card-shadow:0 4px 24px rgba(25,45,36,.10);
+}
+
+/* --- 2. Полосы прокрутки убраны, прокрутка сохранена -------------------- */
+.chat-stream,.chat-list-scroll,.directory-list-panel,.directory-detail,.content{
+  scrollbar-width:none;-ms-overflow-style:none}
+.chat-stream::-webkit-scrollbar,.chat-list-scroll::-webkit-scrollbar,
+.directory-list-panel::-webkit-scrollbar,.directory-detail::-webkit-scrollbar,
+.content::-webkit-scrollbar{width:0;height:0;display:none}
+
+/* --- 3. Кнопка отправки: синяя, с переливом, увеличенной иконкой -------- */
+.chat-send{
+  background:var(--accent);
+  box-shadow:0 5px 18px rgba(44,127,186,.40), inset 0 1px 0 rgba(255,255,255,.2);
+  transition:filter .15s,transform .15s,box-shadow .15s}
+.chat-send:not(:disabled){
+  background:linear-gradient(108deg,
+    var(--accent) 0%, var(--accent) 36%, var(--accent-lit) 50%,
+    var(--accent) 64%, var(--accent) 100%);
+  background-size:280% 100%;
+  animation:rm-sheen 3.4s linear infinite}
+@keyframes rm-sheen{from{background-position:150% 0}to{background-position:-50% 0}}
+.chat-send:hover:not(:disabled){background-color:var(--accent);filter:brightness(1.07)}
+.chat-send:not(:disabled):active{transform:scale(.92)}
+.chat-send svg{width:22px;height:22px}
+/* Самолётик нарисован со смещением; выравниваем по центру масс. */
+.chat-send svg>*{transform:translate(-1.34px,0.34px)}
+
+/* --- 4. Системные сообщения: та же прозрачность, читаемый текст --------- */
+.system-label,.system-time,.system-body{color:var(--sys-ink)}
+.system-toggle{border-color:rgba(59,90,79,.34);color:var(--sys-ink)}
+.system-toggle:hover,.chat-bubble.system:hover .system-toggle{background:rgba(255,255,255,.5)}
+.chat-bubble.system{padding:5px 6px 5px 11px;border-radius:11px}
+.system-label{font-size:10.5px}
+.system-time{font-size:10px;opacity:.75}
+
+/* --- 5. Непрочитанное: синее вместо оранжевого ------------------------- */
+.unread-badge{background:var(--mark);border-radius:7px;font-size:11px;font-weight:800;padding:4px 8px}
+.chat-total{background:var(--mark);border-radius:8px}
+.chat-new-marker{background:var(--mark-tint);border-color:color-mix(in srgb,var(--mark) 38%,transparent);
+  color:var(--mark-ink);box-shadow:none}
+.chat-row.selected:before{background:var(--primary)}
+@keyframes reply-pulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(61,141,196,.45),inset 0 0 0 2px #fff9}
+  55%    {box-shadow:0 0 0 8px rgba(61,141,196,0),  inset 0 0 0 2px #fff9}
+}
+
+/* --- 6. Пузыри и разделители ------------------------------------------- */
+.chat-bubble.outgoing{background:var(--bubble-out);color:var(--bubble-out-ink)}
+.chat-bubble.incoming,.chat-bubble.outgoing{border-radius:16px}
+.chat-day{font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;
+  color:#6b7f88;background:rgba(255,255,255,.72);backdrop-filter:blur(10px);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.6);border-radius:10px;padding:5px 12px}
+.chat-older{border-radius:999px;background:rgba(255,255,255,.72);
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.6);backdrop-filter:blur(10px);border:0;
+  font-size:11.5px;font-weight:650;color:#6b7f88}
+
+/* --- 7. Плавающие карточки --------------------------------------------- */
+.chat-list-panel,.chat-header{border-radius:16px;box-shadow:var(--card-shadow)}
+.chat-compose textarea{border-radius:16px;box-shadow:var(--card-shadow)}
+.settings-card{border-radius:18px;box-shadow:var(--card-shadow)}
+
+/* --- 8. Боковое меню: активный пункт в акцентном синем ------------------ */
+.nav-item.active{background:color-mix(in srgb,var(--accent-deep) 13%,transparent);
+  color:var(--accent-deep)}
+.nav-item{border-radius:10px}
+
+/* --- 9. Фильтры и чипы -------------------------------------------------- */
+.chat-views button[aria-pressed="true"],.chat-views button.active{
+  background:var(--accent-deep);color:#fff;border-radius:999px}
+
+/* --- 10. Аватары по статусу: пастель кабинета, архив — красный --------- */
+.contact-avatar{box-shadow:inset 0 0 0 2px rgba(255,255,255,.55)}
+.chat-row .contact-avatar{width:38px;min-width:38px;height:38px;min-height:38px;font-size:13.5px}
+.avatar-count{position:absolute;top:-4px;right:-5px;min-width:18px;height:18px;padding:0 5px;
+  border-radius:999px;background:var(--mark);color:#fff;font-size:11px;font-weight:800;
+  display:grid;place-items:center;font-variant-numeric:tabular-nums;line-height:18px;
+  box-shadow:0 0 0 2px var(--surface);pointer-events:none}
+
+/* --- 11. Тёмная тема: включается только в настройках кабинета ---------- */
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --background:#0c1418; --surface:#131f24; --surface-raised:#18272d;
+  --ink:#e8eff1; --muted:#90a3ab; --line:#22343b;
+  --primary:#2ba79e; --primary-dark:#228d86; --primary-deep:#38b8ae;
+  --sys-ink:#c6d9d1; --danger:#e0808c;
+  --mark:#4e9ad1; --mark-ink:#8fc3e8; --mark-tint:#15283a;
+  --bubble-out:#1f4535; --bubble-out-ink:#dff3e4;
+  --card-shadow:0 4px 24px rgba(0,0,0,.38);
+}
+:root[data-theme="dark"] :is(.sidebar,.topbar,.settings-card,.auth-card,.auth-panel,
+  .chat-list-panel,.chat-header,.chat-list-header,.directory-layout,.directory-list-heading,
+  .student-card,.crm-card-link,.chat-link-option,.max-channel,dialog){
+  background:var(--surface);border-color:var(--line)}
+:root[data-theme="dark"] :is(input,select,textarea){
+  background:var(--surface-raised);color:var(--ink);border-color:var(--line)}
+:root[data-theme="dark"] :is(input,textarea)::placeholder{color:var(--muted)}
+:root[data-theme="dark"] :is(input,select,textarea):disabled{background:#0f1b1f;color:var(--muted)}
+:root[data-theme="dark"] input[type="checkbox"]{accent-color:var(--primary)}
+:root[data-theme="dark"] :is(.secondary,.icon-button,.chat-heading-actions .icon-button,
+  .family-tool,.role-chip,.section-option,.chat-user-card){
+  background:var(--surface-raised);color:var(--ink);border-color:var(--line)}
+:root[data-theme="dark"] :is(.secondary,.icon-button,.text-button):hover:not(:disabled){background:#223840}
+:root[data-theme="dark"] .primary{background:#087f78;color:#fff}
+:root[data-theme="dark"] :is(.nav-item,.sidebar-foot,.topbar-label,.form-note,.auth-foot,
+  .chat-preview,.contact-students,.contact-meta small,.chat-person>small,.user-text span,
+  .chat-user-text small,.chat-list-foot,.app-footer,.chat-history-note,.chat-history-loader,
+  .chat-compose-hint,.detail-placeholder p,.detail-placeholder small,.contact-channels,
+  .student-status,.crm-card-link small,.max-channel-heading small,.session-row small,
+  .member-info small,.directory-footnote,.sync-summary p,.sync-options){color:var(--muted)}
+:root[data-theme="dark"] :is(.nav-item:hover,.chat-row:hover,.contact-row:hover,
+  .crm-card-link:hover,.chat-link-option:hover){background:var(--surface-raised);color:var(--ink)}
+:root[data-theme="dark"] .nav-item.active{background:#152f40;color:#8fc3e8}
+:root[data-theme="dark"] :is(.chat-row.selected,.contact-row.selected){background:#17332e}
+:root[data-theme="dark"] :is(.chat-row,.contact-row,.chat-search,.chat-list-foot,.chat-list-header,
+  .directory-list-heading,.student-card,.contact-heading,.session-row,.member-row,.member-sections,
+  .family-head,.family-member,.family-course,.student-heading){border-color:var(--line)}
+:root[data-theme="dark"] .chat-layout{
+  background-color:#1b3d55;background-image:linear-gradient(rgba(8,18,24,.62),rgba(8,18,24,.62)),url(/assets/chat-wallpaper.png)}
+:root[data-theme="dark"] .chat-bubble.incoming{background:#1a2a31;color:var(--ink)}
+:root[data-theme="dark"] .chat-bubble-meta{color:#9eb4ab}
+:root[data-theme="dark"] :is(.chat-day,.chat-older){
+  background:rgba(19,31,36,.74);box-shadow:inset 0 0 0 1px rgba(255,255,255,.07);color:#90a3ab}
+:root[data-theme="dark"] .chat-bubble.system{background:rgba(10,20,26,.46);border-color:rgba(255,255,255,.13)}
+:root[data-theme="dark"] .system-toggle{border-color:rgba(198,217,209,.32)}
+:root[data-theme="dark"] :is(.system-toggle:hover,.chat-bubble.system:hover .system-toggle){background:rgba(255,255,255,.1)}
+:root[data-theme="dark"] :is(.chat-handled,.chat-details,.group-tag,.small-tag,.role-badge,.avatar,
+  .section-option-icon,.chat-linked-family,.family-sync,.status-label){background:#12302f;color:#83cbbd;border-color:#245047}
+:root[data-theme="dark"] .role-chip.active{background:#384d57;color:#fff}
+:root[data-theme="dark"] :is(.directory-detail,.sync-bar){background:#0f1b1f;border-color:var(--line)}
+:root[data-theme="dark"] :is(.detail-placeholder-icon,.chat-resizer,.directory-resizer){background:#18272d;border-color:var(--line)}
+:root[data-theme="dark"] :is(.contact-review,.notice.error,.integration-error){background:#33211f;color:#f0b5aa;border-color:#63413b}
+:root[data-theme="dark"] .welcome{background:radial-gradient(ellipse at 20% 10%,#17332e,transparent 65%),var(--background)}
+:root[data-theme="dark"] .loading{background:var(--background);color:var(--ink)}
+:root[data-theme="dark"] dialog::backdrop{background:rgba(0,0,0,.65)}
+.appearance-section-title{font-size:14px;margin:22px 0 10px;padding-top:20px;border-top:1px solid var(--line)}
+
+/* --- 12. Уважение к настройке «меньше движения» ------------------------- */
+@media (prefers-reduced-motion:reduce){
+  .chat-send:not(:disabled){animation:none;background:var(--accent)}
+  .contact-avatar{animation:none}
+}

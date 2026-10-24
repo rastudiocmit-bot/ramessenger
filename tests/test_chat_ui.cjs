@@ -81,6 +81,19 @@ test("enter keeps all channels selected", async t => {
   assert.ok(!ui.calls.find(url => url.pathname.endsWith("/chats")).searchParams.has("connection"));
 });
 
+test("unread count uses a badge inside the avatar and preserves the client initial", async t => {
+  const ui = setup(t, undefined, { conversations: [conversation(1), { ...conversation(2), unread_count: 150 },
+    { ...conversation(3), unread: false, unread_count: 0 }] });
+  await ui.app.enter();
+  const avatars = [...ui.window.document.querySelectorAll("#chat-list .contact-avatar")];
+  assert.equal(avatars[0].querySelector(".avatar-letter").textContent, "P");
+  assert.equal(avatars[0].querySelector(".avatar-count").textContent, "1");
+  assert.equal(avatars[1].querySelector(".avatar-count").textContent, "99");
+  assert.match(avatars[1].getAttribute("aria-label"), /150/);
+  assert.equal(avatars[2].querySelector(".avatar-count"), null);
+  assert.equal(ui.window.document.querySelectorAll("#chat-list .avatar-count").length, 2);
+});
+
 test("big CRM keys and sub-millisecond times render without precision loss", async t => {
   const ui = setup(t, url => url.pathname.endsWith("/messages") ? history(identifier(1), [
     message(3, { sort_time: "1792800000000001", crm_order: "1" }),

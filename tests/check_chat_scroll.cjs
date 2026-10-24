@@ -16,6 +16,8 @@ const root = path.join(__dirname, '../app/backend/src/center_messenger/web');
       .replace(/<link\b[^>]*>/g, '');
     await page.setContent(html);
     await page.addStyleTag({ content: fs.readFileSync(root + '/app.css', 'utf8') });
+    await page.addStyleTag({ content: fs.readFileSync(root + '/redesign.css', 'utf8') });
+    await page.addScriptTag({ content: fs.readFileSync(root + '/appearance.js', 'utf8') });
     await page.addStyleTag({ content: '#loading,.sidebar,.topbar{display:none!important} #cabinet{display:block!important} .content{padding:15px!important} .chat-layout{height:760px!important;min-height:0!important} [hidden]{display:none!important}' });
     await page.addScriptTag({ content: fs.readFileSync(root + '/chat.js', 'utf8') });
     await page.evaluate(async () => {

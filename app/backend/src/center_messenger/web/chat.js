@@ -135,8 +135,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const row = node("div", undefined, `chat-row${item.unread ? " unread" : ""}${item.id === selected ? " selected" : ""}`); row.dataset.id = item.id;
       const avatar = button("", `contact-avatar status-${item.status}`, () => openCards(item));
       avatar.title = item.contact_id ? `Открыть карточку АльфаCRM: ${item.name}` : "Связать диалог с контактом АльфаCRM"; avatar.setAttribute("aria-label", avatar.title);
-      const letter = item.unread_count > 0 ? String(Math.min(item.unread_count, 99)) : item.name.trim().slice(0, 1).toLocaleUpperCase("ru");
+      const letter = item.name.trim().slice(0, 1).toLocaleUpperCase("ru");
       avatar.append(node("span", letter, "avatar-letter"), node("span", item.contact_id ? "↗" : "+", "avatar-open"));
+      if (item.unread_count > 0) {
+        const count = node("span", String(Math.min(item.unread_count, 99)), "avatar-count");
+        count.setAttribute("aria-hidden", "true"); avatar.append(count);
+        avatar.setAttribute("aria-label", `${avatar.title}. Непрочитанных сообщений: ${item.unread_count}`);
+      }
       const body = button("", "chat-select", () => select(item.id)); body.setAttribute("aria-label", `Открыть переписку: ${item.name}`); body.setAttribute("aria-pressed", String(item.id === selected));
       const heading = node("span", undefined, "chat-row-heading"); heading.append(node("strong", item.name), node("time", item.last_message_at ? time(item.last_message_at) : ""));
       body.append(heading);
