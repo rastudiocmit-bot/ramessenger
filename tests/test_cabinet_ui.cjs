@@ -23,8 +23,8 @@ function setup(t, handler = async () => ({}), role = "owner") {
 }
 test("owner gets the supplied desktop navigation and three primary mobile tabs", t => {
   const ui = setup(t); ui.app.update(all);
-  assert.deepEqual([...ui.$("#navrail").children].map(n => n.dataset.pane), ["summary", "messages", "clients", "team", "connections", "overview", "security", "profile"]);
-  assert.deepEqual([...ui.$("#tabbar").querySelectorAll("[data-pane]")].map(n => n.dataset.pane), ["summary", "messages", "clients"]);
+  assert.deepEqual([...ui.$("#navrail").children].map(n => n.dataset.pane), ["messages", "summary", "clients", "team", "connections", "overview", "security", "profile"]);
+  assert.deepEqual([...ui.$("#tabbar").querySelectorAll("[data-pane]")].map(n => n.dataset.pane), ["messages", "summary", "clients"]);
   ui.$("#more-tab").click();
   assert.equal(ui.$("#navigation-options").querySelectorAll("[data-pane]").length, 5);
 });

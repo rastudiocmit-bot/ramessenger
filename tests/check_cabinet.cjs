@@ -18,7 +18,11 @@ const { fixture } = require('./browser_fixture.cjs');
         await page.screenshot({ path: path.join(process.env.CM_APPEARANCE_SCREENSHOT_DIR, name + '.png'), animations: 'disabled' });
       } };
       await page.goto('https://cabinet.example.test/');
+      await page.waitForSelector('#pane-messages');
+      assert.equal(await page.locator('#navrail>[data-pane]').first().getAttribute('data-pane'), 'messages');
+      assert.equal(await page.locator('#tabbar>[data-pane]').first().getAttribute('data-pane'), 'messages');
       if (role !== 'operator') {
+        await page.locator('#summary-tab').click();
         await page.waitForSelector('.kpi'); assert.equal(await page.locator('.kpi dd').first().textContent(), '268');
         assert.ok(await page.locator('#summary-content .card').evaluateAll(cards => cards.every(card => {
           const head = card.querySelector('.card-h').getBoundingClientRect(), body = card.querySelector('.card-b').getBoundingClientRect();
