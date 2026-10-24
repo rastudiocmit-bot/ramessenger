@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import socket
+import time
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
@@ -16,15 +17,33 @@ from center_messenger.alfa_client import normalize_origin
 MAX_HTML_BYTES = 2_000_000
 MAX_RESPONSE_BYTES = 1_000_000
 MOSCOW = ZoneInfo("Europe/Moscow")
+HISTORY_READ_ATTEMPTS = 3
+# Chromium net/base/net_error_list.h. Only these fixed tokens can leave the
+# browser exception; arbitrary text, URLs and browser state are never retained.
+TRANSIENT_NET_ERRORS = frozenset({
+    "ERR_ABORTED", "ERR_FAILED", "ERR_TIMED_OUT", "ERR_NETWORK_CHANGED",
+    "ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET", "ERR_CONNECTION_ABORTED",
+    "ERR_CONNECTION_REFUSED", "ERR_CONNECTION_FAILED", "ERR_CONNECTION_TIMED_OUT",
+    "ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED", "ERR_EMPTY_RESPONSE",
+    "ERR_HTTP2_PROTOCOL_ERROR", "ERR_ADDRESS_UNREACHABLE",
+})
+NETWORK_ERRORS = TRANSIENT_NET_ERRORS | frozenset({
+    "ERR_INSUFFICIENT_RESOURCES", "ERR_OUT_OF_MEMORY", "ERR_BLOCKED_BY_CLIENT",
+    "ERR_BLOCKED_BY_ADMINISTRATOR", "ERR_BLOCKED_BY_RESPONSE", "ERR_BLOCKED_BY_CSP",
+    "ERR_CERT_AUTHORITY_INVALID", "ERR_CERT_COMMON_NAME_INVALID", "ERR_CERT_DATE_INVALID",
+    "ERR_SSL_PROTOCOL_ERROR", "ERR_SSL_VERSION_OR_CIPHER_MISMATCH", "ERR_TOO_MANY_REDIRECTS",
+    "ERR_PROXY_CONNECTION_FAILED", "ERR_TUNNEL_CONNECTION_FAILED",
+})
 
 
 class AlfaBrowserError(Exception):
-    def __init__(self, code, *, stage=None, cause=None, request=None, http_status=None):
+    def __init__(self, code, *, stage=None, cause=None, request=None, http_status=None, network_error=None, attempts=1):
         self.code = code
         # Diagnostic metadata is deliberately bounded: never retain a URL,
         # response, browser state or the original exception text here.
         self.stage, self.cause = stage, cause
         self.request, self.http_status = request, http_status
+        self.network_error, self.attempts = network_error, attempts
         super().__init__(code)
 
 
@@ -37,6 +56,21 @@ def _browser_cause(error):
     if "TargetClosedError" in classes:
         return "browser_closed"
     return "browser_error"
+
+
+def _browser_network_error(error):
+    match = re.search(r"\bnet::(ERR_[A-Z_]+)\b", str(error)[:2048])
+    return match[1] if match and match[1] in NETWORK_ERRORS else None
+
+
+def _retry_history_read(error):
+    if error.code != "crm_unavailable" or error.stage not in {"navigation", "check_session"}:
+        return False
+    if error.http_status is not None:
+        return error.http_status in {408, 500, 502, 503, 504}
+    if error.network_error:
+        return error.network_error in TRANSIENT_NET_ERRORS
+    return error.stage == "navigation" and error.cause in {"timeout", "browser_closed", "browser_error"}
 
 
 def _public_dns(host):
@@ -850,6 +884,26 @@ class AlfaMaxBrowser:
         results, next_state = self.read_histories(origin, state, [(branch, direction, page_number)])
         return results[0], next_state
 
+    @staticmethod
+    def _read_history_page(page, origin, branch, direction, page_number):
+        stage, request = "navigation", (branch, direction, page_number)
+        try:
+            response = page.goto(_history_url(origin, branch, direction, page_number),
+                                 wait_until="domcontentloaded", timeout=20000)
+            stage = "check_session"
+            AlfaMaxBrowser._check_origin(page, origin)
+            if response is None or response.status != 200:
+                raise AlfaBrowserError("crm_unavailable", http_status=response.status if response else None)
+            stage = "parse_page"
+            return parse_history_html(response.text(), origin=origin, branch=branch,
+                                      direction=direction, page=page_number)
+        except AlfaBrowserError as error:
+            error.stage, error.request = error.stage or stage, request
+            raise
+        except Exception as error:
+            raise AlfaBrowserError("crm_unavailable", stage=stage, request=request,
+                                   cause=_browser_cause(error), network_error=_browser_network_error(error)) from None
+
     def read_histories(self, origin, state, requests, *, on_progress=None, continue_on_error=False):
         origin = normalize_origin(origin)
         for branch, direction, page_number in requests:
@@ -867,31 +921,54 @@ class AlfaMaxBrowser:
             for branch, direction, page_number in requests:
                 request = (branch, direction, page_number)
                 if on_progress:
+                    # One callback per requested page: the worker advances its
+                    # visible page counter here. Bounded retries fit inside its
+                    # 300-second lease and must not advance that counter again.
                     on_progress()
                 try:
-                    address = _history_url(origin, branch, direction, page_number)
-                    try:
-                        stage = "navigation"
-                        response = page.goto(address, wait_until="domcontentloaded", timeout=20000)
-                        stage = "check_session"
-                        self._check_origin(page, origin)
-                        if response is None or response.status != 200:
-                            raise AlfaBrowserError("crm_unavailable", http_status=response.status if response else None)
-                        stage = "parse_page"
-                        result = parse_history_html(
-                            response.text(), origin=origin, branch=branch,
-                            direction=direction, page=page_number,
-                        )
-                    except AlfaBrowserError:
-                        raise
-                    except Exception as error:
-                        raise AlfaBrowserError("crm_unavailable", cause=_browser_cause(error)) from None
+                    for attempt in range(1, HISTORY_READ_ATTEMPTS + 1):
+                        try:
+                            result = self._read_history_page(page, origin, branch, direction, page_number)
+                            break
+                        except AlfaBrowserError as error:
+                            error.attempts = attempt
+                            if attempt == HISTORY_READ_ATTEMPTS or not _retry_history_read(error):
+                                raise
+                            logging.getLogger(__name__).warning(
+                                "AlfaCRM MAX history read retry branch=%s direction=%s page=%s attempt=%s cause=%s network_error=%s",
+                                branch, direction, page_number, attempt + 1, error.cause, error.network_error)
+                            time.sleep(0.5 * attempt)
+                            # Discard an interrupted navigation, retaining the
+                            # context/cookies. Restart a browser only if its
+                            # context can no longer create a tab.
+                            try:
+                                renewed = context.storage_state()
+                                if isinstance(renewed, dict):
+                                    state = renewed
+                            except Exception:
+                                pass
+                            try:
+                                page.close()
+                            except Exception:
+                                pass
+                            try:
+                                page = context.new_page()
+                            except Exception:
+                                self._close(manager, browser, context)
+                                manager = browser = context = None
+                                try:
+                                    manager, browser, context, page = self._open(origin, state)
+                                except AlfaBrowserError as restart_error:
+                                    restart_error.request, restart_error.attempts = request, attempt + 1
+                                    raise
                     results.append(result)
                 except AlfaBrowserError as error:
-                    error.stage, error.request = error.stage or stage, request
+                    error.request = error.request or request
                     if not continue_on_error or error.code not in {"invalid_response", "crm_unavailable"}:
                         raise
-                    results.append({"error": error.code})
+                    results.append({"error": error.code, "stage": error.stage, "cause": error.cause,
+                                    "http_status": error.http_status, "network_error": error.network_error,
+                                    "attempts": error.attempts})
             stage = "save_session"
             return results, context.storage_state()
         except AlfaBrowserError as error:
@@ -899,7 +976,8 @@ class AlfaMaxBrowser:
             error.request = error.request or request
             raise
         except Exception as error:
-            raise AlfaBrowserError("crm_unavailable", stage=stage, cause=_browser_cause(error), request=request) from None
+            raise AlfaBrowserError("crm_unavailable", stage=stage, cause=_browser_cause(error), request=request,
+                                   network_error=_browser_network_error(error)) from None
         finally:
             self._close(manager, browser, context)
 
