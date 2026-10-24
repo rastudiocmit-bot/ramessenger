@@ -48,8 +48,8 @@ const { fixture } = require('./browser_fixture.cjs');
       assert.equal(await page.locator('#chat-input').isDisabled(), role === 'observer');
       assert.equal(await page.locator('#chat-handled').isVisible(), role !== 'observer');
       if (role === 'operator') {
-        await page.locator('#queue-tab').click();
-        assert.equal(await page.locator('[data-chat-view="unread"]').getAttribute('aria-pressed'), 'true');
+        assert.equal(await page.locator('#queue-tab,[data-chat-view]').count(), 0);
+        assert.equal(await page.locator('#app').getAttribute('data-tab'), 'chats');
       }
       if (role === 'owner') {
         await page.locator('#chat-templates').click(); await page.locator('#chat-template-options button').first().click();
@@ -91,7 +91,7 @@ const { fixture } = require('./browser_fixture.cjs');
       await page.locator('#chat-branch').selectOption('2'); await page.locator('#messages-tab').click();
       await page.waitForFunction(() => !document.querySelector('#chat-filter-chip').hidden && /Северный/.test(document.querySelector('#chat-filter-chip').textContent));
       assert.ok(data.calls.some(c => c.path.endsWith('/chats') && c.query.includes('branch=2')), 'Profile filter applies to the chat list');
-      await page.locator('#chat-filter-chip').click(); await page.waitForFunction(() => document.querySelector('#chat-filter-chip').hidden && !document.querySelector('#chat-branch').value);
+      await page.locator('#profile-tab').click(); await page.locator('#chat-filter-chip').click(); await page.waitForFunction(() => document.querySelector('#chat-filter-chip').hidden && !document.querySelector('#chat-branch').value);
       await page.locator('#profile-tab').click(); await save('installed-light-profile');
       if (!admin) {
         await page.locator('#profile-connections').click(); await page.waitForSelector('#channel-info-dialog .split');

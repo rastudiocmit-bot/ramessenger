@@ -63,7 +63,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
         messages.push({ ...messages[1], id: 'sent-' + messages.length, text: entry.body.text });
         payload = { request_id: entry.body.request_id, state: 'accepted' };
       } else payload = { conversation, messages, next_seq: messages.length, has_more: false, more_changes: false, total: messages.length };
-    } else if (p.endsWith('/handled')) { conversations.find(c => p.includes('/' + c.id + '/')).unread = false; payload = {}; }
+    } else if (p.endsWith('/handled')) { const c = conversations.find(c => p.includes('/' + c.id + '/')); c.unread = false; c.unread_count = 0; c.revision = (c.revision || 1) + 1; payload = {conversation:c}; }
     else if (p.endsWith('/family') || /\/(directory|chat-contacts)\/contacts\//.test(p)) payload = family;
     else if (/\/(directory|chat-contacts)\/sync$/.test(p)) payload = { configured: true, state: 'idle', last_success_at: '2026-10-24T11:00:00Z', auto_refresh: false, interval_minutes: 30, stats: {} };
     else if (/\/(directory|chat-contacts)$/.test(p)) payload = { contacts, total: contacts.length, branches, snapshot: 'run-1', page: 0, has_more: false };

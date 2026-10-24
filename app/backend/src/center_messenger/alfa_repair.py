@@ -51,6 +51,8 @@ def resolve_customer(raw, directory):
 
 
 def reconcile_messages(service, db, workspace, channel, conversation):
+    from center_messenger.chat_queue import materialize_legacy_handled
+    materialize_legacy_handled(db, workspace, conversation)
     # crm_order has always been the numeric CRM row ID in the Alfa projector.
     # Recover that exact identity for rows imported before crm_record_id existed.
     restored = db.execute(text(
@@ -118,11 +120,13 @@ def reconcile_messages(service, db, workspace, channel, conversation):
             keeper = min(copies, key=lambda row: (
                 str(row["payload"]["branch_id"]) != str(row["payload"].get("crm_primary_branch")),
                 int(row["payload"]["branch_id"]), str(row["id"])))
+            receipt = next((row["payload"]["handled_receipt"] for row in copies if row["payload"].get("handled_receipt")), None)
             for row in copies:
                 payload = dict(row["payload"])
+                if row["id"] == keeper["id"] and receipt:
+                    payload["handled_receipt"] = receipt
                 if row["id"] == keeper["id"]:
-                    if not payload.pop("crm_mirror", False):
-                        continue
+                    payload.pop("crm_mirror", False)
                     payload.pop("superseded_by", None)
                 else:
                     payload.update(crm_mirror=True, superseded_by=str(keeper["id"]))

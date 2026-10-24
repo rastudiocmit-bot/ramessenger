@@ -135,9 +135,9 @@
   }
   const cabinet = window.CenterCabinet({ $, state, api, node, show, roles, renderPane });
   async function renderPane(pane) {
-    state.pane = pane;
+    state.pane = pane === "queue" ? "messages" : pane;
     const sections = grantedSections();
-    sections.profile = true; sections.queue = sections.messages;
+    sections.profile = true;
     sections.summary = sections.overview && sections.messages && state.workspace?.role !== "operator";
     if (!sections[state.pane]) state.pane = ["messages", "summary", "clients", "overview", "security", "profile"].find(key => sections[key]);
     if (state.pane !== "connections") alfaMaxProgress.reset();
@@ -166,7 +166,6 @@
     if (state.pane === "team") await loadMembers();
     if (state.pane === "security") await loadSessions();
   }
-  document.addEventListener("cm:chat-view", () => { const sections = grantedSections(); sections.profile = true; sections.queue = sections.messages; sections.summary = sections.overview && sections.messages && state.workspace?.role !== "operator"; cabinet.update(sections); });
   const sectionMeta = {
     overview: { icon: "◈", title: "Организация", hint: "Название центра и общая информация" },
     messages: { icon: "▤", title: "Сообщения", hint: "Переписка с клиентами в MAX" },
@@ -328,7 +327,7 @@
   document.addEventListener("click", event => {
     const button = event.target.closest("[data-pane]");
     if (!button || button.disabled) return;
-    state.chatView = button.dataset.pane === "queue" ? "unread" : "all";
+    state.chatView = "all";
     cabinet.navigate(button.dataset.pane).catch(error => { if (error.name !== "AbortError") toast(error.message, true); });
   });
   $("#workspace-select").addEventListener("change", async event => {

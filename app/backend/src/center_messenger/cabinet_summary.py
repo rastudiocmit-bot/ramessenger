@@ -11,10 +11,11 @@ from center_messenger.message_order import visible_message, message_order, sourc
 
 
 def summary(maximum, actor, workspace, *, now=None):
-    from center_messenger.chat_api import EFFECTIVE_UNREAD
+    from center_messenger.chat_queue import queue_state_sql
 
     now = now or datetime.now(UTC)
     with maximum.chat_transaction(actor, workspace, snapshot=True) as db:
+        db.execute(text("SET LOCAL jit=off"))
         membership = maximum.accounts._workspace(db, actor, workspace)
         if membership["role"] == "operator" or (membership["role"] not in {"owner", "admin"}
                                                and "overview" not in (membership["sections"] or [])):
@@ -46,7 +47,7 @@ def summary(maximum, actor, workspace, *, now=None):
             "SELECT count(*) FILTER(WHERE direction='in' AND actor_type='contact' AND occurred_at>=:start) AS incoming,"
             "count(*) FILTER(WHERE direction='in' AND actor_type='contact' AND occurred_at<:start) AS previous_incoming "
             "FROM events"), params).mappings().one()
-        waiting = db.execute(text("SELECT count(*)" + joins + "WHERE " + eligible + " AND " + EFFECTIVE_UNREAD), params).scalar_one()
+        waiting = db.execute(text("SELECT count(*)" + joins + "CROSS JOIN LATERAL (" + queue_state_sql() + ") q WHERE " + eligible + " AND " + "q.needs_reply"), params).scalar_one()
         day_rows = db.execute(text(events +
             "SELECT (occurred_at AT TIME ZONE :zone)::date AS day,count(*) AS incoming FROM events "
             "WHERE direction='in' AND actor_type='contact' AND occurred_at>=:start GROUP BY 1"), params).mappings()

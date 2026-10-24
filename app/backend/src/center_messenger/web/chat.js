@@ -13,7 +13,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   let generation = 0, listSeq = 0, selectionSeq = 0, linkSeq = 0, cardSeq = 0, detailsSeq = 0;
   let family = null, familySelected = null, familyBusy = false;
   const familyAttempted = new Set();
-  let channels = [], items = [], selected = null, page = 0, hasMore = false, view = "all";
+  let channels = [], items = [], selected = null, page = 0, hasMore = false;
   let timer, searchTimer, linkTimer, pollBusy = false, actionBusy = false, historyBusy = false, listLoading = false, listRetryRequired = false;
   let notifyTimer, notifySeq = null, notifyEpoch = null, notifyTarget = null, notifyBusy = false;
   let lastList = "", linkConversation = null, tokenChannel = null, soundContext = null;
@@ -35,13 +35,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     clearTimeout(timer); clearTimeout(searchTimer); clearTimeout(linkTimer); clearTimeout(notifyTimer);
     notifyTimer = null; notifyBusy = false; notifySeq = null; notifyEpoch = null; notifyTarget = null; show($("#chat-new-marker"), false);
     cache.clear(); channels = []; items = []; selected = null; page = 0; hasMore = false;
-    pollBusy = false; actionBusy = false; historyBusy = false; listLoading = false; listRetryRequired = false; lastList = ""; linkConversation = null; tokenChannel = null; view = "all";
+    pollBusy = false; actionBusy = false; historyBusy = false; listLoading = false; listRetryRequired = false; lastList = ""; linkConversation = null; tokenChannel = null;
     ["#chat-list", "#chat-history", "#chat-link-results", "#max-channels"].forEach(id => $(id).replaceChildren());
     ["#chat-error", "#max-error", "#max-token-error", "#chat-link-error"].forEach(id => notice("", $(id)));
     $("#chat-input").value = ""; $("#chat-search").value = ""; $("#chat-link-search").value = "";
     $("#chat-send").classList.remove("is-retry"); $("#chat-send").setAttribute("aria-label", "Отправить"); $("#chat-send").title = "Отправить";
     $("#chat-send-hint").hidden = true; $("#chat-send-hint").textContent = ""; resizeCompose();
-    $("#chat-chip-lead").textContent = ""; show($("#chat-chip-lead"), false);
     $("#chat-branch").replaceChildren(new Option("Все филиалы", ""));
     $("#chat-channel").replaceChildren(new Option("Все каналы MAX", "")); $("#chat-status").value = "";
     $("#max-form").reset(); $("#max-token-form").reset();
@@ -51,7 +50,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     show($("#chat-history-more"), false); show($("#chat-history-status"), false); $("#chat-history-note").textContent = "";
     show($("#chat-blank")); show($("#chat-stream"), false); show($("#chat-compose"), false);
     $("#chat-person").replaceChildren(node("strong", "Выберите диалог"), node("small", "Новые сообщения и ваши ответы"));
-    document.querySelectorAll("[data-chat-view]").forEach(el => el.classList.toggle("active", el.dataset.chatView === view));
     for (const id of ["max-token-dialog", "chat-link-dialog", "chat-settings-dialog", "chat-details-dialog"]) if ($(`#${id}`).open) $(`#${id}`).close();
   }
   async function connections() {
@@ -169,7 +167,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (item.unread_count > 0) {
         const count = node("span", String(Math.min(item.unread_count, 99)), "avatar-count ava-n");
         count.setAttribute("aria-hidden", "true"); avatar.append(count);
-        avatar.setAttribute("aria-label", `${avatar.title}. Непрочитанных сообщений: ${item.unread_count}`);
+        avatar.setAttribute("aria-label", `${avatar.title}. Сообщений без ответа: ${item.unread_count}`);
       }
       const body = button("", "chat-select row-main", () => select(item.id)); body.setAttribute("aria-label", `Открыть переписку: ${item.name}`); body.setAttribute("aria-pressed", String(item.id === selected));
       const heading = node("span", undefined, "row-top"), timestamp = node("time", listTime(item), "row-time");
@@ -179,7 +177,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       body.append(heading);
       if (item.students.length) body.append(node("span", item.students.join(" · "), "row-kids contact-students"));
       const bottom = node("span", undefined, "row-bot");
-      bottom.append(node("span", item.preview || "Вложение или начало диалога", "row-prev"));
+      bottom.append(node("span", item.preview || "Переписка ещё не началась", "row-prev"));
       if (item.last_direction === "out" && !item.unread && item.last_state) { const tick = node("span", undefined, "tick" + (item.last_state === "read" ? " read" : "")); tick.title = sendLabels[item.last_state] || ""; tick.append(icon(["read", "delivered"].includes(item.last_state) ? "checks" : "check")); bottom.append(tick); }
       body.append(bottom);
       const meta = node("span", undefined, "contact-meta");
@@ -202,13 +200,23 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   function wireSwipe(row, item) {
     let start = null, distance = 0;
+    const checkpoint = item.seen_checkpoint;
     row.addEventListener("pointerdown", event => { if (event.pointerType !== "mouse" && item.unread && state.workspace?.role !== "observer") { start = event.clientX; distance = 0; } });
     row.addEventListener("pointermove", event => { if (start === null) return; distance = Math.min(0, event.clientX - start); row.style.transform = `translateX(${Math.max(-120, distance)}px)`; });
     const end = async () => {
       if (start === null) return; start = null; row.style.transform = "";
       if (distance > -70 || actionBusy) return;
-      try { await api(`${chatPath(item.id)}/handled`, { method: "POST" }); await loadList(); }
-      catch (error) { fail(error); }
+      const epoch = state.epoch, gen = generation;
+      actionBusy = true;
+      try {
+        const result = await api(`${chatPath(item.id)}/handled`, { method: "POST", data: { seen_checkpoint: checkpoint } });
+        if (!valid(epoch, gen)) return;
+        if (result.conversation) mergeMeta(result.conversation);
+        renderList(true);
+        await loadList(false, true);
+        if (selected === item.id) await loadHistory(item.id);
+      } catch (error) { if (valid(epoch, gen)) fail(error); }
+      finally { if (valid(epoch, gen)) { actionBusy = false; renderHeader(); } }
     };
     row.addEventListener("pointerup", end); row.addEventListener("pointercancel", () => { start = null; row.style.transform = ""; });
   }
@@ -223,8 +231,16 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const d = new Date(value); if (Number.isNaN(d.getTime())) return "";
     return new Intl.DateTimeFormat("en-GB", { timeZone: state.workspace?.timezone, day: "2-digit", month: "2-digit" }).format(d).replace("/", ".");
   };
+  function currentMeta(next, previous) {
+    if (!previous) return true;
+    if (next.queue_seq != null && previous.queue_seq != null) {
+      const left = BigInt(next.queue_seq), right = BigInt(previous.queue_seq);
+      if (left !== right) return left > right;
+    }
+    return next.revision === undefined || previous.revision === undefined || next.revision >= previous.revision;
+  }
   function mergeMeta(meta) {
-    const item = items.find(item => item.id === meta.id); if (item) Object.assign(item, meta);
+    const item = items.find(item => item.id === meta.id); if (item && currentMeta(meta, item)) Object.assign(item, meta);
   }
   function updateListLoader({ loading = false, failed = false } = {}) {
     show($("#chat-more"), hasMore || loading || failed);
@@ -245,7 +261,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const targetPage = append ? page + 1 : preservePages ? page : 0;
     // Refresh the whole loaded prefix in one server snapshot. Keeping stale
     // lower pages after messages move between unread/all skipped conversations.
-    const params = new URLSearchParams({ view, through_page: targetPage });
+    const params = new URLSearchParams({ through_page: targetPage });
     for (const [key, id] of [["q", "chat-search"], ["branch", "chat-branch"], ["status", "chat-status"], ["connection", "chat-channel"]]) if ($(`#${id}`).value) params.set(key, $(`#${id}`).value);
     listLoading = true;
     if (append) updateListLoader({ loading: true });
@@ -267,10 +283,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
           : "Диалогов по этому запросу пока нет. Новые сообщения появятся после обращения клиента к боту.";
       $("#chat-visible-count").textContent = payload.total ? `${items.length} из ${payload.total}` : "";
       $("#chat-unread-count").textContent = String(payload.unread); show($("#chat-unread-count"), payload.unread > 0);
-      if ($("#chat-chip-unread")) { $("#chat-chip-unread").textContent = String(payload.unread); show($("#chat-chip-unread"), payload.unread > 0); }
-      $("#chat-chip-lead").textContent = String(payload.lead_unread || 0);
-      $("#chat-chip-lead").setAttribute("aria-label", `Непрочитанных сообщений у лидов: ${payload.lead_unread || 0}`);
-      show($("#chat-chip-lead"), payload.lead_unread > 0);
       if (!selected && items.length) await select((items.find(item => item.unread) || items[0]).id, false);
       else if (selected && currentItem()) renderHeader();
       if (hasMore) requestAnimationFrame(() => maybeLoadMore());
@@ -502,7 +514,16 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (first) data.oldest = { id: first.id, occurred_at: first.occurred_at };
     }
     data.loaded = true;
-    if (!data.meta || result.conversation.revision >= data.meta.revision) { data.meta = result.conversation; mergeMeta(result.conversation); }
+    if (currentMeta(result.conversation, data.meta)) {
+      const meta = { ...result.conversation };
+      // An archive page or a partial change batch has not displayed the latest
+      // incoming yet. Keep the last complete live snapshot as the seen boundary.
+      if ((mode === "older" && !result.reset) || result.more_changes) {
+        meta.seen_checkpoint = data.meta?.seen_checkpoint;
+        meta.inbound_seq = data.meta?.inbound_seq;
+      }
+      data.meta = meta; mergeMeta(meta);
+    }
     reconcilePending(data);
     renderMessages(id, { bottom: mode === "initial" || result.reset, older: mode === "older" && !result.reset }); renderList();
     if (result.more_changes && mode !== "older") await loadHistoryPage(id);
@@ -568,7 +589,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const content = $("#chat-input").value.trim(); if (!data.pending && !content) return;
     const epoch = state.epoch, gen = generation;
     data.draft = content;
-    const payload = data.pending || { request_id: crypto.randomUUID(), text: content, seen_inbound_seq: data.meta.inbound_seq };
+    const payload = data.pending || { request_id: crypto.randomUUID(), text: content, seen_inbound_seq: data.meta.inbound_seq, seen_checkpoint: data.meta.seen_checkpoint };
     data.pending = payload; historyBusy = true; renderHeader(); let acknowledged = false;
     try {
       await api(`${chatPath(id)}/messages`, { method: "POST", data: payload });
@@ -623,17 +644,17 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-stream").addEventListener("wheel", event => { if (event.deltaY < 0 && $("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
   window.addEventListener("resize", () => requestAnimationFrame(() => { resizeCompose(); maybeFillHistory(); }));
   $("#chat-history-more").addEventListener("click", () => loadOlder({ retry: true }));
-  // Filters are set in Profile; while one is on, a chip next to the views says so and clears it.
+  // Explicit filters and their reset control stay in Profile.
   function renderFilterChip() {
     const picked = [["chat-branch", ""], ["chat-channel", ""]].map(([id]) => $(`#${id}`)).filter(select => select.value).map(select => select.selectedOptions[0]?.textContent || "");
     const status = $("#chat-status");
-    if (status.value && status.value !== "lead") picked.push(status.selectedOptions[0]?.textContent || "");
+    if (status.value) picked.push(status.selectedOptions[0]?.textContent || "");
     const chip = $("#chat-filter-chip"); show(chip, picked.length > 0);
     chip.textContent = picked.length ? `Фильтр: ${picked.join(" · ")} ✕` : "";
   }
   $("#chat-filter-chip").addEventListener("click", () => {
     $("#chat-branch").value = ""; $("#chat-channel").value = "";
-    if ($("#chat-status").value !== "lead") $("#chat-status").value = "";
+    $("#chat-status").value = "";
     filtersChanged();
   });
   function filtersChanged() {
@@ -652,12 +673,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   ["branch", "status"].forEach(id => $(`#chat-${id}`).addEventListener("change", filtersChanged));
   $("#chat-channel").addEventListener("change", () => { filtersChanged(); });
   function setView(next, reload = true) {
-    view = next === "lead" ? "all" : next;
-    $("#chat-status").value = next === "lead" ? "lead" : "";
-    document.querySelectorAll("[data-chat-view]").forEach(b => { const chosen = b.dataset.chatView === next; b.classList.toggle("active", chosen); b.setAttribute("aria-pressed", String(chosen)); });
+    // Normalize obsolete tabs without clearing a deliberately selected Profile filter.
+    if (next === "lead") $("#chat-status").value = "";
+    state.chatView = "all";
     if (reload) filtersChanged();
   }
-  document.querySelectorAll("[data-chat-view]").forEach(el => el.addEventListener("click", () => { state.chatView = el.dataset.chatView; setView(el.dataset.chatView); document.dispatchEvent(new CustomEvent("cm:chat-view")); }));
   $(".chat-list-scroll").addEventListener("scroll", maybeLoadMore, { passive: true });
   $("#chat-retry").addEventListener("click", () => { listRetryRequired = false; loadList(true).catch(error => fail(error)); });
   $("#chat-handled").addEventListener("click", markHandled);
@@ -680,15 +700,16 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const epoch = state.epoch, gen = generation;
     actionBusy = true; $("#chat-handled").disabled = true;
     try {
-      await api(`${chatPath(id)}/handled`, { method: "POST" });
+      const result = await api(`${chatPath(id)}/handled`, { method: "POST", data: { seen_checkpoint: data.meta.seen_checkpoint } });
       if (!valid(epoch, gen)) return;
-      if (item) { item.unread = false; item.unread_count = 0; item.handled = true; }
-      data.meta.unread = false; data.meta.unread_count = 0;
-      if (view === "unread") items = items.filter(row => row.id !== id);
+      // Only the server knows whether an unseen incoming arrived during the action.
+      if (result.conversation && currentMeta(result.conversation, data.meta)) {
+        data.meta = result.conversation; mergeMeta(result.conversation);
+      }
       renderList(true); renderHeader();
-      toast("Диалог отмечен как обработанный.");
+      toast(result.conversation?.unread ? "Просмотренные сообщения обработаны. Есть новые входящие." : "Диалог отмечен как обработанный.");
       loadList(false, true).catch(error => fail(error));
-    } catch (error) { if (valid(epoch, gen)) fail(error); }
+    } catch (error) { if (valid(epoch, gen)) { fail(error); if (error.status === 409) await loadHistory(id).catch(() => {}); } }
     finally { if (valid(epoch, gen)) { actionBusy = false; renderHeader(); } }
   }
 
@@ -1163,8 +1184,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       let latest = null;
       for (const update of result.updates) {
         const data = cache.get(update.id);
-        if (data?.meta) Object.assign(data.meta, { unread: update.unread, inbound_seq: update.inbound_seq });
-        mergeMeta(update);
+        // Notifications are not a history snapshot and cannot advance a seen boundary
+        // or replace the row preview with a partial event payload.
+        if (update.new_inbound && active()) schedule(100);
         if (update.new_inbound) latest = update;
       }
       if (latest) {

@@ -28,8 +28,9 @@ from center_messenger.alfa_max import AlfaMaxConnections, AlfaMaxWorker
 from center_messenger.alfa_history import PROJECTION_VERSION, RECHECK_INTERVAL, advance_history, history_coverage, history_pending, plan_history, retry_history, verify_saved_pages
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser, _message_time, parse_history_html
 from bs4 import BeautifulSoup
-from center_messenger.chat_api import ChatReader, SendInput
+from center_messenger.chat_api import ChatReader, SendInput, HandleInput
 from center_messenger.chat_store import changed, project_event, refresh_unread
+from center_messenger.messaging import Messaging
 from center_messenger.crm_api import DirectoryReader
 from center_messenger.auth_security import AuthError
 from center_messenger.database import log_database_error
@@ -189,6 +190,17 @@ class PageTests(unittest.TestCase):
         self.assertEqual(state, context.storage_state.return_value)
         context.close.assert_called_once()
 
+    def test_actor_provenance_overrides_text_templates_and_staff_accounts(self):
+        def parse(metadata, body):
+            html = f'<table class="crm-table"><tbody><tr data-key="1" {metadata}><td></td><td></td><td data-employee-id="42">Employee</td><td>{body}</td><td>24.10.2026 03:10</td></tr></tbody></table>'
+            return parse_history_html(html, origin='https://test.s20.online', branch=1, direction='sent')['messages'][0]
+        manual = parse('', 'Цитата: системное сообщение. Отвечаю вручную.')
+        self.assertEqual(manual['actor_type'], 'human')
+        self.assertEqual(manual['actor_evidence']['reason'], 'crm_employee')
+        automatic = parse('data-campaign-id="13"', 'Здравствуйте')
+        self.assertEqual(automatic['actor_type'], 'automation')
+        self.assertEqual(automatic['actor_evidence']['reason'], 'crm_automation')
+
 
 @unittest.skipUnless(os.environ.get("CM_TEST_DATABASE_URL"), "isolated PostgreSQL URL required")
 class MessageSyncTests(unittest.TestCase):
@@ -262,7 +274,7 @@ class MessageSyncTests(unittest.TestCase):
         self.accounts = SimpleNamespace(transaction=transaction, throttle=Mock(), _workspace=lambda *args, **kwargs: self.membership)
         self.service = AlfaMaxConnections(SimpleNamespace(accounts=self.accounts, vault=Mock(), _transaction=transaction), browser=Mock())
         maximum = SimpleNamespace(chat_transaction=transaction, accounts=self.accounts)
-        self.reader = ChatReader(SimpleNamespace(max=maximum, alfa_max=self.service))
+        self.reader = ChatReader(SimpleNamespace(max=maximum, alfa_max=self.service, enqueue=Messaging.enqueue))
 
     def tearDown(self):
         self.transaction.rollback()
@@ -297,6 +309,9 @@ class MessageSyncTests(unittest.TestCase):
         return self.db.execute(text("SELECT * FROM conversations WHERE workspace_id=:w "
                                     "AND last_inbound_at IS NOT NULL"), {"w": self.workspace}).mappings().one()
 
+    def checkpoint(self, conversation):
+        return HandleInput(seen_checkpoint=self.reader.history(None, self.workspace, conversation)["conversation"]["seen_checkpoint"])
+
     def local_reply(self, conversation, *, seconds=5):
         command, message = uuid4(), uuid4()
         self.db.execute(text("INSERT INTO send_commands(workspace_id,id,conversation_id,client_request_id,payload,payload_hash,state) "
@@ -308,6 +323,7 @@ class MessageSyncTests(unittest.TestCase):
                         {"w": self.workspace, "id": message, "c": conversation,
                          "p": json.dumps({"source": "center_messenger_alfa_max", "crm_branch": 1, "customer_id": 7}),
                          "at": self.at + timedelta(seconds=seconds), "command": command})
+        changed(self.db, self.workspace, conversation, message)
         return message
 
     def test_repeated_page_is_idempotent(self):
@@ -370,12 +386,12 @@ class MessageSyncTests(unittest.TestCase):
             kwargs = {"before_time": first["occurred_at"], "before_id": UUID(first["id"])}
         self.assertEqual([str(m["crm_order"]) for m in collected], [str(i) for i in range(1, 46)])
 
-    def test_listing_preview_is_the_last_visible_message(self):
+    def test_listing_preview_ignores_automation(self):
         self.project(self.row("1", body="Question"),
                      self.row("2", body="Automated reminder", direction="out", actor="automation",
                               at=self.at + timedelta(minutes=1)))
         result = self.reader.listing(None, self.workspace)
-        self.assertEqual(result["conversations"][0]["preview"], "Automated reminder")
+        self.assertEqual(result["conversations"][0]["preview"], "Question")
 
     def test_dialog_order_is_unread_then_read_newest_first_across_all_loaded_pages(self):
         entries = []
@@ -387,7 +403,7 @@ class MessageSyncTests(unittest.TestCase):
                                            {"w": self.workspace, "contact": contact}).scalar_one()
             unread = n % 6 != 0
             if not unread:
-                self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation)
+                self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation, self.checkpoint(conversation))
             entries.append((unread, n, str(conversation)))
         expected = [c for _, _, c in sorted(entries, key=lambda x: (not x[0], -x[1]))]
         first = self.reader.listing(None, self.workspace)
@@ -395,7 +411,7 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in first["conversations"] + second["conversations"]], expected)
         self.assertEqual([c["id"] for c in self.reader.listing(None, self.workspace, through_page=1)["conversations"]], expected)
         self.assertEqual(first["unread"], 31)
-        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, UUID(expected[0]))
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, UUID(expected[0]), self.checkpoint(UUID(expected[0])))
         refreshed = self.reader.listing(None, self.workspace, through_page=1)["conversations"]
         self.assertEqual([c["id"] for c in refreshed if c["unread"]], expected[1:31])
 
@@ -415,7 +431,8 @@ class MessageSyncTests(unittest.TestCase):
         self.project(self.row("1", direction="out", actor="automation", body="Only outgoing"))
         result = self.reader.listing(None, self.workspace)
         self.assertEqual(result["total"], 1)
-        self.assertEqual(result["conversations"][0]["preview"], "Only outgoing")
+        self.assertEqual(result["conversations"][0]["preview"], "Переписка ещё не началась")
+        self.assertIsNone(result["conversations"][0]["last_message_at"])
 
     def test_saved_history_stays_visible_when_a_client_leaves_the_current_directory(self):
         self.project(self.row())
@@ -856,7 +873,7 @@ class MessageSyncTests(unittest.TestCase):
         self.assertFalse(self.reader.history(actor, self.workspace, conversation)["conversation"]["can_send"])
         self.assertFalse(self.reader.listing(actor, self.workspace)["conversations"][0]["can_send"])
         operations = [lambda: self.reader.send(actor, self.workspace, conversation, SendInput(request_id=uuid4(), text="Reply", seen_inbound_seq=1)),
-                      lambda: self.reader.handle(actor, self.workspace, conversation),
+                      lambda: self.reader.handle(actor, self.workspace, conversation, self.checkpoint(conversation)),
                       lambda: self.reader.link(actor, self.workspace, conversation, LinkInput(contact_id=None))]
         for operation in operations:
             with self.assertRaises(AuthError) as error:
@@ -1038,7 +1055,7 @@ class MessageSyncTests(unittest.TestCase):
     def test_handled_marker_follows_the_visible_incoming_copy(self):
         self.project(self.row("102", branch=2), branch=2)
         conversation = self.messages()[0]["conversation_id"]
-        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation)
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation, self.checkpoint(conversation))
         self.project(self.row("101", branch=1))
         self.assertEqual(len(self.messages()), 1)
         handled = self.db.execute(text("SELECT handled_inbound_id FROM conversations WHERE workspace_id=:w AND id=:c"),
@@ -1239,13 +1256,13 @@ class MessageSyncTests(unittest.TestCase):
     def test_unread_count_includes_new_message_in_the_same_second(self):
         self.project(self.row("1"))
         conversation = self.conversation()["id"]
-        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation)
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation, self.checkpoint(conversation))
         self.project(self.row("2", body="Another question"))
         listing = self.reader.listing(None, self.workspace)
         self.assertTrue(listing["conversations"][0]["unread"])
         self.assertEqual(listing["conversations"][0]["unread_count"], 1)
 
-    def test_lead_counter_counts_messages_beyond_the_loaded_page_and_active_chip(self):
+    def test_unified_queue_counts_dialogs_beyond_the_loaded_page_and_honors_explicit_filters(self):
         self.project(self.row("1"), self.row("2", body="Second question"))
         for n in range(35):
             self.add_customer(uuid4(), 1, 100+n)
@@ -1254,25 +1271,25 @@ class MessageSyncTests(unittest.TestCase):
         listing = self.reader.listing(None, self.workspace)
         self.assertEqual(len(listing["conversations"]), 30)
         self.assertTrue(listing["has_more"])
-        self.assertEqual(listing["lead_unread"], 37)
-        self.assertEqual(self.reader.listing(None, self.workspace, page=1)["lead_unread"], 37)
-        self.assertEqual(self.reader.listing(None, self.workspace, status="client")["lead_unread"], 37)
-        self.assertEqual(self.reader.listing(None, self.workspace, branch=2)["lead_unread"], 0)
-        self.assertEqual(self.reader.listing(None, self.workspace, connection=uuid4())["lead_unread"], 0)
-        self.assertEqual(self.reader.listing(None, self.workspace, query="Not present")["lead_unread"], 0)
+        self.assertEqual(listing["unread"], 36)
+        self.assertEqual(self.reader.listing(None, self.workspace, page=1)["unread"], 36)
+        self.assertEqual(self.reader.listing(None, self.workspace, status="client")["unread"], 0)
+        self.assertEqual(self.reader.listing(None, self.workspace, branch=2)["unread"], 0)
+        self.assertEqual(self.reader.listing(None, self.workspace, connection=uuid4())["unread"], 0)
+        self.assertEqual(self.reader.listing(None, self.workspace, query="Not present")["unread"], 0)
 
-    def test_lead_counter_honors_handled_messages_and_confirmed_replies(self):
+    def test_unified_queue_counter_honors_handled_messages_and_confirmed_replies(self):
         self.project(self.row("1"), self.row("2", body="Second question"))
         self.db.execute(text("UPDATE alfa_customers SET status='lead' WHERE workspace_id=:w"), {"w": self.workspace})
-        self.assertEqual(self.reader.listing(None, self.workspace)["lead_unread"], 2)
-        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, self.conversation()["id"])
-        self.assertEqual(self.reader.listing(None, self.workspace)["lead_unread"], 0)
+        self.assertEqual(self.reader.listing(None, self.workspace)["conversations"][0]["unread_count"], 2)
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, self.conversation()["id"], self.checkpoint(self.conversation()["id"]))
+        self.assertEqual(self.reader.listing(None, self.workspace)["unread"], 0)
         self.project(self.row("3", body="New question"))
-        self.assertEqual(self.reader.listing(None, self.workspace, view="unread")["lead_unread"], 1)
+        self.assertEqual(self.reader.listing(None, self.workspace, view="unread")["conversations"][0]["unread_count"], 1)
         self.project(self.row("4", direction="out", actor="automation", at=self.at+timedelta(minutes=1)))
-        self.assertEqual(self.reader.listing(None, self.workspace)["lead_unread"], 1)
+        self.assertEqual(self.reader.listing(None, self.workspace)["conversations"][0]["unread_count"], 1)
         self.project(self.row("5", direction="out", at=self.at+timedelta(minutes=2)))
-        self.assertEqual(self.reader.listing(None, self.workspace)["lead_unread"], 0)
+        self.assertEqual(self.reader.listing(None, self.workspace)["unread"], 0)
 
     def test_import_restores_distinct_rows_previously_collapsed_by_content(self):
         self.project(self.row("1"))
@@ -1301,7 +1318,7 @@ class MessageSyncTests(unittest.TestCase):
     def test_old_branch_chats_merge_with_pending_sends_and_handled_state(self):
         self.project(self.row("1"))
         canonical = self.conversation()["id"]
-        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, canonical)
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, canonical, self.checkpoint(canonical))
         old = uuid4()
         self.db.execute(text("INSERT INTO conversations(workspace_id,id,connection_id,contact_id,external_chat_id,peer_name) "
                              "VALUES (:w,:id,:c,:contact,:external,'Parent')"),
@@ -1387,6 +1404,262 @@ class MessageSyncTests(unittest.TestCase):
         meta = self.reader.history(None, self.workspace, self.conversation()["id"])["conversation"]
         self.assertIn("AlfaCRM", meta["history_error"])
         self.assertIsNotNone(self.reader.listing(None, self.workspace)["conversations"][0]["history_error"])
+
+    def test_queue_uses_latest_unanswered_for_Arina_and_resets_wait_after_new_incoming(self):
+        old = self.at - timedelta(days=12)
+        self.project(self.row('1', body='Question 1', at=old), self.row('2', body='Question 2', at=old+timedelta(minutes=1)))
+        conversation = self.conversation()['id']
+        original = self.reader.history(None, self.workspace, conversation)['conversation']
+        self.project(self.row('10', direction='out', actor='automation', body='Notification', at=self.at))
+        meta = self.reader.listing(None, self.workspace)['conversations'][0]
+        for field in ('unread_count', 'priority_at', 'waiting_since', 'preview', 'preview_message_id'):
+            self.assertEqual(meta[field], original[field])
+        self.assertEqual(meta['unread_count'], 2)
+        self.project(self.row('11', body='New question', at=self.at+timedelta(hours=1)))
+        meta = self.reader.history(None, self.workspace, conversation)['conversation']
+        self.assertEqual(meta['unread_count'], 3)
+        self.assertEqual(meta['preview'], 'New question')
+        self.assertEqual(meta['waiting_since'], self.at+timedelta(hours=1))
+        self.assertEqual(meta['priority_at'], meta['waiting_since'])
+        self.assertEqual(len(self.messages()), 4)
+
+    def test_queue_older_import_keeps_source_priority_and_opening_does_not_answer(self):
+        self.project(self.row('20'))
+        conversation = self.conversation()['id']
+        self.project(self.row('1', at=self.at-timedelta(days=30)))
+        for _ in range(2):
+            meta = self.reader.history(None, self.workspace, conversation)['conversation']
+            self.assertEqual(meta['unanswered_count'], 2)
+            self.assertEqual(meta['waiting_since'], self.at)
+
+    def test_queue_attachment_unknown_author_and_failed_reply(self):
+        attachment = self.row('1', body='')
+        attachment['attachments'] = [{'name':'Voice note.ogg'}]
+        self.project(attachment, self.row('2', direction='out', actor='unknown', at=self.at+timedelta(minutes=1)))
+        meta = self.reader.listing(None, self.workspace)['conversations'][0]
+        self.assertEqual(meta['preview'], 'Voice note.ogg')
+        self.assertEqual(meta['unanswered_count'], 1)
+        failed = self.row('3', direction='out', at=self.at+timedelta(minutes=2)); failed['failed'] = True
+        self.project(failed)
+        self.assertTrue(self.reader.history(None, self.workspace, self.conversation()['id'])['conversation']['unread'])
+
+    def test_queue_handle_only_covers_the_seen_snapshot_and_invalid_boundary_is_rejected(self):
+        self.project(self.row('1'))
+        conversation = self.conversation()['id']
+        seen = self.checkpoint(conversation)
+        self.project(self.row('2', at=self.at+timedelta(seconds=1)))
+        meta = self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation, seen)['conversation']
+        self.assertEqual(meta['unanswered_count'], 1)
+        self.assertEqual(meta['seen_checkpoint'], seen.seen_checkpoint.model_dump(mode='json'))
+        self.assertEqual(meta['priority_at'], self.at+timedelta(seconds=1))
+        self.assertEqual(meta['preview'], 'Hello')
+        invalid = self.checkpoint(conversation).model_copy(deep=True)
+        invalid.seen_checkpoint.latest_inbound_id = uuid4()
+        with self.assertRaises(AuthError) as error:
+            self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation, invalid)
+        self.assertEqual(error.exception.status, 409)
+        # An older retry is idempotent and cannot erase a later incoming.
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation, seen)
+        self.assertEqual(self.reader.history(None, self.workspace, conversation)['conversation']['unanswered_count'], 1)
+
+    def test_queue_local_send_ack_does_not_expand_its_original_coverage(self):
+        self.project(self.row('1'))
+        conversation = self.conversation()['id']
+        before = self.reader.history(None, self.workspace, conversation)['conversation']
+        model = SendInput(request_id=uuid4(), text='Reply', seen_inbound_seq=before['inbound_seq'], seen_checkpoint=before['seen_checkpoint'])
+        command = self.reader.send(SimpleNamespace(user_id=self.user), self.workspace, conversation, model)
+        # Every non-confirmed state retains the pending request and old priority.
+        for state in ('queued', 'sending', 'unknown', 'failed'):
+            self.db.execute(text('UPDATE send_commands SET state=:state WHERE workspace_id=:w'), {'w':self.workspace,'state':state})
+            refresh_unread(self.db, self.workspace, conversation)
+            meta = self.reader.history(None, self.workspace, conversation)['conversation']
+            self.assertEqual(meta['unanswered_count'], 1)
+            self.assertEqual(meta['priority_at'], self.at)
+        self.project(self.row('2', body='During send', at=self.at+timedelta(seconds=2)))
+        for state in ('accepted', 'delivered', 'read'):
+            self.db.execute(text('UPDATE send_commands SET state=:state WHERE workspace_id=:w'), {'w':self.workspace,'state':state})
+            refresh_unread(self.db, self.workspace, conversation)
+            meta = self.reader.history(None, self.workspace, conversation)['conversation']
+            self.assertEqual(meta['unanswered_count'], 1)
+            self.assertEqual(meta['preview'], 'During send')
+        # Idempotent retry uses the same command even when new incoming exists.
+        self.assertEqual(self.reader.send(SimpleNamespace(user_id=self.user), self.workspace, conversation, model)['command_id'], command['command_id'])
+        self.db.execute(text("UPDATE send_commands SET state='failed' WHERE workspace_id=:w"), {'w':self.workspace})
+        refresh_unread(self.db, self.workspace, conversation)
+        self.assertEqual(self.reader.history(None, self.workspace, conversation)['conversation']['unanswered_count'], 2)
+
+    def test_queue_native_echo_during_send_cannot_close_newer_incoming(self):
+        self.project(self.row('1'))
+        conversation = self.conversation()['id']
+        local = self.local_reply(conversation)
+        self.db.execute(text("UPDATE send_commands SET state='sending' WHERE workspace_id=:w"), {'w':self.workspace})
+        self.project(self.row('2', body='During send', at=self.at+timedelta(seconds=2)))
+        echo = self.row('30',direction='out',body='Reply',at=self.at+timedelta(seconds=5))
+        self.project(echo)
+        meta = self.reader.history(None,self.workspace,conversation)['conversation']
+        self.assertEqual(meta['unanswered_count'], 2)
+        self.db.execute(text("UPDATE send_commands SET state='accepted' WHERE workspace_id=:w"), {'w':self.workspace})
+        refresh_unread(self.db,self.workspace,conversation)
+        self.assertEqual(self.reader.history(None,self.workspace,conversation)['conversation']['unanswered_count'],1)
+        self.project(echo)
+        self.assertEqual(len(self.messages()),3)
+        self.assertEqual(self.reader.history(None,self.workspace,conversation)['conversation']['unanswered_count'],1)
+        self.assertTrue(any(m['id']==local and m['send_command_id'] for m in self.messages()))
+
+    def test_queue_reply_coverage_follows_a_verified_incoming_mirror(self):
+        self.project(self.row('102',branch=2),branch=2)
+        conversation = self.conversation()['id']
+        self.local_reply(conversation)
+        refresh_unread(self.db,self.workspace,conversation)
+        self.assertFalse(self.reader.history(None,self.workspace,conversation)['conversation']['needs_reply'])
+        self.project(self.row('101',branch=1))
+        meta = self.reader.history(None,self.workspace,conversation)['conversation']
+        self.assertEqual(meta['unanswered_count'],0)
+        self.assertEqual(len([m for m in self.messages() if m['direction']=='in']),1)
+
+    def test_queue_manual_receipt_survives_reply_failure_without_new_freshness(self):
+        self.project(self.row('1'))
+        conversation = self.conversation()['id']
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation, self.checkpoint(conversation))
+        meta = self.reader.history(None, self.workspace, conversation)['conversation']
+        self.assertFalse(meta['needs_reply'])
+        self.assertIsNone(meta['waiting_since'])
+        self.assertEqual(meta['priority_at'], self.at)
+        self.local_reply(conversation)
+        self.db.execute(text("UPDATE send_commands SET state='failed' WHERE workspace_id=:w"), {'w':self.workspace})
+        refresh_unread(self.db, self.workspace, conversation)
+        self.assertFalse(self.reader.history(None, self.workspace, conversation)['conversation']['needs_reply'])
+
+    def test_queue_equal_times_in_separate_journals_do_not_prove_an_answer(self):
+        self.project(self.row('1'), self.row('999', direction='out'))
+        conversation = self.conversation()['id']
+        self.assertTrue(self.reader.history(None, self.workspace, conversation)['conversation']['needs_reply'])
+        self.db.execute(text("UPDATE messages SET payload=payload||jsonb_build_object('order_scope','verified-shared-sequence') WHERE workspace_id=:w"), {'w':self.workspace})
+        refresh_unread(self.db, self.workspace, conversation)
+        self.assertFalse(self.reader.history(None, self.workspace, conversation)['conversation']['needs_reply'])
+
+    def test_queue_reclassification_recomputes_and_preserves_history(self):
+        self.project(self.row('1'), self.row('2', direction='out', actor='automation', at=self.at+timedelta(minutes=2)))
+        conversation = self.conversation()['id']
+        self.assertTrue(self.reader.history(None, self.workspace, conversation)['conversation']['needs_reply'])
+        original = self.messages()[-1]
+        self.project(self.row('2', direction='out', actor='human', at=original['occurred_at']))
+        meta = self.reader.history(None, self.workspace, conversation)['conversation']
+        self.assertFalse(meta['needs_reply'])
+        self.assertEqual(meta['priority_at'], original['occurred_at'])
+        self.assertEqual(self.messages()[-1]['id'], original['id'])
+        self.assertEqual(len(self.messages()), 2)
+
+    def test_queue_repair_is_resumable_and_keeps_history_worker_lease(self):
+        from center_messenger.chat_queue import repair_batch as queue_repair
+        self.project(self.row('1'))
+        for n in range(5):
+            self.add_customer(uuid4(), 1, 100+n)
+            self.project(self.row(str(100+n), customer=100+n))
+        lease = uuid4()
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor='{}' WHERE workspace_id=:w"), {'w':self.workspace})
+        self.db.execute(text("INSERT INTO alfa_max_sync_queue(workspace_id,connection_id,lease_owner,lease_until) VALUES (:w,:c,:lease,clock_timestamp()+interval '1 minute')"), {'w':self.workspace,'c':self.channel,'lease':lease})
+        self.db.execute(text("UPDATE conversations SET needs_reply=false,last_message_at=now() WHERE workspace_id=:w"), {'w':self.workspace})
+        # Live fallback is correct before the first batch has run.
+        self.assertEqual(self.reader.listing(None, self.workspace)['unread'], 6)
+        self.assertTrue(queue_repair(self.db, self.workspace, self.channel, limit=2))
+        progress = self.db.execute(text("SELECT capabilities->'chat_queue_projection' FROM connections WHERE workspace_id=:w AND id=:c"), {'w':self.workspace,'c':self.channel}).scalar_one()
+        self.assertEqual(progress['processed'], 2)
+        for _ in range(4):
+            if not queue_repair(self.db, self.workspace, self.channel, limit=2): break
+        self.assertEqual(self.reader.listing(None, self.workspace)['unread'], 6)
+        self.assertEqual(self.db.execute(text('SELECT lease_owner FROM alfa_max_sync_queue WHERE workspace_id=:w'), {'w':self.workspace}).scalar_one(), lease)
+        self.assertFalse(queue_repair(self.db, self.workspace, self.channel))
+        self.assertEqual(self.db.execute(text('SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w'), {'w':self.workspace}).scalar_one(), {})
+
+    def test_queue_repair_runs_under_runtime_rls_with_only_its_workspace_scope(self):
+        from center_messenger.chat_queue import repair_batch as queue_repair
+        self.project(self.row('1'))
+        self.db.execute(text(f'GRANT USAGE ON SCHEMA "{self.schema}" TO cm_app'))
+        self.db.execute(text('SET LOCAL ROLE cm_app'))
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM conversations')).scalar_one(),0)
+        self.db.execute(text("SELECT set_config('app.workspace_id',:w,true)"),{'w':str(self.workspace)})
+        self.assertFalse(queue_repair(self.db,self.workspace,self.channel))
+        progress = self.db.execute(text("SELECT capabilities->'chat_queue_projection' FROM connections WHERE id=:c"),{'c':self.channel}).scalar_one()
+        self.assertTrue(progress['complete'])
+        self.assertEqual(progress['processed'],1)
+        from center_messenger.chat_queue import invalidate_projection
+        self.assertEqual(invalidate_projection(self.db,self.workspace),1)
+        self.assertFalse(queue_repair(self.db,self.workspace,self.channel))
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM messages')).scalar_one(),1)
+
+    def test_queue_max_edit_preserves_a_manual_handling_receipt(self):
+        bot = uuid4()
+        self.db.execute(text("INSERT INTO connections(workspace_id,id,kind,name) VALUES (:w,:c,'max_bot','Bot')"),{'w':self.workspace,'c':bot})
+        event = {'update_type':'message_created','timestamp':1792800000000,'message':{'timestamp':1792800000000,'sender':{'user_id':10,'is_bot':False,'first_name':'Parent'},'recipient':{'chat_type':'dialog','user_id':99},'body':{'mid':'max-1','text':'Question'}}}
+        project_event(self.db,self.workspace,bot,99,event)
+        conversation = self.db.execute(text('SELECT conversation_id FROM messages WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one()
+        self.db.execute(text("UPDATE messages SET payload=payload||jsonb_build_object('handled_receipt',jsonb_build_object('version',1)) WHERE workspace_id=:w"),{'w':self.workspace})
+        refresh_unread(self.db,self.workspace,conversation)
+        event['update_type']='message_edited';event['timestamp']+=1000;event['message']['body']['text']='Edited question'
+        project_event(self.db,self.workspace,bot,99,event)
+        self.assertFalse(self.db.execute(text('SELECT needs_reply FROM conversations WHERE workspace_id=:w AND id=:c'),{'w':self.workspace,'c':conversation}).scalar_one())
+        self.assertEqual(self.db.execute(text('SELECT text FROM messages WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one(),'Edited question')
+
+    def test_queue_105_dialog_prefix_has_no_gaps_after_priority_moves(self):
+        from center_messenger.chat_queue import repair_batch as queue_repair
+        expected = []
+        for n in range(105):
+            self.add_customer(uuid4(),1,1000+n)
+            incoming = self.row(str(1000+n),customer=1000+n,at=self.at+timedelta(microseconds=n))
+            messages = [incoming]
+            unread = n%3 != 0
+            priority = n if unread else 1_000_000+n
+            if not unread:
+                messages.append(self.row(str(2000+n),customer=1000+n,direction='out',at=self.at+timedelta(microseconds=priority)))
+            self.project(*messages)
+            identifier = self.db.execute(text("SELECT id FROM conversations WHERE workspace_id=:w AND external_chat_id='alfa-contact:'||contact_id::text AND contact_id=(SELECT contact_id FROM alfa_customers WHERE workspace_id=:w AND run_id=:r AND branch_id=1 AND external_id=:customer)"),{'w':self.workspace,'r':self.run,'customer':1000+n}).scalar_one()
+            expected.append([unread,priority,str(identifier)])
+        ordered = lambda: [entry[2] for entry in sorted(expected,key=lambda entry:(not entry[0],-entry[1],entry[2]))]
+        before = self.reader.listing(None,self.workspace,through_page=2)
+        self.assertEqual([row['id'] for row in before['conversations']],ordered()[:90])
+        self.assertFalse(queue_repair(self.db,self.workspace,self.channel,limit=200))
+        self.assertEqual([row['id'] for row in self.reader.listing(None,self.workspace,through_page=2)['conversations']],ordered()[:90])
+        handled = UUID(ordered()[0])
+        self.reader.handle(SimpleNamespace(user_id=self.user),self.workspace,handled,self.checkpoint(handled))
+        next(entry for entry in expected if entry[2]==str(handled))[0]=False
+        rows = self.reader.listing(None,self.workspace,through_page=2)['conversations']
+        self.assertEqual([row['id'] for row in rows],ordered()[:90])
+        self.assertEqual(len({row['id'] for row in rows}),90)
+
+    def test_queue_seen_handle_serializes_with_native_postgres_incoming_commit(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        if 'wasm' in self.db.execute(text('SELECT version()')).scalar_one().lower():
+            self.skipTest('native PostgreSQL required for the actual concurrent writer/handle race')
+        self.project(self.row('1'))
+        conversation = self.conversation()['id']
+        seen = self.checkpoint(conversation)
+        self.transaction.commit()
+        self.transaction = self.db.begin()
+        entered = threading.Event()
+        @contextmanager
+        def native_transaction(*args, **kwargs):
+            with self.engine.begin() as db:
+                db.execute(text(f'SET search_path TO "{self.schema}",public'))
+                if kwargs.get('lock'):
+                    entered.set()
+                    db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w':self.workspace})
+                yield db
+        maximum = SimpleNamespace(chat_transaction=native_transaction, accounts=self.accounts)
+        reader = ChatReader(SimpleNamespace(max=maximum, alfa_max=self.service, enqueue=Messaging.enqueue))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with self.engine.begin() as writer:
+                writer.execute(text(f'SET search_path TO "{self.schema}",public'))
+                writer.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w':self.workspace})
+                self.service._project_page(writer,self.workspace,self.channel,self.crm,1,[self.row('2',body='Concurrent incoming',at=self.at+timedelta(seconds=1))])
+                pending = pool.submit(reader.handle, SimpleNamespace(user_id=self.user), self.workspace, conversation, seen)
+                self.assertTrue(entered.wait(2))
+                self.assertFalse(pending.done())
+            meta = pending.result(timeout=5)['conversation']
+        self.assertEqual(meta['unanswered_count'], 1)
+        self.assertEqual(meta['preview'], 'Concurrent incoming')
+        self.assertEqual(meta['waiting_since'], self.at+timedelta(seconds=1))
 
 
 if __name__ == "__main__":

@@ -181,7 +181,7 @@ _SYSTEM_ACTOR_MARKERS = (
 
 def _outgoing_actor(author_cell, row, actor_name, message_text=""):
     """Identify employees from CRM identity metadata; leave ambiguous authors unknown."""
-    elements = [row, author_cell, *row.find_all(True)]
+    elements = [row, author_cell, *author_cell.find_all(True)]
     metadata = []
     actor_id = None
     for element in elements:
@@ -199,22 +199,7 @@ def _outgoing_actor(author_cell, row, actor_name, message_text=""):
                 if re.fullmatch(r"[1-9][0-9]{0,18}", value):
                     actor_id = value
     signal = f"{actor_name} {' '.join(metadata)}".casefold()
-    system_text = message_text.casefold()
-    if any(marker in signal for marker in _SYSTEM_ACTOR_MARKERS) or any(
-        marker in system_text
-        for marker in (
-            "по триггеру",
-            "автоматическое сообщение",
-            "автоматическая рассылка",
-            "авторассылка",
-            "авто-рассылка",
-            "сообщение по рассылке",
-            "триггерное сообщение",
-            "отправлено автоматически",
-            "системное сообщение",
-            "системное уведомление",
-        )
-    ):
+    if any(marker in signal for marker in _SYSTEM_ACTOR_MARKERS):
         return "automation", actor_id
     explicit_human_role = any(
         re.search(r"(?:^|[=\s:_-])(?:human|employee|operator|manager|staff)(?:$|[\s:_-])", item)
@@ -338,6 +323,7 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
                 "actor_name": actor_name,
                 "actor_type": actor_type,
                 "actor_id": actor_id,
+                "actor_evidence": {"version": 1, "reason": "client_incoming" if direction == "receive" else {"human": "crm_employee", "automation": "crm_automation", "unknown": "unverified_sender"}[actor_type]},
                 "text": message_text,
                 "occurred_at": when,
                 "attachments": links[:20],

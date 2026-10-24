@@ -20,6 +20,7 @@ from center_messenger.alfa_max_api import router as alfa_max_router
 from center_messenger.alfa_service import AlfaConnections
 from center_messenger.alfa_sync import AlfaSync, SyncWorker
 from center_messenger.auth_security import AuthError, Passwords
+from center_messenger.chat_queue import QueueProjectionWorker
 from center_messenger.chat_api import ChatReader
 from center_messenger.chat_api import hooks as max_hooks
 from center_messenger.chat_api import router as chat_router
@@ -99,7 +100,12 @@ def create_app(
         )
         if alfa_max_worker:
             alfa_max_worker.start()
+        queue_worker = QueueProjectionWorker(app.state.accounts) if app.state.accounts else None
+        if queue_worker:
+            queue_worker.start()
         yield
+        if queue_worker:
+            queue_worker.stop()
         if alfa_max_worker:
             alfa_max_worker.stop()
         if max_worker:
