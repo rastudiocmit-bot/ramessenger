@@ -43,7 +43,7 @@ test("503 preserves counters, visibly pauses animation, and automatically recove
   assert.ok(ui.$("#alfa-max-progress").classList.contains("is-offline"));
   assert.match(ui.$("#alfa-max-progress-detail").textContent, /82749.*Повторяем запрос через 2 с/s);
   await ui.poll();
-  assert.match(ui.$("#alfa-max-progress-detail").textContent, /82770/);
+  assert.equal(ui.$('[data-metric="messages"] strong').dataset.count, "82770");
   assert.ok(!ui.$("#alfa-max-progress").classList.contains("is-offline"));
 });
 test("repeated failures use bounded backoff and keep retrying", async t => {
@@ -69,11 +69,12 @@ test("an unresolved archive gap is paused and never presented as completion", as
   await ui.app.start();
   assert.ok(ui.$("#alfa-max-progress").classList.contains("is-paused"));
   assert.ok(!ui.$("#alfa-max-progress").classList.contains("is-complete"));
-  assert.match(ui.$("#alfa-max-progress-streams").textContent, /недостача 12/);
+  assert.match(ui.$("#alfa-max-progress-streams").textContent, /недостача 12/i);
   assert.equal(ui.timers.size, 1);
 });
 test("completion continues periodic checks for later history changes", async t => {
-  const ui = setup(t, () => report({ history_complete: true, backfill_pending: false }));
+  const ui = setup(t, () => report({ history_complete: true, backfill_pending: false, syncing: true,
+    streams: [{ branch_id: "1", direction: "receive", source_rows: 10, expected_rows: 10, complete: true, missing_rows: 0 }] }));
   await ui.app.start();
   assert.ok(ui.$("#alfa-max-progress").classList.contains("is-complete"));
   assert.equal([...ui.timers.values()][0].delay, 15000);
@@ -112,13 +113,61 @@ test("leaving connections prevents status polling while reading messages", async
   assert.ok(ui.$("#alfa-max-progress").hidden);
 });
 test("saved-history repair displays its checkpoint rather than a stalled archive count", async t => {
-  const ui = setup(t, () => report({ client_repair: { processed: 60, complete: false } }));
+  const ui = setup(t, () => report({ syncing: true, client_repair: { processed: 60, total: 100, complete: false } }));
   await ui.app.start();
-  assert.match(ui.$("#alfa-max-progress-text").textContent, /Восстанавливаем историю клиентов: проверено 60/);
+  assert.match(ui.$("#alfa-max-progress-text").textContent, /Восстанавливаем историю клиентов/);
+  assert.equal(ui.$("#alfa-max-progress-track").getAttribute("aria-valuenow"), "60");
   assert.equal(ui.timers.size, 1);
 });
 test("visible messages and retained database records have separate counters", async t => {
   const ui = setup(t, () => report({ messages: 6, stored_messages: 32 }));
   await ui.app.start();
-  assert.match(ui.$("#alfa-max-progress-detail").textContent, /В переписках сообщений: 6 · Всего записей в базе: 32/);
+  assert.equal(ui.$('[data-metric="messages"] strong').dataset.count, "6");
+  assert.equal(ui.$('[data-metric="stored"] strong').dataset.count, "32");
+});
+
+test("partial pause stays visible while independent journals continue", async t => {
+  const ui = setup(t, () => report({ syncing: true, history_paused: true, backfill_pending: true,
+    streams: [{ branch_id: '1', direction: 'receive', source_rows: 10, expected_rows: 20, checked_page: 2 },
+      { branch_id: '2', direction: 'sent', source_rows: 10, expected_rows: 12, paused_until: '2026-10-24T18:00:00Z', missing_rows: 2 }],
+    worker: { phase: 'reading', branch_id: '1', direction: 'receive', page: 3, completed_pages: 1, total_pages: 5 } }));
+  await ui.app.start();
+  assert.equal(ui.$('#alfa-max-progress').dataset.mode, 'running');
+  assert.match(ui.$('#alfa-max-progress-warning').textContent, /На паузе журналов: 1/);
+  assert.match(ui.$('#alfa-max-progress-activity').textContent, /страница 4/);
+});
+test("legacy identities require attention after a scan rather than endless loading", async t => {
+  const ui = setup(t, () => report({ syncing: true, backfill_pending: false, unidentified_rows: 3,
+    streams: [{ branch_id: '1', direction: 'receive', source_rows: 20, expected_rows: 20, complete: true, unidentified_rows: 3 }] }));
+  await ui.app.start();
+  assert.equal(ui.$('#alfa-max-progress').dataset.mode, 'attention');
+  assert.match(ui.$('#alfa-max-progress-text').textContent, /Обход завершён/);
+  assert.equal(ui.$('#alfa-max-progress').classList.contains('is-complete'), false);
+});
+test("worker page heartbeat moves while saved message totals stay unchanged", async t => {
+  let page = 24;
+  const ui = setup(t, () => report({ syncing: true, worker: { phase: 'reading', branch_id: '2', direction: 'sent', page: page++, completed_pages: 2, total_pages: 8 } }));
+  await ui.app.start(); assert.match(ui.$('#alfa-max-progress-activity').textContent, /страница 25/);
+  await ui.poll(); assert.match(ui.$('#alfa-max-progress-activity').textContent, /страница 26/);
+  assert.equal(ui.$('[data-metric="messages"] strong').dataset.count, '82749');
+});
+test("a current timeout abort retries instead of silently stopping status polling", async t => {
+  const ui = setup(t, () => { throw Object.assign(new Error('timeout'), { name: 'AbortError' }); });
+  await ui.app.start();
+  assert.equal(ui.$('#alfa-max-progress').dataset.mode, 'offline');
+  assert.equal(ui.timers.size, 1);
+});
+test("unknown repair size never invents a percentage", async t => {
+  const ui = setup(t, () => report({ client_repair: { processed: 720, complete: false } }));
+  await ui.app.start();
+  assert.equal(ui.$('#alfa-max-progress-track').hasAttribute('aria-valuenow'), false);
+  assert.match(ui.$('[data-sync-step="repair"] small').textContent, /720/);
+});
+test("an expired CRM session remains visible and keeps checking for reconnection", async t => {
+  const ui = setup(t, () => report({ state: 'reauth_required' }));
+  await ui.app.start();
+  assert.equal(ui.$('#alfa-max-progress').hidden, false);
+  assert.equal(ui.$('#alfa-max-progress').dataset.mode, 'error');
+  assert.match(ui.$('#alfa-max-progress-text').textContent, /подключение/);
+  assert.equal(ui.timers.size, 1);
 });

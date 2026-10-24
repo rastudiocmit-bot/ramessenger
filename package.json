@@ -7,7 +7,8 @@
     "test:progress": "node tests/check_alfa_progress.cjs",
     "test:appearance": "node tests/check_appearance.cjs",
     "test:cabinet": "node tests/check_cabinet.cjs",
-    "test:composer": "node tests/check_composer.cjs"
+    "test:composer": "node tests/check_composer.cjs",
+    "test:history-states": "node tests/check_history_states.cjs"
   },
   "devDependencies": {
     "jsdom": "30.1.3",

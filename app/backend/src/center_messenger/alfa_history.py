@@ -140,7 +140,7 @@ def history_coverage(db, workspace, connection, cursor, branches):
             "totals_verified": bool(streams) and all(s["expected_rows"] is not None and not s["missing_rows"]
                                                      and not s["unidentified_rows"] for s in streams),
             "backfill_pending": history_pending(cursor),
-            "history_paused": any(s["paused_until"] or s["unidentified_rows"] for s in streams),
+            "history_paused": any(s["paused_until"] for s in streams),
             "unidentified_rows": sum(s["unidentified_rows"] for s in streams),
             "client_repair": cursor.get("client_repair")}
 

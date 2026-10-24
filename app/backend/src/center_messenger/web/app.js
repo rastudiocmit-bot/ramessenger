@@ -390,7 +390,12 @@
     $("#alfa-form").reset(); $("#alfa-branches").replaceChildren();
     ["#alfa-status", "#alfa-cache-time"].forEach(selector => { $(selector).textContent = ""; });
     $("#alfa-branch-count").textContent = "0"; notice("", $("#alfa-notice"));
+    connectionSummary("#alfa-connection-summary", "Проверяем подключение…", "waiting");
+    $("#alfa-config").open = true;
     alfaButtons();
+  }
+  function connectionSummary(selector, text, mode) {
+    const label = $(selector); label.textContent = text; label.closest(".connection-tile").dataset.state = mode;
   }
   function alfaButtons() {
     const ready = Boolean(state.alfa?.vault_ready), configured = Boolean(state.alfa?.configured);
@@ -403,6 +408,7 @@
     const workspace = state.workspace;
     const payload = await api(`/workspaces/${workspace.id}/integrations/alfa`);
     if (workspace.id !== state.workspace?.id) return;
+    if (state.alfa?.configured !== payload.configured) $("#alfa-config").open = !payload.configured;
     state.alfa = payload;
     const form = $("#alfa-form"); form.elements.origin.value = payload.origin;
     form.elements.email.value = payload.email; form.elements.seed_branch_id.value = payload.seed_branch_id || "";
@@ -413,6 +419,9 @@
     $("#alfa-key-note").textContent = payload.configured ? "Оставьте пустым, чтобы сохранить действующий ключ." : "Ключ находится в профиле пользователя АльфаCRM.";
     const statuses = { active: "Подключено", reauth_required: "Нужна проверка доступа", error: "Ошибка связи" };
     $("#alfa-status").textContent = payload.configured ? (statuses[payload.status] || "Требует проверки") : "Не настроено";
+    $("#alfa-status").dataset.state = payload.status === "active" ? "active" : payload.configured ? "error" : "waiting";
+    connectionSummary("#alfa-connection-summary", payload.configured && payload.status === "active"
+      ? `Подключено · филиалов ${payload.branches.length}` : payload.configured ? "Нужна проверка доступа" : "Не подключена", $("#alfa-status").dataset.state);
     $("#alfa-status").classList.toggle("integration-error", ["reauth_required", "error"].includes(payload.status));
     $("#alfa-cache-time").textContent = payload.last_success_at ? `Список сохранён: ${date(payload.last_success_at)}` : "Список ещё не загружен.";
     $("#alfa-branch-count").textContent = String(payload.branches.length);
@@ -462,6 +471,8 @@
     $("#alfa-max-connect-form").reset(); $("#alfa-max-otp-form").reset();
     $("#alfa-max-status").textContent = "Не подключено";
     $("#alfa-max-info").textContent = "";
+    connectionSummary("#alfa-max-connection-summary", "Проверяем веб-сессию…", "waiting");
+    connectionSummary("#alfa-history-summary", "Получаем состояние…", "waiting");
     notice("", $("#alfa-max-error"));
     show($("#alfa-max-otp-form"), false); show($("#alfa-max-actions"), false);
     show($("#alfa-max-connect-form"));
@@ -480,6 +491,7 @@
     });
     $("#alfa-max-sync").disabled = state.alfaMaxBusy || !active;
     $("#alfa-max-disconnect").disabled = state.alfaMaxBusy || !configured;
+    $("#alfa-max-connect").textContent = state.alfaMaxBusy ? "Подключаем…" : state.alfaMax?.state === "reauth_required" ? "Войти заново" : "Подключить MAX";
   }
   async function loadAlfaMax() {
     const workspace = state.workspace;
@@ -494,6 +506,8 @@
       error: "Ошибка подключения",
     };
     $("#alfa-max-status").textContent = labels[payload.state] || "Состояние не определено";
+    $("#alfa-max-status").dataset.state = payload.state === "active" ? "active" : ["error", "reauth_required"].includes(payload.state) ? "error" : "waiting";
+    connectionSummary("#alfa-max-connection-summary", labels[payload.state] || "Нужна проверка", $("#alfa-max-status").dataset.state);
     $("#alfa-max-status").classList.toggle("integration-error", ["reauth_required", "error"].includes(payload.state));
     const form = $("#alfa-max-connect-form");
     if (payload.email) form.elements.email.value = payload.email;
@@ -509,17 +523,17 @@
     $("#alfa-max-info").textContent = details.join(" · ");
     notice(!payload.vault_ready ? "На сервере не настроен ключ хранения веб-сессий." : (payload.error || ""), $("#alfa-max-error"));
     alfaMaxButtons();
-    if (payload.state === "active") alfaMaxProgress.start();
-    else alfaMaxProgress.reset();
+    if (payload.configured && payload.state !== "not_configured") alfaMaxProgress.start();
+    else { alfaMaxProgress.reset(); connectionSummary("#alfa-history-summary", "Сначала подключите MAX", "waiting"); }
   }
   async function alfaMaxAction(action, success) {
     if (state.alfaMaxBusy || !state.workspace) return;
     const epoch = state.epoch, workspace = state.workspace;
     state.alfaMaxBusy = true; alfaMaxButtons(); notice("", $("#alfa-max-error"));
     try {
-      await action("/workspaces/" + workspace.id + "/integrations/alfa-max");
+      const result = await action("/workspaces/" + workspace.id + "/integrations/alfa-max");
       if (epoch !== state.epoch) return;
-      await loadAlfaMax(); await chat.connections(); toast(success);
+      await loadAlfaMax(); await chat.connections(); toast(typeof success === "function" ? success(result) : success);
     } catch (error) {
       if (error.name !== "AbortError" && epoch === state.epoch) {
         try { await loadAlfaMax(); } catch (_) { /* Keep the action error visible. */ }
@@ -547,7 +561,8 @@
     alfaMaxAction(path => api(path + "/verify", { method: "POST", data }), "Вход в AlfaCRM подтверждён.");
     form.reset();
   });
-  $("#alfa-max-sync").addEventListener("click", () => alfaMaxAction(path => api(path + "/sync", { method: "POST" }), "Синхронизация истории поставлена в очередь."));
+  $("#alfa-max-sync").addEventListener("click", () => alfaMaxAction(path => api(path + "/sync", { method: "POST" }),
+    result => result?.already_running ? "История уже обрабатывается. Текущий проход продолжается." : "Проверка истории поставлена в очередь."));
   $("#alfa-max-disconnect").addEventListener("click", async () => {
     const epoch = state.epoch;
     if (!await confirm("Отключить штатный MAX?", "Зашифрованная веб-сессия AlfaCRM будет удалена. История переписки останется в кабинете.", "Отключить")) return;
@@ -572,6 +587,9 @@
   }
   const directory = window.CenterDirectory({ $, state, api, node, show, notice, date });
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast, confirm, renderPane });
-  const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date });
+  const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date, onStatus: (payload, view) => {
+    connectionSummary("#alfa-history-summary", view.title, view.mode === "complete" ? "active" : ["error", "offline", "attention"].includes(view.mode) ? "error" : "waiting");
+    if (payload && state.alfaMax && payload.state !== state.alfaMax.state) loadAlfaMax().catch(error => { if (error.name !== "AbortError") notice(error.message, $("#alfa-max-error")); });
+  } });
   start();
 })();
