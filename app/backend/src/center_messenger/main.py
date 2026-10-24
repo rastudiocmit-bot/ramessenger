@@ -27,7 +27,7 @@ from center_messenger.config import Settings
 from center_messenger.connector_vault import ConnectorVault
 from center_messenger.crm_api import DirectoryReader
 from center_messenger.crm_api import router as directory_router
-from center_messenger.database import database_is_ready, make_engine
+from center_messenger.database import database_is_ready, log_database_error, make_engine
 from center_messenger.http_security import SecurityMiddleware
 from center_messenger.max_client import MaxClient
 from center_messenger.max_connections import MaxConnections
@@ -146,6 +146,8 @@ def create_app(
 
     @app.exception_handler(SQLAlchemyError)
     async def database_error(_request, _error):
+        route = getattr(_request.scope.get("route"), "path", "unknown")
+        log_database_error(logger, _error, operation=f"{_request.method} {route}")
         return JSONResponse({"detail": "Сервис временно недоступен."}, status_code=503)
 
     @app.get("/", response_class=FileResponse)

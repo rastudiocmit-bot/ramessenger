@@ -17,8 +17,8 @@ class AlfaConnections:
         self.accounts, self.vault, self.client_factory = accounts, vault, client_factory
 
     @contextmanager
-    def _transaction(self, actor, workspace, *, lock=False):
-        with self.accounts.transaction(actor) as db:
+    def _transaction(self, actor, workspace, *, lock=False, snapshot=False):
+        with self.accounts.transaction(actor, snapshot=snapshot) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
             if lock:
                 db.execute(
@@ -27,8 +27,8 @@ class AlfaConnections:
             yield db
 
     @contextmanager
-    def chat_transaction(self, actor, workspace, *, lock=False):
-        with self.accounts.transaction(actor) as db:
+    def chat_transaction(self, actor, workspace, *, lock=False, snapshot=False):
+        with self.accounts.transaction(actor, snapshot=snapshot) as db:
             self.accounts._workspace_chat(db, actor, workspace)
             if lock:
                 db.execute(

@@ -9,6 +9,15 @@ from center_messenger.config import Settings
 SCHEMA_REVISION = "0012_member_sections"
 
 
+def log_database_error(logger, error, *, operation):
+    # SQLAlchemy's exception text can include SQL or driver detail containing
+    # user data. Log just its type and SQLSTATE, never SQL, params or repr(error).
+    original = getattr(error, "orig", None)
+    logger.error("Database operation failed operation=%s exception=%s driver=%s sqlstate=%s",
+                 operation, type(error).__name__, type(original).__name__ if original else "none",
+                 getattr(original, "sqlstate", None))
+
+
 def make_engine(settings: Settings) -> Engine:
     return create_engine(
         settings.database_url(),

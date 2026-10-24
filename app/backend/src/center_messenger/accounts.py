@@ -62,8 +62,10 @@ class Accounts:
         self.passwords = passwords or Passwords()
 
     @contextmanager
-    def transaction(self, identity: Identity | None = None, **scopes):
+    def transaction(self, identity: Identity | None = None, *, snapshot=False, **scopes):
         with self.engine.begin() as db:
+            if snapshot:
+                db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
             if identity is not None:
                 context(db, user_id=identity.user_id)
                 valid = db.execute(

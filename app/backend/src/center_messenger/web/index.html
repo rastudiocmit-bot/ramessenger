@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Личный кабинет · РазвивайсяMessenger</title>
-  <link rel="stylesheet" href="/assets/app.css?v=0.8.32">
+  <link rel="stylesheet" href="/assets/app.css?v=0.8.33">
   <script src="/assets/directory.js?v=0.8.2" defer></script>
   <script src="/assets/chat.js?v=0.8.16" defer></script>
-  <script src="/assets/app.js?v=0.8.3" defer></script>
+  <script src="/assets/alfa-progress.js?v=0.8.1" defer></script>
+  <script src="/assets/app.js?v=0.8.4" defer></script>
 </head>
 <body>
   <div id="loading" class="loading" role="status"><span class="spinner"></span>Открываем кабинет…</div>
@@ -90,6 +91,7 @@
               <div class="sync-progress-row"><span class="sync-spinner" aria-hidden="true"></span><span id="alfa-max-progress-text">Загружаем историю…</span></div>
               <div class="sync-progress-track" aria-hidden="true"><div id="alfa-max-progress-fill" class="sync-progress-fill"></div></div>
               <p id="alfa-max-progress-detail" class="muted small"></p>
+              <ul id="alfa-max-progress-streams" class="muted small sync-progress-streams"></ul>
             </div>
             <form id="alfa-max-connect-form" autocomplete="off">
               <label>Почта пользователя AlfaCRM<input name="email" type="email" required maxlength="254" autocomplete="off"></label>

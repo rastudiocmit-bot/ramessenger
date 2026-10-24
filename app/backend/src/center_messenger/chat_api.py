@@ -58,10 +58,10 @@ class ChatReader:
         self.alfa_max = messaging.alfa_max
 
     def updates(self, actor, workspace, after=None):
-        with self.max.chat_transaction(actor, workspace) as db:
-            # Every projector/send takes the workspace lock before allocating a
-            # change sequence. The read lock prevents skipping an uncommitted one.
-            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR SHARE"), {"w": workspace})
+        with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
+            # Writers serialize sequence allocation and commit under the
+            # workspace lock. One snapshot sees a complete committed prefix
+            # without waiting for an in-flight archive import.
             end = db.execute(
                 text("SELECT coalesce(max(seq),0) FROM message_changes WHERE workspace_id=:w"),
                 {"w": workspace},
@@ -153,7 +153,7 @@ class ChatReader:
             }
 
     @staticmethod
-    def _conversation(db, workspace, conversation, *, lock="SHARE"):
+    def _conversation(db, workspace, conversation, *, lock=None):
         row = (
             db.execute(
                 text(
@@ -180,7 +180,7 @@ class ChatReader:
                     "WHERE c.workspace_id=:w AND c.id=:id AND c.kind='direct' AND "
                     "((cn.kind='max_bot' AND s.connection_id IS NOT NULL) OR "
                     "(cn.kind='alfa_max_browser' AND am.connection_id IS NOT NULL)) "
-                    f"FOR {lock} OF c"
+                    + (f"FOR {lock} OF c" if lock else "")
                 ),
                 {"w": workspace, "id": conversation},
             )
@@ -280,8 +280,7 @@ class ChatReader:
         page=0,
         through_page=None,
     ):
-        with self.max.chat_transaction(actor, workspace) as db:
-            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR SHARE"), {"w": workspace})
+        with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
             if through_page is not None:
                 page = through_page
             snapshot = DirectoryReader._published(db, workspace)
@@ -469,8 +468,7 @@ class ChatReader:
     def history(
         self, actor, workspace, conversation, *, before_time=None, before_id=None, after_seq=None
     ):
-        with self.max.chat_transaction(actor, workspace) as db:
-            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR SHARE"), {"w": workspace})
+        with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
             row = self._conversation(db, workspace, conversation)
             conversation = row["id"]
             params = {"w": workspace, "c": conversation}
