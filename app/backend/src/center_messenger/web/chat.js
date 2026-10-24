@@ -1,7 +1,6 @@
 "use strict";
 window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, renderPane }) => {
   const icon = name => window.CenterIcon ? window.CenterIcon(name) : node("span", name === "checks" ? "✓✓" : name === "check" ? "✓" : "", "icon-fallback");
-  let branchNames = new Map();
   const quickReplies = [
     ["Пробное занятие", "Здравствуйте! Записала вас на пробное занятие. Подскажите, какой день недели удобнее — будни после 17:00 или суббота утром?"],
     ["Перенос занятия", "Занятие перенесено. Подтвердите, пожалуйста, что новое время вам подходит."],
@@ -408,8 +407,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const first = !previous || previous.actor_type !== message.actor_type || previous.direction !== message.direction || dayKey(previous.occurred_at) !== messageDay;
       const bubble = node("div", undefined, `chat-bubble msg ${message.direction === "out" ? "out outgoing" : "in incoming"}${first ? " first" : ""}${grouped ? "" : " last"}${message.state === "failed" ? " failed" : ""}`); bubble.dataset.id = message.id;
       const content = node("div", undefined, "bub");
-      const branch = branchNames.get(String(message.customer_branch_id));
-      if (first && branch) { const top = node("span", undefined, "bub-top"); top.append(node("span", branch, "branch")); content.append(top); }
       if (message.forwarded) content.append(node("small", "Пересланное сообщение", "chat-forwarded"));
       content.append(node("span", message.deleted ? "Сообщение удалено" : message.text || (message.forwarded ? "Пересланное содержимое пока недоступно" : message.attachments.length ? "" : "Содержимое сообщения недоступно"), message.deleted ? "muted msg-text" : "msg-text"));
       if (!message.deleted) for (const [index, type] of message.attachments.entries()) {
@@ -523,7 +520,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (channels.some(c => c.id === chosen)) channel.value = chosen;
       const old = $("#chat-branch").value;
       const branches = context.branches || [];
-      branchNames = new Map(branches.map(b => [String(b.id), b.name]));
       $("#chat-branch").replaceChildren(new Option("Все филиалы", ""), ...branches.map(b => new Option(b.name, b.id)));
       if (branches.some(b => String(b.id) === old)) $("#chat-branch").value = old;
       await loadList();
