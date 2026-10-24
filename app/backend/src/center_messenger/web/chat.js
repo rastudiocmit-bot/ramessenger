@@ -493,7 +493,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (result.more_changes && mode !== "older") await loadHistoryPage(id);
   }
   async function select(id, mobile = true) {
-    if (id !== selected && $("#chat-details-dialog").open) $("#chat-details-dialog").close();
+    const keepDetails = id !== selected && pinnedDocked();
+    if (id !== selected && detailsDialog.open && !keepDetails) detailsDialog.close();
+    if (keepDetails && detailsDialog.open) familyPending(currentItemFor(id)?.name);
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
     selectionSeq += 1; selected = id; const data = entry(id); historyBusy = false;
     if (mobile) $("#chat-layout").classList.add("has-selection");
@@ -507,6 +509,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     }
     try { await loadHistory(id, data.loaded ? "delta" : "initial"); }
     catch (error) { if (selected === id && active()) fail(error); }
+    if (keepDetails && selected === id && active()) openDetails({ auto: true }).catch(error => fail(error));
   }
   async function enter() {
     const epoch = state.epoch, gen = generation;
@@ -627,10 +630,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $(".chat-list-scroll").addEventListener("scroll", maybeLoadMore, { passive: true });
   $("#chat-retry").addEventListener("click", () => { listRetryRequired = false; loadList(true).catch(error => fail(error)); });
   $("#chat-handled").addEventListener("click", markHandled);
-  $("#chat-details").addEventListener("click", openDetails);
+  $("#chat-details").addEventListener("click", () => {
+    if (detailsDialog.open && detailsDialog.dataset.mode === "docked") closeDetails(); else openDetails().catch(error => fail(error));
+  });
   $("#chat-go-connections").addEventListener("click", () => renderPane("connections").catch(error => fail(error)));
   $("#chat-detach").addEventListener("click", () => { window.open("/?view=messages", "center-messenger-chat", "popup=yes,width=1280,height=860,resizable=yes,scrollbars=yes"); });
-  $("#chat-list-toggle").addEventListener("click", () => { const layout = $("#chat-layout"); if (matchMedia("(max-width: 719px)").matches) layout.classList.remove("has-selection"); else layout.classList.toggle("list-collapsed"); });
+  $("#chat-list-toggle").addEventListener("click", () => { const layout = $("#chat-layout"); if (matchMedia("(max-width: 719px)").matches) layout.classList.remove("has-selection"); else { layout.classList.toggle("list-collapsed"); syncDetailsMode(); } });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && active()) schedule(150); });
 
   async function markHandled() {
@@ -772,7 +777,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const paid = cards.filter(card => known(card.paid_lesson_count)), paidTotal = paid.reduce((sum, card) => sum + Number(card.paid_lesson_count), 0);
     const negative = known(student.balance) && Number(student.balance) < 0;
     detail.append(el("div", "family-stats",
-      stat("Баланс", known(student.balance) ? familyMoney(student.balance) : "—", known(student.balance) ? "по абонементам" : "требует уточнения", negative ? "danger" : ""),
+      stat("Баланс", known(student.balance) ? familyMoney(student.balance) : "—", known(student.balance) ? "" : "требует уточнения", negative ? "danger" : ""),
       stat("Оплачено", paid.length ? `${paidTotal} ${plural(paidTotal, "занятие", "занятия", "занятий")}` : "—", paid.length ? "к посещению" : "нет данных"),
       stat("Абонементы", String(subs.length), subs.length ? plural(subs.length, "активный", "активных", "активных") : "нет активных")));
 
@@ -848,16 +853,32 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-details-contact").replaceChildren(node("div", undefined, "family-skel"), node("div", undefined, "family-skel"));
     $("#chat-details-student").replaceChildren(node("div", undefined, "family-skel tall"), node("div", undefined, "family-skel"), node("div", undefined, "family-skel tall"));
   }
-  async function openDetails() {
+  function familyPending(name) {
+    detailsSeq += 1; family = null; familySelected = null; familyAttempted.clear();
+    $("#chat-details-name").textContent = name || "Загружаем сведения…";
+    detailsDialog.classList.add("is-loading"); detailsDialog.classList.remove("is-refreshing"); familySkeleton();
+  }
+  function familyUnlinked() {
+    const item = currentItem(), data = cache.get(selected), name = item?.name || data?.meta?.peer_name || "Контакт MAX";
+    family = null; detailsDialog.classList.remove("is-loading");
+    $("#chat-details-name").textContent = name;
+    const avatar = $("#chat-details-avatar"); avatar.textContent = initialsOf(name); avatar.className = "ava family-ava unlinked";
+    $("#chat-details-badges").replaceChildren(chip("Не связан с CRM", "unlinked"));
+    $("#chat-details-contact").replaceChildren(node("p", "Диалог пока не связан с карточкой родителя в АльфаCRM, поэтому сведений о семье нет.", "family-empty"));
+    $("#chat-details-sync").textContent = "Нет данных CRM"; $("#chat-details-count").textContent = "";
+    $("#chat-details-children").replaceChildren(); detailsDialog.querySelector(".family-kids-block").hidden = true;
+    const detail = $("#chat-details-student"); detail.replaceChildren();
+    if (isAdmin()) { const link = button("Связать с CRM", "family-link-btn", () => openLink(selected)); detail.append(link); }
+  }
+  async function openDetails(options = {}) {
     const data = cache.get(selected), contactId = data?.meta?.contact_id;
     if (!data?.meta) return;
-    if (!contactId) { openLink(selected); return; }
-    const epoch = state.epoch, gen = generation, seq = ++detailsSeq, conversation = selected;
-    const refresh = $("#chat-details-refresh"); refresh.hidden = !isAdmin(); refresh.disabled = !isAdmin();
-    family = null; familySelected = null; familyAttempted.clear();
-    $("#chat-details-name").textContent = "Загружаем сведения…";
-    detailsDialog.classList.add("is-loading"); detailsDialog.classList.remove("is-closing", "is-refreshing"); familySkeleton();
-    if (!detailsDialog.open) detailsDialog.showModal();
+    if (!contactId && !options.auto && !pinnedDocked()) { openLink(selected); return; }
+    const epoch = state.epoch, gen = generation, conversation = selected;
+    const refresh = $("#chat-details-refresh"); refresh.hidden = !isAdmin() || !contactId; refresh.disabled = !isAdmin();
+    familyPending(); const seq = detailsSeq;
+    detailsDialog.classList.remove("is-closing"); presentDetails();
+    if (!contactId) { familyUnlinked(); return; }
     try {
       const result = await api(`${chatPath(conversation)}/family`);
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
@@ -870,6 +891,52 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }
     }
   }
+  // Where the card lives. With room for list, chat and card side by side it docks as a
+  // third column and the chat narrows between them; with less room it floats over the
+  // page; on a phone it is a bottom sheet. Pinning only applies to the docked column:
+  // a pinned card stays open and follows the operator from client to client.
+  let detailsPinned = false, quietCloses = 0;
+  try { detailsPinned = localStorage.getItem("cm-family-pinned") === "true"; } catch (_) { /* Optional preference. */ }
+  const chatLayout = $("#chat-layout");
+  function canDock() {
+    if (!chatLayout || matchMedia("(max-width: 719px)").matches || !chatLayout.clientWidth) return false;
+    const list = chatLayout.classList.contains("list-collapsed") ? 0 : chatLayout.querySelector(".pane-list")?.getBoundingClientRect().width || 0;
+    return chatLayout.clientWidth - list >= 790;
+  }
+  function pinnedDocked() { return detailsPinned && canDock(); }
+  function currentItemFor(id) { return items.find(item => item.id === id); }
+  function renderPin() {
+    const pin = $("#chat-details-pin");
+    pin.hidden = detailsDialog.dataset.mode !== "docked";
+    pin.setAttribute("aria-pressed", String(detailsPinned));
+    pin.setAttribute("aria-label", detailsPinned ? "Открепить окно" : "Закрепить окно");
+    pin.title = detailsPinned ? "Открепить: окно будет закрываться при переходе к другому клиенту" : "Закрепить: окно останется открытым при переходе к другим клиентам";
+    $("#chat-details").setAttribute("aria-pressed", String(detailsDialog.open && detailsDialog.dataset.mode === "docked"));
+  }
+  function presentDetails() {
+    const docked = canDock();
+    if (detailsDialog.open && (detailsDialog.dataset.mode === "docked") === docked) { renderPin(); return; }
+    // The close event arrives later, as a task; count the moves so it does not reset the card.
+    if (detailsDialog.open) { quietCloses += 1; detailsDialog.close(); }
+    detailsDialog.dataset.mode = docked ? "docked" : "overlay";
+    detailsDialog.classList.toggle("docked", docked);
+    chatLayout.classList.toggle("details-docked", docked);
+    if (docked) { chatLayout.append(detailsDialog); detailsDialog.show(); }
+    else { document.body.append(detailsDialog); detailsDialog.showModal(); }
+    renderPin();
+  }
+  function syncDetailsMode() {
+    if (!detailsDialog.open || detailsDialog.classList.contains("is-closing")) return;
+    if ((detailsDialog.dataset.mode === "docked") !== canDock()) presentDetails();
+  }
+  if (window.ResizeObserver && chatLayout) new ResizeObserver(() => syncDetailsMode()).observe(chatLayout);
+  else window.addEventListener("resize", syncDetailsMode);
+  $("#chat-details-pin").addEventListener("click", () => {
+    detailsPinned = !detailsPinned;
+    try { localStorage.setItem("cm-family-pinned", String(detailsPinned)); } catch (_) { /* Optional preference. */ }
+    renderPin();
+    toast(detailsPinned ? "Окно закреплено: оно останется открытым при переходе к другим клиентам." : "Закрепление снято.");
+  });
   // Opening and closing slide the panel; Esc, the backdrop and the close button all
   // share one animated close. On a phone the sheet can also be pulled down by its handle.
   let closingTimer = null, sheetDrag = null;
@@ -881,9 +948,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     closingTimer = setTimeout(() => { if (detailsDialog.open) detailsDialog.close(); }, 200);
   }
   detailsDialog.addEventListener("click", event => {
-    if (event.target === detailsDialog || event.target.closest("[data-close]")) { event.stopPropagation(); closeDetails(); }
+    if ((event.target === detailsDialog && detailsDialog.dataset.mode !== "docked") || event.target.closest("[data-close]")) { event.stopPropagation(); closeDetails(); }
   }, true);
   detailsDialog.addEventListener("cancel", event => { event.preventDefault(); closeDetails(); });
+  detailsDialog.addEventListener("keydown", event => { if (event.key === "Escape" && detailsDialog.dataset.mode === "docked") { event.preventDefault(); closeDetails(); } });
   detailsPanel.addEventListener("pointerdown", event => {
     if (!sheetMode() || event.pointerType === "mouse" || !event.target.closest(".family-grab, .family-head") || event.target.closest("button, a")) return;
     sheetDrag = { id: event.pointerId, y: event.clientY, dy: 0 }; try { detailsPanel.setPointerCapture(event.pointerId); } catch (_) { /* Capture is optional. */ } detailsPanel.classList.add("dragging");
@@ -900,8 +968,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   detailsPanel.addEventListener("pointerup", endSheetDrag); detailsPanel.addEventListener("pointercancel", endSheetDrag);
   $("#chat-details-refresh").addEventListener("click", () => refreshSelected(true).catch(error => fail(error)));
   detailsDialog.addEventListener("close", () => {
-    clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing", "is-refreshing"); detailsPanel.style.removeProperty("--drag");
-    detailsSeq += 1; family = null;
+    clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing"); detailsPanel.style.removeProperty("--drag");
+    if (quietCloses > 0) { quietCloses -= 1; return; }
+    detailsDialog.classList.remove("is-refreshing"); chatLayout.classList.remove("details-docked");
+    detailsSeq += 1; family = null; renderPin();
   });
   async function openCards(item) {
     if (!item.contact_id) return openLink(item.id);

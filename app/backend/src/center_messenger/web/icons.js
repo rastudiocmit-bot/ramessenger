@@ -40,6 +40,7 @@ const I = {
   mail:'<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="m4.5 7 7.5 6 7.5-6"/>',
   cal:'<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
   wallet:'<path d="M18.5 7.5V6a1.5 1.5 0 0 0-1.5-1.5H5.5a2 2 0 0 0 0 4h13a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5h-13A2 2 0 0 1 3.5 17.5v-11"/><circle cx="16" cy="14" r="1.2" fill="currentColor" stroke="none"/>',
+  pin:'<path d="M9.2 3.5h5.6l-.9 5.2 3.4 3.3v1.7H6.7V12l3.4-3.3z"/><path d="M12 13.7v6.8"/>',
   cog:'<circle cx="12" cy="12" r="3.1"/><path d="M12 2.8v2.6M12 18.6v2.6M21.2 12h-2.6M5.4 12H2.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8M18.5 18.5l-1.8-1.8M7.3 7.3 5.5 5.5"/>',
 };
 window.CenterIcon = name => { const e = document.createElementNS("http://www.w3.org/2000/svg", "svg"); e.setAttribute("viewBox", "0 0 24 24"); e.setAttribute("fill", "none"); e.setAttribute("stroke", "currentColor"); e.setAttribute("stroke-width", "1.9"); e.setAttribute("stroke-linecap", "round"); e.setAttribute("stroke-linejoin", "round"); e.setAttribute("aria-hidden", "true"); e.innerHTML = I[name] || I.more; return e; };
