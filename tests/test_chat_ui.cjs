@@ -84,6 +84,51 @@ test("enter keeps all channels selected", async t => {
   assert.ok(!ui.calls.find(url => url.pathname.endsWith("/chats")).searchParams.has("connection"));
 });
 
+test("dialog list keeps unread first and newest first in each group after a live update", async t => {
+  let rows = [
+    {...conversation(1), unread:false, unread_count:0, last_message_at:'2026-10-24T12:00:00Z'},
+    {...conversation(2), last_message_at:'2026-10-24T10:00:00Z',waiting_since:'2026-10-20T09:00:00Z'},
+    {...conversation(3), unread:false, unread_count:0, last_message_at:'2026-10-24T11:00:00Z'},
+    {...conversation(4), last_message_at:'2026-10-24T09:00:00Z'}];
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/chats'))return {conversations:rows,page:0,total:4,unread:2,has_more:false};
+    if(url.pathname.endsWith('/messages'))return history(url.pathname.split('/').at(-2),[],{conversation:{id:url.pathname.split('/').at(-2),unread:true,can_send:true,inbound_seq:1,revision:1}});
+  });
+  const ids=()=>[...ui.$('#chat-list').querySelectorAll('[data-id]')].map(e=>e.dataset.id);
+  await ui.app.enter();assert.deepEqual(ids(),[2,4,1,3].map(identifier));
+  assert.equal(ui.$(`[data-id="${identifier(2)}"] time`).dateTime,'2026-10-24T10:00:00Z');
+  assert.doesNotMatch(ui.$(`[data-id="${identifier(2)}"] time`).textContent,/ждёт/);
+  rows=rows.map(r=>r.id===identifier(4)?{...r,last_message_at:'2026-10-24T13:00:00Z'}:r);
+  await ui.poll();assert.deepEqual(ids(),[4,2,1,3].map(identifier));
+});
+
+test("dialog sorting preserves microseconds and puts unknown dates last within their group", async t=>{
+  const ui=setup(t,undefined,{conversations:[{...conversation(1),last_message_sort_time:'1792800000000000'},
+    {...conversation(2),last_message_sort_time:'1792800000000001'}, {...conversation(3),last_message_at:null}]});
+  await ui.app.enter();
+  assert.deepEqual([...ui.$('#chat-list').querySelectorAll('[data-id]')].map(e=>e.dataset.id),[2,1,3].map(identifier));
+});
+
+test("handling a dialog immediately moves it below unread dialogs and refreshes the loaded prefix", async t=>{
+  let reads=0,release;
+  const rows=[{...conversation(1),last_message_at:'2026-10-24T12:00:00Z'},
+    {...conversation(2),last_message_at:'2026-10-24T10:00:00Z'},
+    {...conversation(3),unread:false,unread_count:0,last_message_at:'2026-10-24T09:00:00Z'}];
+  const ui=setup(t,(url,options)=>{
+    if(url.pathname.endsWith('/handled'))return {};
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{id:identifier(1),unread:true,can_send:true,inbound_seq:1,revision:1}});
+    if(url.pathname.endsWith('/chats')){
+      const response={conversations:rows,page:1,total:3,unread:reads?1:2,has_more:false};
+      if(++reads>1){assert.equal(url.searchParams.get('through_page'),'1');return new Promise(resolve=>{release=()=>resolve(response);});}
+      return response;
+    }
+  });
+  await ui.app.enter();ui.$('#chat-handled').click();await flush();
+  assert.deepEqual([...ui.$('#chat-list').querySelectorAll('[data-id]')].map(e=>e.dataset.id),[2,1,3].map(identifier));
+  assert.equal(ui.$(`[data-id="${identifier(1)}"] .avatar-count`),null);
+  release();await flush();
+});
+
 test("unread count uses a badge inside the avatar and preserves the client initial", async t => {
   const ui = setup(t, undefined, { conversations: [conversation(1), { ...conversation(2), unread_count: 150 },
     { ...conversation(3), unread: false, unread_count: 0 }] });

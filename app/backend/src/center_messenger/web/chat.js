@@ -144,7 +144,20 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     }
     return cache.get(id);
   }
+  function conversationTime(item) {
+    if (item.last_message_sort_time !== null && item.last_message_sort_time !== undefined && /^-?\d+$/.test(String(item.last_message_sort_time))) return BigInt(item.last_message_sort_time);
+    const milliseconds = Date.parse(item.last_message_at);
+    return Number.isFinite(milliseconds) ? BigInt(milliseconds) * 1000n : null;
+  }
+  function compareConversations(a, b) {
+    const unread = Number(Boolean(b.unread)) - Number(Boolean(a.unread));
+    if (unread) return unread;
+    const left = conversationTime(a), right = conversationTime(b);
+    if (left !== right) return left === null ? 1 : right === null ? -1 : left > right ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  }
   function renderList(force = false) {
+    items.sort(compareConversations);
     const signature = JSON.stringify([items, selected]); if (!force && signature === lastList) return; lastList = signature;
     const list = $("#chat-list"), scroller = $(".chat-list-scroll"), top = scroller.scrollTop; list.replaceChildren();
     for (const item of items) {
@@ -159,7 +172,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         avatar.setAttribute("aria-label", `${avatar.title}. Непрочитанных сообщений: ${item.unread_count}`);
       }
       const body = button("", "chat-select row-main", () => select(item.id)); body.setAttribute("aria-label", `Открыть переписку: ${item.name}`); body.setAttribute("aria-pressed", String(item.id === selected));
-      const heading = node("span", undefined, "row-top"); heading.append(node("strong", item.name, "row-name"), node("time", listTime(item), "row-time"));
+      const heading = node("span", undefined, "row-top"), timestamp = node("time", listTime(item), "row-time");
+      if (item.last_message_at) { timestamp.dateTime = item.last_message_at; timestamp.title = date(item.last_message_at); }
+      if (item.unread && item.waiting_since) timestamp.title += " · Ожидает ответа с " + date(item.waiting_since);
+      heading.append(node("strong", item.name, "row-name"), timestamp);
       body.append(heading);
       if (item.students.length) body.append(node("span", item.students.join(" · "), "row-kids contact-students"));
       const bottom = node("span", undefined, "row-bot");
@@ -176,10 +192,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     scroller.scrollTop = top;
   }
   function listTime(item) {
-    const waiting = item.waiting_since && item.unread ? Math.max(0, Math.floor((Date.now() - Date.parse(item.waiting_since)) / 60000)) : null;
-    if (waiting !== null && Number.isFinite(waiting)) return "ждёт " + (waiting < 60 ? waiting + " мин" : waiting < 1440 ? Math.floor(waiting / 60) + " ч" : Math.floor(waiting / 1440) + " дн");
     if (!item.last_message_at) return "";
     const at = new Date(item.last_message_at), today = new Date();
+    if (Number.isNaN(at.getTime())) return "";
     if (dayKey(at) === dayKey(today)) return time(at);
     if (dayKey(at) === dayKey(new Date(today.getTime() - 86400000))) return "вчера";
     if (today - at < 6 * 86400000) return new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, weekday: "short" }).format(at);
@@ -651,12 +666,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     try {
       await api(`${chatPath(id)}/handled`, { method: "POST" });
       if (!valid(epoch, gen)) return;
-      if (item) { item.unread = false; item.handled = true; }
-      data.meta.unread = false;
+      if (item) { item.unread = false; item.unread_count = 0; item.handled = true; }
+      data.meta.unread = false; data.meta.unread_count = 0;
       if (view === "unread") items = items.filter(row => row.id !== id);
       renderList(true); renderHeader();
       toast("Диалог отмечен как обработанный.");
-      loadList().catch(error => fail(error));
+      loadList(false, true).catch(error => fail(error));
     } catch (error) { if (valid(epoch, gen)) fail(error); }
     finally { if (valid(epoch, gen)) { actionBusy = false; renderHeader(); } }
   }
