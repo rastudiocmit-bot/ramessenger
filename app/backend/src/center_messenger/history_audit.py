@@ -15,11 +15,11 @@ def main():
     reports = []
     try:
         with engine.begin() as db:
-            db.execute(text("SET TRANSACTION READ ONLY"))
+            db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
             workspaces = db.execute(text("SELECT workspace_id FROM alfa_max_sync_queue ORDER BY workspace_id")).scalars().all()
         for workspace in workspaces:
             with engine.begin() as db:
-                db.execute(text("SET TRANSACTION READ ONLY"))
+                db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
                 db.execute(text("SELECT set_config('app.workspace_id',:w,true)"), {"w": str(workspace)})
                 settings = db.execute(text(
                     "SELECT connection_id,crm_connection_id,state,history_cursor,last_sync_at,last_error_code "
