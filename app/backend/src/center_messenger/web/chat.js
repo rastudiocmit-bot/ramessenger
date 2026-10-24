@@ -721,8 +721,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     return el("div", `family-note ${tone}`, glyph(name), el("div", "family-note-text", node("strong", title), text ? node("span", text) : null));
   }
   function stat(label, value, hint, tone) {
-    return el("div", `family-stat${tone ? ` ${tone}` : ""}`, node("span", label), node("strong", value), hint ? node("small", hint) : null);
+    const cell = el("div", `family-stat${tone ? ` ${tone}` : ""}`, node("span", label), node("strong", value));
+    if (hint) cell.title = `${label}: ${value} — ${hint}`;
+    return cell;
   }
+  // Russian names are "Surname Name Patronymic"; a child switcher reads best by first name.
+  const firstName = name => { const parts = (name || "").trim().split(/\s+/); return parts.length >= 2 ? parts[1] : parts[0] || "Ребёнок"; };
   const part = (title, ...children) => el("section", "family-part", node("h4", title, "family-label"), ...children);
   function fact(label, ...value) { return el("div", "family-fact", node("dt", label), el("dd", undefined, ...value)); }
   function familyStatus() {
@@ -737,7 +741,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const avatar = $("#chat-details-avatar"); avatar.textContent = initialsOf(family.name); avatar.className = `ava family-ava ${statuses[main] ? main : "unlinked"}`;
     const badges = $("#chat-details-badges"); badges.replaceChildren();
     for (const status of found) badges.append(chip(statuses[status], status));
-    if (family.max_connected || family.max_bot_connected) badges.append(chip("MAX подключён", "max"));
+    if (family.max_connected || family.max_bot_connected) { const max = chip("MAX", "max"); max.title = "Родитель подключён к MAX"; badges.append(max); }
     if (family.needs_review) badges.append(chip("Нужна проверка в CRM", "unlinked"));
     const contact = $("#chat-details-contact"); contact.replaceChildren();
     for (const phone of family.phones || []) contact.append(contactRow("phone", phone));
@@ -757,8 +761,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const chosen = student.id === familySelected, status = (student.cards || [])[0]?.status;
       const kid = button("", "family-kid", () => { if (familySelected === student.id) return; familySelected = student.id; renderFamily(); refreshSelected(false).catch(error => fail(error)); });
       kid.setAttribute("aria-pressed", String(chosen));
-      const ava = node("span", initialsOf(student.name), `ava ${statuses[status] ? status : "me"}`); ava.setAttribute("aria-hidden", "true");
-      kid.append(ava, el("span", "family-kid-text", node("strong", student.name), node("small", familyAge(student.dob))));
+      kid.title = `${student.name}${statuses[status] ? ` · ${statuses[status]}` : ""}`;
+      kid.append(firstName(student.name), node("small", familyAge(student.dob)));
       list.append(kid);
     }
     const student = students.find(person => person.id === familySelected), cards = student.cards || [];
@@ -766,11 +770,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const born = familyDate(student.dob);
     detail.append(el("div", "family-kid-head",
       el("div", "family-kid-name", node("h3", student.name), node("p", [familyAge(student.dob), born && `род. ${born}`].filter(Boolean).join(" · "), "family-sub")),
-      familyLink(cards[0]?.url, `Открыть ${student.name} в АльфаCRM`, "Открыть в CRM")));
+      familyLink(cards[0]?.url, `Открыть ${student.name} в АльфаCRM`, "В CRM")));
 
     const notes = el("div", "family-notes");
     const upcoming = groups.filter(group => group.next_lesson?.date).sort((a, b) => `${a.next_lesson.date}${a.next_lesson.time || ""}`.localeCompare(`${b.next_lesson.date}${b.next_lesson.time || ""}`))[0];
-    if (upcoming) notes.append(note("cal", `Ближайшее занятие · ${dayLabel(upcoming.next_lesson.date, upcoming.next_lesson.time)}`, upcoming.name, "next"));
+    if (upcoming) notes.append(note("cal", `Ближайшее: ${dayLabel(upcoming.next_lesson.date, upcoming.next_lesson.time)}`, upcoming.name, "next"));
     for (const item of subs) {
       if (!item.end) continue;
       const left = daysBetween(today, item.end);
@@ -791,7 +795,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       for (const item of subs) {
         const left = item.end ? daysBetween(today, item.end) : null, soon = left !== null && left <= 7;
         const until = item.end ? `до ${familyDate(item.end)}` : "срок не указан";
-        rows.append(el("div", `family-item${soon ? " soon" : ""}`, glyph("wallet"),
+        rows.append(el("div", `family-item${soon ? " soon" : ""}`,
           el("div", "family-item-main", node("strong", subName(item)), node("small", `${item.branch_name} · ${until}`)),
           node("span", item.balance === null || item.balance === undefined ? "—" : familyMoney(item.balance), "family-item-value")));
       }
@@ -819,7 +823,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const rows = el("div", "family-list");
       for (const card of cards) {
         const lessons = known(card.paid_lesson_count) ? ` · оплачено ${card.paid_lesson_count} ${plural(Number(card.paid_lesson_count), "занятие", "занятия", "занятий")}` : "";
-        rows.append(el("div", "family-item", glyph("building"),
+        rows.append(el("div", "family-item",
           el("div", "family-item-main", node("strong", card.branch_name || "Филиал не указан"), node("small", `${statuses[card.status] || "Статус не указан"}${lessons}`)),
           familyLink(card.url, `Открыть карточку в филиале ${card.branch_name} в АльфаCRM`)));
       }
