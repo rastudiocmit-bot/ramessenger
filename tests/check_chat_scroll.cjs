@@ -16,7 +16,10 @@ const root = path.join(__dirname, '../app/backend/src/center_messenger/web');
       .replace(/<link\b[^>]*>/g, '');
     await page.setContent(html);
     await page.addStyleTag({ content: fs.readFileSync(root + '/app.css', 'utf8') });
-    await page.addStyleTag({ content: '#loading,.sidebar,.topbar{display:none!important} #cabinet{display:block!important} .content{padding:15px!important} .chat-layout{height:760px!important;min-height:0!important} [hidden]{display:none!important}' });
+    await page.addStyleTag({ content: fs.readFileSync(root + '/cabinet.css', 'utf8') });
+    await page.addScriptTag({ content: fs.readFileSync(root + '/appearance.js', 'utf8') });
+    await page.addStyleTag({ content: '#loading,#navrail,#tabbar{display:none!important} #cabinet{display:block!important} .app{padding:15px!important} .live-chat-layout{height:760px!important;min-height:0!important} [hidden]{display:none!important}' });
+    await page.addScriptTag({ content: fs.readFileSync(root + '/icons.js', 'utf8') });
     await page.addScriptTag({ content: fs.readFileSync(root + '/chat.js', 'utf8') });
     await page.evaluate(async () => {
       const nativeTimeout = window.setTimeout.bind(window), timers = new Map(); let timer = 0, seq = 100;
@@ -37,8 +40,7 @@ const root = path.join(__dirname, '../app/backend/src/center_messenger/web');
         return el ? { id: el.dataset.id, top: el.getBoundingClientRect().top, scrollTop: s.scrollTop } : null; };
       const api = async url => {
         const parsed = new URL(url, 'https://example.test'); calls.push(parsed.toString());
-        if (parsed.pathname.endsWith('/integrations/max')) return { vault_ready: true, channels: [{ id: 'native', name: 'CRM', kind: 'alfa_max_browser' }] };
-        if (parsed.pathname.endsWith('/integrations/alfa')) return { branches: [] };
+        if (parsed.pathname.endsWith('/chats/context')) return { channels: [{ id: 'native', name: 'CRM', kind: 'alfa_max_browser' }], branches: [] };
         if (parsed.pathname.endsWith('/chats')) return { conversations: [conv], total: 1, unread: 1, page: 0, has_more: false };
         if (!parsed.pathname.endsWith('/messages')) throw new Error(url);
         const isDelta = parsed.searchParams.has('after_seq'), before = parsed.searchParams.get('before_id');
@@ -55,7 +57,8 @@ const root = path.join(__dirname, '../app/backend/src/center_messenger/web');
         if (value !== undefined) e.textContent = value; if (className) e.className = className; return e; },
         show: (e, visible = true) => { e.hidden = !visible; }, notice: (v, e) => { if (e) e.textContent = v; },
         date: v => v, toast: () => {}, confirm: async () => true, renderPane: async () => {} });
-      $('#cabinet').hidden = false; $('#pane-messages').hidden = false;
+      $('#cabinet').hidden = false; $('#app').dataset.tab = 'chats';
+      document.querySelectorAll('[data-page]').forEach(e => { e.hidden = e.id !== 'pane-messages'; });
       window.scrollTest = { app, rows, calls, snapshot, identifier,
         insertDelta: () => { const fresh = make(201); rows.push(fresh); deltas.push(rows[0], fresh); },
         poll: async () => { const entry = [...timers.entries()].find(([, t]) => t.delay === 2500);

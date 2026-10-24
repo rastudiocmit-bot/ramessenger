@@ -258,7 +258,8 @@ class MessageSyncTests(unittest.TestCase):
             with self.db.begin_nested():
                 yield self.db
 
-        self.accounts = SimpleNamespace(transaction=transaction, throttle=Mock())
+        self.membership = {"role": "owner", "sections": ["overview", "messages", "security"], "timezone": "Europe/Moscow"}
+        self.accounts = SimpleNamespace(transaction=transaction, throttle=Mock(), _workspace=lambda *args, **kwargs: self.membership)
         self.service = AlfaMaxConnections(SimpleNamespace(accounts=self.accounts, vault=Mock(), _transaction=transaction), browser=Mock())
         maximum = SimpleNamespace(chat_transaction=transaction, accounts=self.accounts)
         self.reader = ChatReader(SimpleNamespace(max=maximum, alfa_max=self.service))
@@ -676,6 +677,103 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(report["messages"], 1)
         self.assertEqual(report["conversations"], 1)
         self.assertEqual(report["oldest_at"], self.at)
+
+    def test_chat_context_is_safe_metadata_for_message_members(self):
+        self.membership["role"] = "operator"
+        self.membership["sections"] = ["messages"]
+        result = self.reader.context(None, self.workspace)
+        self.assertEqual(len(result["channels"]), 1)
+        self.assertEqual(result["channels"][0]["kind"], "alfa_max_browser")
+        self.assertEqual(len(result["branches"]), 2)
+        self.assertTrue(result["can_write"])
+        self.assertTrue(result["channels"][0]["enabled"])
+        self.assertFalse(result["send_attachments"])
+        self.assertNotIn("ciphertext", json.dumps(result))
+        self.assertNotIn("test.s20.online", json.dumps(result))
+
+    def test_observer_cannot_send_handle_or_relink_and_history_is_read_only(self):
+        from center_messenger.auth_security import AuthError
+        from center_messenger.chat_api import SendInput, LinkInput
+        self.project(self.row())
+        self.membership["role"] = "observer"
+        conversation = self.conversation()["id"]
+        actor = SimpleNamespace(user_id=self.user)
+        self.assertFalse(self.reader.context(actor, self.workspace)["can_write"])
+        self.assertFalse(self.reader.history(actor, self.workspace, conversation)["conversation"]["can_send"])
+        self.assertFalse(self.reader.listing(actor, self.workspace)["conversations"][0]["can_send"])
+        operations = [lambda: self.reader.send(actor, self.workspace, conversation, SendInput(request_id=uuid4(), text="Reply", seen_inbound_seq=1)),
+                      lambda: self.reader.handle(actor, self.workspace, conversation),
+                      lambda: self.reader.link(actor, self.workspace, conversation, LinkInput(contact_id=None))]
+        for operation in operations:
+            with self.assertRaises(AuthError) as error:
+                operation()
+            self.assertEqual(error.exception.status, 403)
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_read_only_client_projection_is_limited_to_contacts_with_accessible_chats(self):
+        from center_messenger.auth_security import AuthError
+        self.project(self.row())
+        other = uuid4()
+        self.add_customer(other, 1, 88)
+        self.snapshot.update(today=self.at.date(), origin="https://test.s20.online", version=1, finished_at=self.at)
+        self.membership["role"] = "observer"
+        self.membership["sections"] = ["messages", "overview"]
+        @contextmanager
+        def denied(*args, **kwargs):
+            raise AuthError(403, "Admin only")
+            yield
+        @contextmanager
+        def chat_read(*args, **kwargs):
+            with self.db.begin_nested():
+                yield self.db
+        directory = DirectoryReader(SimpleNamespace(_transaction=denied, chat_transaction=chat_read, accounts=self.accounts))
+        with self.assertRaises(AuthError):
+            directory.listing(None, self.workspace)
+        result = directory.listing(None, self.workspace, chat_only=True)
+        self.assertEqual([row["id"] for row in result["contacts"]], [str(self.contact)])
+        detail = directory.detail(None, self.workspace, self.contact, conversation=self.conversation()["id"])
+        self.assertEqual(detail["id"], str(self.contact))
+        with self.assertRaises(AuthError) as wrong:
+            directory.detail(None, self.workspace, other, conversation=self.conversation()["id"])
+        self.assertEqual(wrong.exception.status, 404)
+        self.membership["role"] = "operator"
+        with self.assertRaises(AuthError) as operator:
+            directory.listing(None, self.workspace, chat_only=True)
+        self.assertEqual(operator.exception.status, 403)
+
+    def test_summary_counts_visible_history_and_first_confirmed_human_response(self):
+        from center_messenger.cabinet_summary import summary
+        self.project(self.row("10"), branch=1)
+        self.project(self.row("11", branch=2), branch=2)
+        self.project(self.row("12", direction="out", actor="automation", at=self.at+timedelta(minutes=1)),
+                     self.row("13", direction="out", actor="human", at=self.at+timedelta(minutes=3)),
+                     self.row("14", direction="out", actor="human", at=self.at+timedelta(minutes=5)),
+                     self.row("15", at=self.at-timedelta(days=8), body="Previous week"))
+        report = summary(self.reader.max, None, self.workspace, now=self.at+timedelta(hours=12))
+        self.assertEqual(report["incoming"], 1)
+        self.assertEqual(report["previous_incoming"], 1)
+        self.assertEqual(sum(day["incoming"] for day in report["days"]), 1)
+        self.assertEqual(sum(branch["incoming"] for branch in report["branches"]), 1)
+        self.assertEqual(sum(operator["answered"] for operator in report["operators"]), 2)
+        self.assertEqual(report["average_response_seconds"], 180)
+        self.assertEqual(report["waiting"], 0)
+        self.assertEqual(report["new_leads"], 0)
+
+    def test_summary_uses_workspace_calendar_days_and_rejects_operator(self):
+        from center_messenger.cabinet_summary import summary
+        from center_messenger.auth_security import AuthError
+        boundary = datetime(2026, 10, 17, 21, tzinfo=UTC)
+        self.project(self.row("1", at=boundary-timedelta(seconds=1)), self.row("2", at=boundary, body="New day"))
+        report = summary(self.reader.max, None, self.workspace, now=self.at+timedelta(hours=12))
+        self.assertEqual(report["incoming"], 1)
+        self.assertEqual(report["previous_incoming"], 1)
+        self.assertEqual(report["days"][0]["date"], "2026-10-18")
+        self.assertEqual(report["days"][0]["incoming"], 1)
+        self.assertIsNone(report["average_response_seconds"])
+        self.membership["role"] = "operator"
+        with self.assertRaises(AuthError) as error:
+            summary(self.reader.max, None, self.workspace, now=self.at)
+        self.assertEqual(error.exception.status, 403)
 
     def test_settings_change_during_browser_read_cannot_publish_stale_history(self):
         def changed_settings(origin, session, requests, **kwargs):

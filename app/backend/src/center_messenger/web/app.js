@@ -1,9 +1,8 @@
 "use strict";
 (() => {
   const $ = (selector, root = document) => root.querySelector(selector);
-  const state = { user: null, csrf: null, workspaces: [], workspace: null, pane: new URLSearchParams(location.search).get("view") === "messages" ? "messages" : "overview", invite: null, alfa: null, alfaBusy: false, alfaMax: null, alfaMaxBusy: false, epoch: 0 };
+  const state = { user: null, csrf: null, workspaces: [], workspace: null, pane: new URLSearchParams(location.search).get("view") === "messages" ? "messages" : "summary", chatView: "all", invite: null, alfa: null, alfaBusy: false, alfaMax: null, alfaMaxBusy: false, epoch: 0 };
   const roles = { owner: "Владелец", admin: "Администратор", branch_manager: "Руководитель филиала", operator: "Оператор", observer: "Наблюдатель" };
-  const pageHeadings = new Map([...document.querySelectorAll(".pane")].map(pane => [pane.id.replace(/^pane-/, ""), $(".page-heading", pane)]).filter(([, heading]) => heading));
   let toastTimer;
 
   function node(tag, text, className) {
@@ -43,8 +42,7 @@
   }
   function clearPrivateViews() {
     $("#members-list").replaceChildren(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
-    const activeHeading = $("#topbar-context .page-heading");
-    if (activeHeading) $("#page-heading-storage").append(activeHeading);
+    cabinet.leave();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
     ["#user-name", "#user-email", "#user-avatar", "#workspace-role", "#workspace-timezone"].forEach(selector => { $(selector).textContent = ""; });
     $("#invite-url").value = ""; show($("#toast"), false);
@@ -120,6 +118,7 @@
       const option = node("option", item.name); option.value = item.id; select.append(option);
     });
     select.disabled = state.workspaces.length < 2;
+    show(select, state.workspaces.length > 1);
     if (state.workspace) select.value = state.workspace.id;
     else select.append(node("option", "Нет доступных центров"));
     await renderPane(state.pane);
@@ -131,64 +130,42 @@
     if (!workspace) return none;
     if (["owner", "admin"].includes(workspace.role)) return { overview: true, team: true, messages: true, clients: true, connections: true, security: true };
     const granted = new Set(workspace.sections && workspace.sections.length ? workspace.sections : ["overview", "security"]);
-    return { overview: granted.has("overview"), team: false, messages: granted.has("messages"), clients: false, connections: false, security: granted.has("security") };
+    return { overview: granted.has("overview"), team: false, messages: granted.has("messages"), clients: ["branch_manager", "observer"].includes(workspace.role) && granted.has("messages"), connections: false, security: granted.has("security") };
   }
-  function messagesOnly() {
-    const workspace = state.workspace;
-    return Boolean(workspace && !["owner", "admin"].includes(workspace.role) && Array.isArray(workspace.sections) && workspace.sections.length === 1 && workspace.sections[0] === "messages");
-  }
-  function renderChatUserCard() {
-    const card = node("div", undefined, "chat-user-card");
-    card.append(node("span", initials(state.user.display_name), "avatar"));
-    const text = node("div", undefined, "chat-user-text");
-    text.append(node("strong", state.user.display_name), node("small", state.user.email));
-    const out = node("button", "Выйти", "secondary compact");
-    out.type = "button"; out.addEventListener("click", () => $("#logout").click());
-    card.append(text, out);
-    return card;
-  }
+  const cabinet = window.CenterCabinet({ $, state, api, node, show, roles, renderPane });
   async function renderPane(pane) {
     state.pane = pane;
     const sections = grantedSections();
-    if (!sections[state.pane]) state.pane = sections.messages ? "messages" : "overview";
+    sections.profile = true; sections.queue = sections.messages;
+    sections.summary = sections.overview && sections.messages && state.workspace?.role !== "operator";
+    if (!sections[state.pane]) state.pane = ["summary", "messages", "clients", "overview", "security", "profile"].find(key => sections[key]);
     if (state.pane !== "connections") alfaMaxProgress.reset();
-    show($("#overview-tab"), sections.overview); show($("#team-tab"), sections.team); show($("#messages-tab"), sections.messages); show($("#clients-tab"), sections.clients); show($("#connections-tab"), sections.connections); show($("#security-tab"), sections.security);
+
     if (state.pane !== "clients") directory.leave();
     if (state.pane !== "messages") chat.leave();
-    const only = messagesOnly() || (state.pane === "messages" && matchMedia("(max-width: 760px)").matches);
-    $("#cabinet").classList.toggle("chat-mode", state.pane === "messages");
-    $("#cabinet").classList.toggle("messages-only", only);
-    show($("#no-workspaces"), !state.workspace && state.pane !== "security");
-    document.querySelectorAll(".pane").forEach(element => show(element, (Boolean(state.workspace) || state.pane === "security") && element.id === `pane-${state.pane}`));
-    const heading = (state.workspace || state.pane === "security") ? pageHeadings.get(state.pane) : null;
-    const topbarContext = $("#topbar-context"), activeHeading = $(".page-heading", topbarContext);
-    const chatHeader = $("#chat-list-header");
-    if (activeHeading && activeHeading !== heading) $("#page-heading-storage").append(activeHeading);
-    if (only) {
-      topbarContext.replaceChildren();
-      chatHeader.replaceChildren(...(heading ? [heading] : []), renderChatUserCard());
-      show(chatHeader);
-    } else {
-      show(chatHeader, false);
-      topbarContext.replaceChildren(...(heading ? [heading] : []));
-    }
-    document.querySelectorAll("[data-pane]").forEach(button => button.classList.toggle("active", button.dataset.pane === state.pane));
+    show($("#no-workspaces"), !state.workspace && state.pane !== "security" && state.pane !== "profile");
+    document.querySelectorAll("[data-page]").forEach(element => show(element, (Boolean(state.workspace) || ["security", "profile"].includes(state.pane)) && element.id === `pane-${state.pane}`));
+    cabinet.update(sections);
     chat.watch();
     if (!state.workspace) { if (state.pane === "security") await loadSessions(); return; }
     const manage = Boolean(state.workspace && ["owner", "admin"].includes(state.workspace.role));
     $("#workspace-role").textContent = roles[state.workspace.role] || "Сотрудник";
     $("#workspace-timezone").textContent = state.workspace.timezone === "Europe/Moscow" ? "Москва · UTC+3" : state.workspace.timezone;
+    if ($("#workspace-timezone-input")) $("#workspace-timezone-input").value = $("#workspace-timezone").textContent;
     const form = $("#workspace-form");
     form.elements.name.value = state.workspace.name;
     form.elements.name.disabled = !manage;
     show($("button[type=submit]", form), Boolean(manage));
     show($("#workspace-readonly"), !manage);
     if (state.pane === "connections") await Promise.allSettled([loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
-    if (state.pane === "messages") await chat.enter();
+    if (state.pane === "messages") { chat.setView(state.chatView || "all", false); await chat.enter(); }
+    if (state.pane === "summary") await cabinet.summary();
     if (state.pane === "clients") await directory.enter();
+    if (["profile", "overview"].includes(state.pane) && sections.messages) await cabinet.metadata();
     if (state.pane === "team") await loadMembers();
     if (state.pane === "security") await loadSessions();
   }
+  document.addEventListener("cm:chat-view", () => { const sections = grantedSections(); sections.profile = true; sections.queue = sections.messages; sections.summary = sections.overview && sections.messages && state.workspace?.role !== "operator"; cabinet.update(sections); });
   const sectionMeta = {
     overview: { icon: "◈", title: "Организация", hint: "Название центра и общая информация" },
     messages: { icon: "▤", title: "Сообщения", hint: "Переписка с клиентами в MAX" },
@@ -229,46 +206,46 @@
     const payload = await api(`/workspaces/${workspace.id}/members`);
     if (workspace.id !== state.workspace?.id) return;
     const list = $("#members-list"); list.replaceChildren();
+    if ($("#team-count")) $("#team-count").textContent = `${payload.members.length} человек в центре`;
     payload.members.forEach(member => {
-      const row = node("div", undefined, "member-row");
-      const info = node("div", undefined, "member-info");
-      const details = node("div"); details.append(node("strong", member.display_name), node("small", member.email));
-      info.append(node("span", initials(member.display_name), "avatar"), details);
-      row.append(info);
-      const rolesWrap = node("div", undefined, "member-roles");
-      ["owner", "admin", "branch_manager", "operator", "observer"].forEach(key => {
-        const chip = node("button", roles[key], `role-chip${member.role === key ? " active" : ""}`);
-        chip.type = "button";
-        chip.disabled = member.role === "owner" || key === "owner" || member.role === key;
-        if (!chip.disabled) chip.addEventListener("click", () => setMemberRole(member, key).catch(error => { if (error.name !== "AbortError") toast(error.message, true); }));
-        rolesWrap.append(chip);
-      });
-      row.append(rolesWrap);
-      const actions = node("div", undefined, "member-actions");
-      if (!["owner", "admin"].includes(member.role)) {
-        const permissions = node("button", "Права", "secondary compact"); permissions.type = "button";
-        permissions.addEventListener("click", () => openMemberSections(member));
-        actions.append(permissions);
-      }
-      if (member.role !== "owner" && (workspace.role === "owner" || member.role !== "admin")) {
-        const button = node("button", "×", "icon-button remove-member"); button.type = "button";
-        button.setAttribute("aria-label", `Отозвать доступ: ${member.display_name}`);
-        button.addEventListener("click", async () => {
-          if (!await confirm("Отозвать доступ?", `${member.display_name} потеряет доступ к этому центру.`, "Отозвать доступ")) return;
-          await busy(row, async () => { await api(`/workspaces/${workspace.id}/members/${member.user_id}/remove`, { method: "POST" }); toast("Доступ сотрудника отозван."); await loadMembers(); });
-        });
-        actions.append(button);
-      }
-      if (actions.children.length) row.append(actions);
+      const row = node("div", undefined, "mrow member-row");
+      const avatar = node("span", initials(member.display_name), "ava me");
+      const info = node("span", undefined, "mrow-main"); info.append(node("strong", member.display_name), node("small", member.email));
+      const pill = node("span", roles[member.role], `rolepill ${member.role === "branch_manager" ? "branch" : member.role}`);
+      row.append(avatar, info, pill);
+      const canManage = member.user_id !== state.user.id && member.role !== "owner" && (workspace.role === "owner" || member.role !== "admin");
+      if (canManage) {
+        const gear = node("button", undefined, "iconbtn plain"); gear.type = "button"; gear.setAttribute("aria-label", `Действия с сотрудником: ${member.display_name}`); gear.append(window.CenterIcon("cog"));
+        gear.addEventListener("click", () => openMemberOptions(member)); row.append(gear);
+      } else row.append(node("span", undefined, "member-action-space"));
       list.append(row);
     });
     show($("#team-empty"), payload.members.length === 0);
+  }
+  function openMemberOptions(member) {
+    const workspace = state.workspace, dialog = $("#member-options-dialog"), body = $("#member-options-body");
+    $("#member-options-name").textContent = member.display_name; body.replaceChildren();
+    const label = node("label", "Роль сотрудника", "fld"), select = node("select"); select.setAttribute("aria-label", "Роль сотрудника");
+    const allowed = workspace.role === "owner" ? ["admin", "branch_manager", "operator", "observer"] : ["branch_manager", "operator", "observer"];
+    for (const role of allowed) select.append(new Option(roles[role], role)); select.value = member.role; label.append(select);
+    const save = node("button", "Сохранить роль", "btn"); save.type = "button";
+    save.addEventListener("click", () => busy(dialog, async () => { await setMemberRole(member, select.value); dialog.close(); }));
+    body.append(label, save);
+    if (!["owner", "admin"].includes(member.role)) {
+      const sections = node("button", "Доступные разделы", "btn sec"); sections.type = "button";
+      sections.addEventListener("click", () => { dialog.close(); openMemberSections(member); }); body.append(sections);
+    }
+    const remove = node("button", "Отозвать доступ", "btn sec danger-text"); remove.type = "button";
+    remove.addEventListener("click", async () => {
+      if (!await confirm("Отозвать доступ?", `${member.display_name} потеряет доступ к этому центру.`, "Отозвать доступ")) return;
+      await busy(dialog, async () => { await api(`/workspaces/${workspace.id}/members/${member.user_id}/remove`, { method: "POST" }); dialog.close(); toast("Доступ сотрудника отозван."); await loadMembers(); });
+    }); body.append(remove); dialog.showModal();
   }
   async function loadSessions() {
     const payload = await api("/auth/sessions");
     const list = $("#sessions-list"); list.replaceChildren();
     payload.sessions.forEach(session => {
-      const row = node("div", undefined, "session-row"), details = node("div");
+      const row = node("div", undefined, "session-row split"), details = node("div");
       details.append(node("strong", deviceLabel(session.device_label)), node("small", `Активность: ${date(session.last_seen_at)}`));
       if (session.current) details.append(node("span", "Текущая сессия", "small-tag"));
       row.append(details);
@@ -347,7 +324,12 @@
     input.type = reveal ? "text" : "password"; button.textContent = reveal ? "Скрыть" : "Показать";
     button.setAttribute("aria-label", reveal ? "Скрыть пароль" : "Показать пароль"); button.setAttribute("aria-pressed", String(reveal));
   }));
-  document.querySelectorAll("[data-pane]").forEach(button => button.addEventListener("click", () => renderPane(button.dataset.pane).catch(error => { if (error.name !== "AbortError") toast(error.message, true); })));
+  document.addEventListener("click", event => {
+    const button = event.target.closest("[data-pane]");
+    if (!button || button.disabled) return;
+    state.chatView = button.dataset.pane === "queue" ? "unread" : "all";
+    cabinet.navigate(button.dataset.pane).catch(error => { if (error.name !== "AbortError") toast(error.message, true); });
+  });
   $("#workspace-select").addEventListener("change", async event => {
     state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
     try { await renderPane(state.pane); } catch (error) { if (error.name !== "AbortError") toast(error.message, true); }
