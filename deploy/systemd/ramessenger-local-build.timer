@@ -1,0 +1,16 @@
+[Unit]
+Description=Deploy new commits from GitHub main to Center Messenger automatically
+
+# Runs the existing guarded build (ramessenger-local-build.service ->
+# local_build_vps.py) every few minutes. When main has not changed the run only
+# compares SHAs and exits; a new commit is cloned, built, backed up and
+# promoted with an automatic API rollback on failure.
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30
+Persistent=false
+Unit=ramessenger-local-build.service
+
+[Install]
+WantedBy=timers.target

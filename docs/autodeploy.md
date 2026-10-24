@@ -5,10 +5,80 @@
 **Сервер:** `83.222.25.109`  
 **Домен:** `messenger.rastudio.org`
 
-## Текущий статус
+## Автовыкладка из `main`
+
+Выкладка выполняется на самом сервере: таймер
+`deploy/systemd/ramessenger-local-build.timer` каждые 5 минут запускает уже
+используемую ручную сборку `ramessenger-local-build.service`
+(`/opt/center-messenger-github/local_build_vps.py`). Входящие порты, SSH-ключи
+в GitHub и runner'ы не нужны: сервер сам читает `main`.
+
+Каждый запуск:
+
+1. Узнаёт SHA последнего коммита `main`. Если этот коммит уже установлен —
+   выходит, ничего не меняя.
+2. Клонирует ровно этот коммит, проверяет синтаксис Python, тест отката,
+   неизменность `compose.yaml` и ревизию миграций `0012_member_sections`.
+3. Собирает образ `center-messenger:local-<sha>`, проверяет здоровье БД и API.
+4. Делает и проверяет резервную копию PostgreSQL в
+   `/opt/center-messenger-github/rollback/`.
+5. Пересоздаёт **только** контейнер API, проверяет локальный и публичный
+   `/health/ready`, при ошибке возвращает прежний образ.
+
+Коммит, установка которого не удалась, повторно не ставится
+(`last_failed_sha`); следующий коммит в `main` будет пробоваться заново.
+Изменения схемы БД или `compose.yaml` автоматически **не** выкладываются —
+сборка останавливается и ждёт ручной проверки.
+
+**Важно:** после включения каждый push в `main` попадает на рабочий сайт
+в течение ~5–10 минут (плюс время сборки). Изменения, которые не готовы
+к выкладке, держите в отдельных ветках.
+
+### Включение (один раз, на сервере под root)
+
+```sh
+# 1. Проверить, что ручная сборка разрешена и работает
+cat /opt/center-messenger-github/local-build-state.json      # должно быть "enabled": true
+systemctl cat ramessenger-local-build.service
+python3 /opt/center-messenger-github/local_build_vps.py --preview
+
+# 2. Установить и запустить таймер
+cat > /etc/systemd/system/ramessenger-local-build.timer <<'EOF'
+[Unit]
+Description=Deploy new commits from GitHub main to Center Messenger automatically
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30
+Persistent=false
+Unit=ramessenger-local-build.service
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now ramessenger-local-build.timer
+systemctl list-timers ramessenger-local-build.timer --no-pager
+```
+
+Не включайте одновременно `ramessenger-github-deploy.timer` или старый
+`center-messenger-deploy.timer`: сборка откажется работать при их активности.
+
+### Наблюдение и отключение
+
+```sh
+journalctl -u ramessenger-local-build.service -n 50 --no-pager   # LOCAL DEPLOYED / UNCHANGED / BLOCKED
+cat /opt/center-messenger-github/local-build-state.json            # last_deployed_sha, last_failed_sha
+systemctl disable --now ramessenger-local-build.timer              # выключить автовыкладку
+```
+
+Ручная выкладка по-прежнему: `systemctl start ramessenger-local-build.service`.
+
+## Предыстория
 
 Репозиторий выбран и GitHub Actions проверяет код в `.github/workflows/verify.yml`.
-**Автодеплой на VPS ещё не включён.** Старый контроллер настроен на другой источник
+Старый контроллер настроен на другой источник
 (`устаревший репозиторий (отключён)`, ветка `production`); его нельзя
 переиспользовать простой заменой текста. Файл `.gitverse/workflows/ci.yml`
 предназначен для GitVerse, а не GitHub. Никаких новых входящих портов,
