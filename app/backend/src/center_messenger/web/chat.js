@@ -219,13 +219,37 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     return new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, day: "2-digit", month: "2-digit", ...(at.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }) }).format(at);
   }
   function wireSwipe(row, item) {
-    let start = null, distance = 0;
+    let start = null, distance = 0, swiping = false, suppressClick = false;
     const checkpoint = item.seen_checkpoint;
-    row.addEventListener("pointerdown", event => { if (event.pointerType !== "mouse" && item.unread && state.workspace?.role !== "observer") { start = event.clientX; distance = 0; } });
-    row.addEventListener("pointermove", event => { if (start === null) return; distance = Math.min(0, event.clientX - start); row.style.transform = `translateX(${Math.max(-120, distance)}px)`; });
-    const end = async () => {
-      if (start === null) return; start = null; row.style.transform = "";
-      if (distance > -70 || actionBusy) return;
+    const reset = () => {
+      const pointerId = start?.id;
+      start = null; distance = 0; swiping = false; row.style.transform = "";
+      row.parentElement?.classList.remove("is-swiping");
+      if (pointerId !== undefined && row.hasPointerCapture?.(pointerId)) row.releasePointerCapture(pointerId);
+    };
+    row.addEventListener("pointerdown", event => {
+      if (start || event.isPrimary === false || event.pointerType === "mouse" || !item.unread || state.workspace?.role === "observer") return;
+      suppressClick = false;
+      start = { x: event.clientX, y: event.clientY, id: event.pointerId };
+    });
+    row.addEventListener("pointermove", event => {
+      if (!start || event.pointerId !== start.id) return;
+      const x = event.clientX - start.x, y = event.clientY - start.y;
+      if (!swiping) {
+        // Commit to vertical scrolling before exposing the handled action.
+        if (Math.abs(y) > 8 && Math.abs(y) >= Math.abs(x)) { reset(); return; }
+        if (x >= -8 || Math.abs(x) <= Math.abs(y)) return;
+        swiping = true; suppressClick = true;
+        row.parentElement?.classList.add("is-swiping");
+        if (event.pointerId !== undefined) row.setPointerCapture?.(event.pointerId);
+      }
+      distance = Math.min(0, x);
+      row.style.transform = `translateX(${Math.max(-120, distance)}px)`;
+    });
+    const end = async event => {
+      if (!start || event.pointerId !== start.id) return;
+      const handled = swiping && distance <= -70; reset();
+      if (!handled || actionBusy) return;
       const epoch = state.epoch, gen = generation;
       actionBusy = true;
       try {
@@ -238,7 +262,15 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       } catch (error) { if (valid(epoch, gen)) fail(error); }
       finally { if (valid(epoch, gen)) { actionBusy = false; renderHeader(); } }
     };
-    row.addEventListener("pointerup", end); row.addEventListener("pointercancel", () => { start = null; row.style.transform = ""; });
+    row.addEventListener("pointerup", end);
+    row.addEventListener("pointercancel", event => { if (start && event.pointerId === start.id) { suppressClick = false; reset(); } });
+    row.addEventListener("lostpointercapture", event => {
+      // A button's implicit touch capture is transferred to this row mid-swipe.
+      if (event.target === row && start && event.pointerId === start.id) reset();
+    });
+    row.addEventListener("click", event => {
+      if (suppressClick) { suppressClick = false; event.preventDefault(); event.stopImmediatePropagation(); }
+    }, true);
   }
   function time(value) {
     const d = new Date(value); return Number.isNaN(d.getTime()) ? "" : new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, hour: "2-digit", minute: "2-digit" }).format(d);

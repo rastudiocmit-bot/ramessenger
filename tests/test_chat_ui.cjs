@@ -530,10 +530,62 @@ test("swiping a list row posts its displayed checkpoint and preserves loaded pag
   },{conversations:[{...conversation(1),seen_checkpoint:seen}]});
   await ui.app.enter();
   const row=ui.$('.chat-row');
-  const dispatch=(type,x)=>{const e=new ui.window.Event(type);Object.assign(e,{pointerType:'touch',clientX:x});row.dispatchEvent(e);};
+  const dispatch=(type,x)=>{const e=new ui.window.Event(type);Object.assign(e,{pointerType:'touch',clientX:x,clientY:100});row.dispatchEvent(e);};
   dispatch('pointerdown',200);dispatch('pointermove',80);dispatch('pointerup',80);await flush();
   assert.equal(body.seen_checkpoint.change_seq,100);
   assert.equal(body.seen_checkpoint.conversation_id,identifier(1));
+});
+
+test("vertical and diagonal scrolling cannot expose or submit the handled action", async t=>{
+  const ui=setup(t);
+  await ui.app.enter();
+  const row=ui.$('.chat-row'),wrap=row.parentElement;
+  const dispatch=(type,x,y)=>{const e=new ui.window.Event(type);Object.assign(e,{pointerType:'touch',pointerId:1,clientX:x,clientY:y});row.dispatchEvent(e);};
+  dispatch('pointerdown',200,100);
+  dispatch('pointermove',195,120);
+  assert.equal(row.style.transform,'');assert.equal(wrap.classList.contains('is-swiping'),false);
+  // Even without a browser pointercancel, this stays a vertical gesture.
+  dispatch('pointermove',70,260);dispatch('pointerup',70,260);await flush();
+  assert.equal(ui.calls.some(url=>url.pathname.endsWith('/handled')),false);
+});
+
+test("cancelled and short swipes restore the row without marking messages handled", async t=>{
+  const ui=setup(t);
+  await ui.app.enter();
+  const row=ui.$('.chat-row'),wrap=row.parentElement;
+  const dispatch=(type,x,y=100)=>{const e=new ui.window.Event(type);Object.assign(e,{pointerType:'touch',pointerId:1,clientX:x,clientY:y});row.dispatchEvent(e);};
+  dispatch('pointerdown',200);dispatch('pointermove',80);
+  assert.equal(wrap.classList.contains('is-swiping'),true);
+  dispatch('pointercancel',80);dispatch('pointerup',80);await flush();
+  assert.equal(row.style.transform,'');assert.equal(wrap.classList.contains('is-swiping'),false);
+  dispatch('pointerdown',200);dispatch('pointermove',180);dispatch('pointerup',180);await flush();
+  assert.equal(row.style.transform,'');assert.equal(wrap.classList.contains('is-swiping'),false);
+  assert.equal(ui.calls.some(url=>url.pathname.endsWith('/handled')),false);
+});
+
+test("a swipe suppresses the generated click instead of opening the conversation", async t=>{
+  const ui=setup(t);
+  await ui.app.enter();
+  const row=ui.$('.chat-row'),select=row.querySelector('.chat-select');
+  let clicks=0;select.addEventListener('click',()=>{clicks+=1;});
+  const dispatch=(type,x)=>{const e=new ui.window.Event(type);Object.assign(e,{pointerType:'touch',pointerId:1,clientX:x,clientY:100});row.dispatchEvent(e);};
+  dispatch('pointerdown',200);dispatch('pointermove',180);dispatch('pointerup',180);
+  select.click();assert.equal(clicks,0);
+  dispatch('pointerdown',200);dispatch('pointerup',200);
+  select.click();assert.equal(clicks,1);
+});
+
+test("transferring touch capture from the child button keeps a deliberate swipe active", async t=>{
+  let handled=0;
+  const ui=setup(t,(url)=>{if(url.pathname.endsWith('/handled')){handled+=1;return {conversation:{...conversation(1),unread:false,unread_count:0,revision:2}};}});
+  await ui.app.enter();
+  const row=ui.$('.chat-row'),select=row.querySelector('.chat-select');
+  const dispatch=(target,type,x)=>{const e=new ui.window.Event(type,{bubbles:true});Object.assign(e,{pointerType:'touch',pointerId:1,clientX:x,clientY:100});target.dispatchEvent(e);};
+  dispatch(select,'pointerdown',200);dispatch(row,'pointermove',80);
+  dispatch(select,'lostpointercapture',80);
+  assert.equal(row.parentElement.classList.contains('is-swiping'),true);
+  dispatch(row,'pointerup',80);await flush();
+  assert.equal(handled,1);
 });
 
 test("a late history response cannot overwrite a newer list counter at the same revision", async t=>{
