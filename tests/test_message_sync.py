@@ -754,6 +754,50 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(cursor["activity"]["phase"], "waiting")
         self.assertEqual(cursor["activity"]["completed_pages"], len(reports))
 
+    def test_repair_reports_actual_customer_ids_and_positions_before_its_checkpoint_advances(self):
+        self.project(self.row())
+        cursor, events = {}, []
+        repair_batch(self.service, self.db, self.workspace, self.channel, cursor, on_progress=events.append)
+        self.assertEqual(events[0]["operation"], "check_client")
+        self.assertEqual(events[0]["position"], 1)
+        self.assertEqual(events[0]["client"]["name"], "Parent")
+        self.assertEqual(events[0]["client"]["cards"][0]["customer_id"], "7")
+        self.assertEqual(events[-1]["event"]["checked_messages"], 1)
+        self.assertTrue(cursor["client_repair"]["complete"])
+
+    def test_live_projection_exposes_real_client_and_record_before_commit_then_retains_confirmed_results(self):
+        original, reports = self.service._project_page, []
+        def project(*args, **kwargs):
+            callback = kwargs["on_progress"]
+            def report(value):
+                callback(value)
+                if value["operation"] == "save_message":
+                    reports.append(self.service.progress(None, self.workspace, activity_only=True))
+            return original(*args, **(kwargs | {"on_progress": report}))
+        self.service._project_page = project
+        cursor = self.run_worker({}, page_result=lambda req: {"messages": [self.row("777", direction="in" if req[1] == "receive" else "out")], "has_more": False, "total": 1})
+        self.assertTrue(reports)
+        self.assertTrue(all(r["worker"]["live"] for r in reports))
+        self.assertEqual(reports[0]["worker"]["client"]["cards"][0]["customer_id"], "7")
+        self.assertEqual(reports[0]["worker"]["record_id"], "777")
+        self.assertNotIn("messages", reports[0])
+        self.assertTrue(cursor["activity"]["recent"])
+        self.assertTrue(all(e["committed"] for e in cursor["activity"]["recent"]))
+        self.assertFalse(self.service.progress(None, self.workspace, activity_only=True)["worker"]["live"])
+
+    def test_light_monitor_skips_history_counts_and_rejects_a_stale_worker_lease(self):
+        lease = uuid4()
+        self.db.execute(text("INSERT INTO alfa_max_sync_queue(workspace_id,connection_id,lease_owner,lease_until) "
+                             "VALUES (:w,:c,:lease,clock_timestamp()+interval '1 minute')"),
+                        {"w": self.workspace, "c": self.channel, "lease": lease})
+        self.service.monitor.begin(self.workspace, self.channel, lease, {}, {"client": {"name": "Actual"}})
+        with patch.object(self.db, "execute", wraps=self.db.execute) as execute:
+            report = self.service.progress(None, self.workspace, activity_only=True)
+        self.assertTrue(report["worker"]["live"])
+        self.assertFalse(any("count(" in str(c.args[0]).lower() for c in execute.call_args_list))
+        self.db.execute(text("UPDATE alfa_max_sync_queue SET lease_owner=:other WHERE workspace_id=:w"), {"w": self.workspace, "other": uuid4()})
+        self.assertFalse(self.service.progress(None, self.workspace, activity_only=True)["worker"]["live"])
+
     def test_chat_context_is_safe_metadata_for_message_members(self):
         self.membership["role"] = "operator"
         self.membership["sections"] = ["messages"]

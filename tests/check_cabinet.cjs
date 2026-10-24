@@ -10,7 +10,7 @@ const { fixture } = require('./browser_fixture.cjs');
   try {
     const checked = [];
     for (const role of ['owner', 'admin', 'branch_manager', 'operator', 'observer']) {
-      const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }), data = await fixture(context, role), page = await context.newPage();
+      const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, reducedMotion: 'reduce' }), data = await fixture(context, role), page = await context.newPage();
       page.setDefaultTimeout(10000);
       const admin = ['owner', 'admin'].includes(role);
       const save = async name => { if (process.env.CM_APPEARANCE_SCREENSHOT_DIR && role === 'owner') {
@@ -67,7 +67,8 @@ const { fixture } = require('./browser_fixture.cjs');
         await page.locator('#member-options-dialog select').selectOption('branch_manager'); await page.getByRole('button', { name: 'Сохранить роль', exact: true }).click();
         await page.waitForFunction(() => !document.querySelector('#member-options-dialog').open);
         assert.ok(data.mutations.some(c => c.path.endsWith('/members/operator-1/role') && c.body.role === 'branch_manager'));
-        await page.locator('#connections-tab').click(); await page.waitForSelector('#max-channels .mrow'); await save('installed-connections');
+        await page.locator('#connections-tab').click(); await page.locator('#connections-settings-tab').click();
+        await page.waitForSelector('#max-channels .mrow'); await save('installed-connections');
         await page.getByRole('button', { name: 'Настройки бота: MAX-бот' }).click();
         await page.getByRole('button', { name: 'Проверить доступ', exact: true }).click();
         await page.waitForFunction(() => !document.querySelector('#bot-actions-dialog').open);
