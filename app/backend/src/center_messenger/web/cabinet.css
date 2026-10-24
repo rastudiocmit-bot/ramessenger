@@ -870,7 +870,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-block[hidden]{display:none}
 .family-label{margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
   color:var(--faint);display:flex;align-items:center;gap:6px}
-.family-count{font-size:10.5px;letter-spacing:0;padding:0 6px;border-radius:999px;background:var(--sunken);color:var(--muted)}
+.family-count{font-size:10.5px;line-height:16px;letter-spacing:0;padding:0 6px;border-radius:999px;background:var(--sunken);color:var(--muted)}
 .family-count:empty{display:none}
 .family-ic{display:grid;place-items:center;width:16px;height:16px;flex:none;color:var(--faint)}
 .family-ic svg{width:15px;height:15px;display:block}
@@ -1002,6 +1002,10 @@ body:has(#cabinet[hidden]){overflow:auto}
   .family-tool.iconbtn{width:40px;height:40px}
   .family-contact{min-height:36px}
 }
-.family-kids-block:not([hidden]){display:flex;align-items:center;gap:10px}
-.family-kids-block .family-label{margin:0;flex:none}
-.family-kids-block .family-kids{flex:1;min-width:0;margin:0 -14px 0 0;padding:0 14px 0 0}
+/* Every child stays in view: the switcher wraps onto more lines instead of scrolling
+   sideways, where a mouse could not reach the hidden names. */
+.family-kids-block:not([hidden]){display:flex;align-items:flex-start;gap:10px}
+.family-kids-block .family-label{margin:0;flex:none;height:30px}
+.family-kids-block .family-kids{flex:1;min-width:0;flex-wrap:wrap;overflow:visible;margin:0;padding:0}
+.family-kid{max-width:100%;overflow:hidden;text-overflow:ellipsis}
+@media (pointer:coarse){.family-kids-block .family-label{height:36px}}
