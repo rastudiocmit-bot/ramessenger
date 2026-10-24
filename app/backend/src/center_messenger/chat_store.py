@@ -21,73 +21,8 @@ def changed(db, workspace, conversation, message, *, new_inbound=False):
 
 
 def refresh_unread(db, workspace, conversation):
-    """Derive unread state from the latest real inbound and human reply.
-
-    Never use the order in which separate AlfaCRM history pages were imported.
-    When timestamps tie, use AlfaCRM's numeric row key only within the same
-    branch. If the source cannot establish that order, keep the dialog unread.
-    """
-    db.execute(
-        text(
-            """WITH message_state AS (
-              SELECT
-                max(m.occurred_at) FILTER (WHERE m.direction='in'
-                  AND m.actor_type='contact'
-                  AND """ + visible_message() + """) AS last_inbound,
-                max(m.occurred_at) FILTER (
-                  WHERE """ + visible_message() + """
-                ) AS last_message
-              FROM messages m
-              WHERE m.workspace_id=:w AND m.conversation_id=:c
-            ), unread_state AS (
-              SELECT last_inbound,last_message,
-                (last_inbound IS NOT NULL AND EXISTS (
-                  SELECT 1 FROM messages i
-                  WHERE i.workspace_id=:w AND i.conversation_id=:c
-                    AND i.direction='in' AND i.actor_type='contact'
-                    AND i.occurred_at=message_state.last_inbound
-                    AND """ + visible_message("i") + """
-                    AND NOT EXISTS (
-                      SELECT 1 FROM messages r
-                      LEFT JOIN send_commands s ON s.workspace_id=r.workspace_id
-                        AND s.id=r.send_command_id
-                      WHERE r.workspace_id=i.workspace_id
-                        AND r.conversation_id=i.conversation_id
-                        AND r.direction='out' AND r.actor_type='human'
-                        AND """ + visible_message("r") + """
-                        AND coalesce(r.payload->>'failed','false')<>'true'
-                        AND (r.send_command_id IS NULL
-                          OR s.state IN ('accepted','delivered','read'))
-                        AND (
-                          r.occurred_at>i.occurred_at
-                          OR (r.occurred_at=i.occurred_at
-                            AND i.payload->>'branch_id' IS NOT NULL
-                            AND i.payload->>'branch_id'=r.payload->>'branch_id'
-                            AND CASE
-                              WHEN r.payload->>'crm_order' ~ '^[0-9]{1,19}$'
-                                AND i.payload->>'crm_order' ~ '^[0-9]{1,19}$'
-                              THEN (r.payload->>'crm_order')::numeric
-                                > (i.payload->>'crm_order')::numeric
-                              ELSE false
-                            END)
-                        )
-                    )
-                )) AS needs_reply
-              FROM message_state
-            )
-            UPDATE conversations c
-            SET last_inbound_at=unread_state.last_inbound,
-                last_message_at=unread_state.last_message,
-                needs_reply=unread_state.needs_reply,
-                revision=c.revision+1
-            FROM unread_state
-            WHERE c.workspace_id=:w AND c.id=:c
-              AND (c.last_inbound_at IS DISTINCT FROM unread_state.last_inbound
-                OR c.last_message_at IS DISTINCT FROM unread_state.last_message
-                OR c.needs_reply IS DISTINCT FROM unread_state.needs_reply)"""
-        ),
-        {"w": workspace, "c": conversation},
-    )
+    from center_messenger.chat_queue import refresh
+    return refresh(db, workspace, conversation)
 
 
 def conversation(db, workspace, connection, user):
@@ -181,13 +116,7 @@ def project_event(db, workspace, connection, bot_id, event):
         if not isinstance(user, dict) or user.get("is_bot") is not False:
             raise MaxError("invalid_response")
         row = conversation(db, workspace, connection, user)
-        db.execute(
-            text(
-                "UPDATE conversations SET last_message_at=greatest(last_message_at,:at) "
-                "WHERE workspace_id=:w AND id=:c"
-            ),
-            {"w": workspace, "c": row["id"], "at": event_at},
-        )
+        refresh_unread(db, workspace, row["id"])
         return "processed"
     if kind == "message_removed":
         mid = message_id(event.get("message_id"))
@@ -273,6 +202,8 @@ def project_event(db, workspace, connection, bot_id, event):
         ):
             return "processed"
         identifier = old["id"]
+        if "handled_receipt" in old["payload"]:
+            payload["handled_receipt"] = old["payload"]["handled_receipt"]
         db.execute(
             text(
                 "UPDATE messages SET text=:t,payload=CAST(:p AS jsonb),version=version+1 "

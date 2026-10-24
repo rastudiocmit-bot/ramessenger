@@ -536,6 +536,12 @@ class AlfaMaxConnections:
 
     @staticmethod
     def _supersede(db, workspace, old, canonical):
+        db.execute(text("UPDATE messages keeper SET payload=keeper.payload||jsonb_build_object('handled_receipt',"
+                        "old.payload->'handled_receipt'),version=keeper.version+1 FROM messages old "
+                        "WHERE keeper.workspace_id=:w AND keeper.id=:canonical AND old.workspace_id=:w "
+                        "AND old.id=:old AND old.payload->>'handled_receipt' IS NOT NULL "
+                        "AND keeper.payload->>'handled_receipt' IS NULL"),
+                   {"w": workspace, "old": old, "canonical": canonical})
         db.execute(
             text("UPDATE messages SET provider_message_id=NULL,"
                  "payload=jsonb_set((payload-'crm_mirror')||CASE WHEN provider_message_id IS NOT NULL "
@@ -569,6 +575,9 @@ class AlfaMaxConnections:
         ).scalars())
         if not old:
             return
+        from center_messenger.chat_queue import materialize_legacy_handled
+        for identifier in old + [canonical]:
+            materialize_legacy_handled(db, workspace, identifier)
         handled = db.execute(
             text("SELECT c.handled_inbound_id,c.handled_at,c.handled_by FROM conversations c "
                  "JOIN messages m ON m.workspace_id=c.workspace_id AND m.id=c.handled_inbound_id "
@@ -613,7 +622,7 @@ class AlfaMaxConnections:
             refresh_unread(db, workspace, previous)
         if handled:
             db.execute(
-                text("UPDATE conversations SET handled_inbound_id=:message,handled_at=:at,handled_by=:user "
+                text("UPDATE conversations SET handled_inbound_id=:message,handled_at=:at,handled_by=:user,answered_seq=greatest(answered_seq,1) "
                      "WHERE workspace_id=:w AND id=:id"),
                 {"w": workspace, "id": canonical, "message": handled["handled_inbound_id"],
                  "at": handled["handled_at"], "user": handled["handled_by"]},
@@ -803,6 +812,7 @@ class AlfaMaxConnections:
                     "actor_name": item["actor_name"],
                     "actor_type": item["actor_type"],
                     "actor_id": item.get("actor_id"),
+                    "actor_evidence": item.get("actor_evidence", {"reason": "source_classification"}),
                     "failed": item["failed"],
                     "crm_status": customer.get("status") if customer else "unknown",
                 }
@@ -818,14 +828,14 @@ class AlfaMaxConnections:
                     matches = list(
                         db.execute(
                             text(
-                                "SELECT m.id,m.occurred_at,m.payload,s.id AS command_id,"
+                                "SELECT m.id,m.occurred_at,m.payload,s.id AS command_id,s.state AS command_state,"
                                 "abs(extract(epoch FROM (m.occurred_at-:at))) AS distance "
                                 "FROM messages m "
                                 "JOIN send_commands s "
                                 "ON s.workspace_id=m.workspace_id AND s.id=m.send_command_id "
                                 "WHERE m.workspace_id=:w AND m.conversation_id=:conv "
                                 "AND m.direction='out' "
-                                "AND s.state IN ('accepted','delivered','read','unknown') "
+                                "AND s.state IN ('accepted','delivered','read','unknown','sending') "
                                 "AND m.text=:text AND m.payload->>'crm_branch'=:branch "
                                 "AND m.payload->>'customer_id'=:customer "
                                 "AND abs(extract(epoch FROM (m.occurred_at-:at)))<=300 "
@@ -852,61 +862,68 @@ class AlfaMaxConnections:
                     # send, and never reuse a send already linked to a CRM row.
                     if matches and (len(matches) == 1 or matches[0]["distance"] < matches[1]["distance"]):
                         best = matches[0]
-                        matched_payload = dict(best["payload"])
-                        matched_payload.update(payload)
-                        matched_payload["source"] = "center_messenger_alfa_max"
-                        matched_payload["actor_type"] = "human"
-                        if existing:
-                            # Release the provider's unique key before assigning
-                            # it to the local bubble. Retain the old row as a
-                            # delta tombstone so open clients can remove it.
-                            superseded = dict(existing["payload"]) | {"superseded_by": str(best["id"])}
+                        if best["command_state"] == "sending":
+                            # An echo observed during the external call must not
+                            # act as an unrelated reply covering newer arrivals.
+                            # Keep its source row until the command is confirmed.
+                            payload["possible_send_command_id"] = str(best["command_id"])
+                        else:
+                            matched_payload = dict(best["payload"])
+                            matched_payload.update(payload)
+                            matched_payload["source"] = "center_messenger_alfa_max"
+                            matched_payload["actor_type"] = "human"
+                            matched_payload["actor_evidence"] = {"version": 1, "reason": "authorized_send"}
+                            if existing:
+                                # Release the provider's unique key before assigning
+                                # it to the local bubble. Retain the old row as a
+                                # delta tombstone so open clients can remove it.
+                                superseded = dict(existing["payload"]) | {"superseded_by": str(best["id"])}
+                                db.execute(
+                                    text("UPDATE messages SET provider_message_id=NULL,"
+                                         "payload=CAST(:p AS jsonb),version=version+1 "
+                                         "WHERE workspace_id=:w AND id=:id"),
+                                    {"w": workspace, "id": existing["id"], "p": json.dumps(superseded)},
+                                )
+                                changed(db, workspace, conversation_id, existing["id"])
                             db.execute(
-                                text("UPDATE messages SET provider_message_id=NULL,"
-                                     "payload=CAST(:p AS jsonb),version=version+1 "
-                                     "WHERE workspace_id=:w AND id=:id"),
-                                {"w": workspace, "id": existing["id"], "p": json.dumps(superseded)},
+                                text(
+                                    "UPDATE messages SET provider_message_id=:provider,occurred_at=:at,"
+                                    "payload=CAST(:payload AS jsonb),version=version+1 "
+                                    "WHERE workspace_id=:w AND id=:id"
+                                ),
+                                {
+                                    "w": workspace,
+                                    "id": best["id"],
+                                    "provider": f"alfa:{source_id}",
+                                    "at": item["occurred_at"],
+                                    "payload": json.dumps(matched_payload, ensure_ascii=False),
+                                },
                             )
-                            changed(db, workspace, conversation_id, existing["id"])
-                        db.execute(
-                            text(
-                                "UPDATE messages SET provider_message_id=:provider,occurred_at=:at,"
-                                "payload=CAST(:payload AS jsonb),version=version+1 "
-                                "WHERE workspace_id=:w AND id=:id"
-                            ),
-                            {
-                                "w": workspace,
-                                "id": best["id"],
-                                "provider": f"alfa:{source_id}",
-                                "at": item["occurred_at"],
-                                "payload": json.dumps(matched_payload, ensure_ascii=False),
-                            },
-                        )
-                        db.execute(
-                            text(
-                                "INSERT INTO source_records("
-                                "workspace_id,id,connection_id,message_id,"
-                                "namespace,external_record_id) "
-                                "VALUES (:w,:id,:c,:m,'alfa_max',:source) "
-                                "ON CONFLICT(workspace_id,connection_id,namespace,external_record_id) "
-                                "DO UPDATE SET message_id=EXCLUDED.message_id"
-                            ),
-                            {
-                                "w": workspace,
-                                "id": uuid4(),
-                                "c": channel,
-                                "m": best["id"],
-                                "source": source_id,
-                            },
-                        )
-                        db.execute(
-                            text("UPDATE send_commands SET state='accepted',last_error_code=NULL "
-                                 "WHERE workspace_id=:w AND id=:id AND state='unknown'"),
-                            {"w": workspace, "id": best["command_id"]},
-                        )
-                        changed(db, workspace, conversation_id, best["id"])
-                        notify("matched_send")
-                        continue
+                            db.execute(
+                                text(
+                                    "INSERT INTO source_records("
+                                    "workspace_id,id,connection_id,message_id,"
+                                    "namespace,external_record_id) "
+                                    "VALUES (:w,:id,:c,:m,'alfa_max',:source) "
+                                    "ON CONFLICT(workspace_id,connection_id,namespace,external_record_id) "
+                                    "DO UPDATE SET message_id=EXCLUDED.message_id"
+                                ),
+                                {
+                                    "w": workspace,
+                                    "id": uuid4(),
+                                    "c": channel,
+                                    "m": best["id"],
+                                    "source": source_id,
+                                },
+                            )
+                            db.execute(
+                                text("UPDATE send_commands SET state='accepted',last_error_code=NULL "
+                                     "WHERE workspace_id=:w AND id=:id AND state='unknown'"),
+                                {"w": workspace, "id": best["command_id"]},
+                            )
+                            changed(db, workspace, conversation_id, best["id"])
+                            notify("matched_send")
+                            continue
                 if existing:
                     merged = dict(existing["payload"]) | payload
                     if merged.get("crm_mirror") and not payload["crm_global_verified"]:
@@ -916,6 +933,7 @@ class AlfaMaxConnections:
                     if existing["send_command_id"]:
                         merged["source"] = existing["payload"].get("source", "center_messenger_alfa_max")
                         actor = merged["actor_type"] = "human"
+                        merged["actor_evidence"] = {"version": 1, "reason": "authorized_send"}
                     if (
                         existing["text"] != item["text"]
                         or existing["payload"] != merged

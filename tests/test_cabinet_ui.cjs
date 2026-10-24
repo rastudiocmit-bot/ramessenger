@@ -28,13 +28,13 @@ test("owner gets the supplied desktop navigation and three primary mobile tabs",
   ui.$("#more-tab").click();
   assert.equal(ui.$("#navigation-options").querySelectorAll("[data-pane]").length, 5);
 });
-test("operator queue uses unread mode and cannot show administrative sections", async t => {
+test("operator uses the unified chats list and cannot show administrative sections", async t => {
   const ui = setup(t, undefined, "operator");
   ui.app.update({ ...all, summary: false, team: false, clients: false, connections: false });
   assert.equal(ui.$("#team-tab"), null); assert.equal(ui.$("#connections-tab"), null);
-  assert.ok(ui.$("#queue-tab"));
+  assert.equal(ui.$("#queue-tab"), null);
   await ui.app.navigate("queue", "unread");
-  assert.deepEqual(ui.calls, ["messages"]); assert.equal(ui.state.chatView, "unread");
+  assert.deepEqual(ui.calls, ["messages"]); assert.equal(ui.state.chatView, "all");
 });
 test("observer receives only granted sections and channel settings remain read only", t => {
   const ui = setup(t, undefined, "observer");

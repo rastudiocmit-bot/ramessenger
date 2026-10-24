@@ -3,7 +3,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
   let sections = {}, summaryTimer = null, summaryRequest = 0, context = null, contextEpoch = null;
   const icon = name => window.CenterIcon(name);
   const definition = [
-    ["messages", "Чаты", "chats"], ["summary", "Сводка", "chart"], ["queue", "Нужен ответ", "queue"],
+    ["messages", "Чаты", "chats"], ["summary", "Сводка", "chart"],
     ["clients", "Клиенты", "people"], ["team", "Сотрудники", "team"],
     ["connections", "Подключения", "plug"], ["overview", "Организация", "building"],
     ["security", "Безопасность", "shield"], ["profile", "Профиль", "user"]
@@ -13,7 +13,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
   }
   function navigate(pane, chatView) {
     if ($("#navigation-dialog").open) $("#navigation-dialog").close();
-    if (chatView) state.chatView = chatView;
+    state.chatView = "all";
     if (["messages", "queue"].includes(pane)) $("#chat-layout").classList.remove("has-selection");
     return renderPane(pane === "queue" ? "messages" : pane);
   }
@@ -21,8 +21,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
     const button = node("button", undefined, "tab"); button.type = "button";
     button.dataset.pane = pane; button.id = pane + (rail ? "-tab" : "-mobile-tab");
     button.setAttribute("role", "tab");
-    const active = state.pane === pane && (pane !== "messages" || state.chatView !== "unread")
-      || pane === "queue" && state.pane === "messages" && state.chatView === "unread";
+    const active = state.pane === pane;
     button.setAttribute("aria-selected", String(active));
     button.append(icon(glyph), node("span", title));
     return button;
@@ -37,7 +36,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
       $("#summary-content").replaceChildren(node("p", "Загружаем показатели…", "note"));
       $("#summary-error").textContent = ""; show($("#summary-error"), false);
     }
-    const all = definition.filter(([key]) => sections[key] && (key !== "queue" || state.workspace?.role === "operator"));
+    const all = definition.filter(([key]) => sections[key]);
     $("#navrail").replaceChildren(...all.map(t => navButton(t, true)));
     const primary = all.slice(0, 3), rest = all.slice(3);
     $("#tabbar").replaceChildren(...primary.map(t => navButton(t)));
@@ -58,7 +57,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
       });
       $("#tabbar").append(more);
     }
-    $("#app").dataset.tab = ({ summary: "home", messages: state.chatView === "unread" ? "queue" : "chats", clients: "clients", team: "team", connections: "conn", overview: "org", security: "sec", profile: "prof" })[state.pane] || "org";
+    $("#app").dataset.tab = ({ summary: "home", messages: "chats", clients: "clients", team: "team", connections: "conn", overview: "org", security: "sec", profile: "prof" })[state.pane] || "org";
     if (state.workspace) {
       $("#profile-role").textContent = roles[state.workspace.role] || "Сотрудник";
       $("#profile-workspace").textContent = state.workspace.name;

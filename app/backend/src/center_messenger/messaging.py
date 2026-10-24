@@ -241,6 +241,7 @@ class Messaging:
             text("UPDATE conversations SET revision=revision+1 WHERE workspace_id=:w AND id=:c"),
             {"w": job["workspace_id"], "c": command["conversation_id"]},
         )
+        refresh_unread(db, job["workspace_id"], command["conversation_id"])
         return identifier
 
     def _send(self, job, lease):

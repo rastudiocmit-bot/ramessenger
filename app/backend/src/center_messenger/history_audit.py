@@ -75,8 +75,10 @@ def main(argv=None):
                 db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
                 db.execute(text("SELECT set_config('app.workspace_id',:w,true)"), {"w": str(workspace)})
                 settings = db.execute(text(
-                    "SELECT connection_id,crm_connection_id,state,history_cursor,last_sync_at,last_error_code "
-                    "FROM alfa_max_settings WHERE workspace_id=:w"
+                    "SELECT am.connection_id,am.crm_connection_id,am.state,am.history_cursor,am.last_sync_at,am.last_error_code,"
+                    "cn.capabilities->'chat_queue_projection' AS chat_queue_projection "
+                    "FROM alfa_max_settings am JOIN connections cn ON cn.workspace_id=am.workspace_id "
+                    "AND cn.id=am.connection_id WHERE am.workspace_id=:w"
                 ), {"w": workspace}).mappings().one()
                 branches = db.execute(text(
                     "SELECT external_id FROM alfa_branches WHERE workspace_id=:w "
@@ -85,7 +87,8 @@ def main(argv=None):
                 coverage = history_coverage(db, workspace, settings["connection_id"], settings["history_cursor"], branches)
                 reports.append({"workspace_id": str(workspace), "state": settings["state"],
                                 "last_sync_at": settings["last_sync_at"],
-                                "error_code": settings["last_error_code"], **coverage})
+                                "error_code": settings["last_error_code"],
+                                "chat_queue_projection": settings["chat_queue_projection"], **coverage})
                 if args.verify_source:
                     if args.branch not in branches:
                         raise ValueError("Branch unavailable")

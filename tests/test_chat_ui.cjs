@@ -115,7 +115,7 @@ test("handling a dialog immediately moves it below unread dialogs and refreshes 
     {...conversation(2),last_message_at:'2026-10-24T10:00:00Z'},
     {...conversation(3),unread:false,unread_count:0,last_message_at:'2026-10-24T09:00:00Z'}];
   const ui=setup(t,(url,options)=>{
-    if(url.pathname.endsWith('/handled'))return {};
+    if(url.pathname.endsWith('/handled'))return {conversation:{...rows[0],unread:false,unread_count:0,revision:2}};
     if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{id:identifier(1),unread:true,can_send:true,inbound_seq:1,revision:1}});
     if(url.pathname.endsWith('/chats')){
       const response={conversations:rows,page:1,total:3,unread:reads?1:2,has_more:false};
@@ -151,22 +151,19 @@ test("big CRM keys and sub-millisecond times render without precision loss", asy
   assert.deepEqual(ui.ids(), [identifier(2), identifier(1), identifier(3)]);
 });
 
-test("lead chip uses the server total beyond loaded rows and clears after an update", async t => {
-  let leadUnread = 47;
-  const ui = setup(t, url => url.pathname.endsWith("/chats") ? {
-    conversations: [conversation(1)], total: 120, unread: 50, lead_unread: leadUnread,
-    page: 0, has_more: true
-  } : undefined);
+test("one list has no queue tabs and legacy view does not create hidden filters", async t => {
+  const ui = setup(t);
   await ui.app.enter();
-  assert.equal(ui.$("#chat-chip-lead").textContent, "47");
-  assert.equal(ui.$("#chat-chip-lead").hidden, false);
-  ui.$('[data-chat-view="lead"]').click(); await flush();
-  assert.equal(ui.$("#chat-chip-lead").textContent, "47");
-  assert.ok(ui.calls.some(url => url.searchParams.get("status") === "lead"));
-  leadUnread = 0; await ui.poll();
-  assert.equal(ui.$("#chat-chip-lead").hidden, true);
-  ui.app.reset();
-  assert.equal(ui.$("#chat-chip-lead").textContent, "");
+  assert.equal(ui.$("#chat-chips"), null);
+  assert.equal(ui.$("[data-chat-view]"), null);
+  assert.equal(ui.$("#chat-chip-lead"), null);
+  ui.app.setView("lead"); await flush();
+  assert.equal(ui.$("#chat-status").value, "");
+  assert.ok(ui.calls.filter(url => url.pathname.endsWith("/chats")).every(url => !url.searchParams.has("view") && !url.searchParams.has("status")));
+  ui.$("#chat-status").value = "lead";
+  ui.app.setView("all"); await flush();
+  assert.equal(ui.$("#chat-status").value, "lead");
+  assert.equal(ui.$("#chat-filter-chip").closest("#pane-profile") !== null, true);
 });
 
 test("older history cursor uses the same order as the rendered stream", async t => {
@@ -485,4 +482,66 @@ test("a reset during older paging also replaces the live cursor and page boundar
   assert.deepEqual(ui.ids(), [identifier(10)]);
   await ui.poll(); ui.$("#chat-history-more").click(); await flush();
   assert.equal(anchor, identifier(10));
+});
+
+test("archive pages cannot advance the seen boundary used by handled actions", async t => {
+  const first = { conversation_id: identifier(1), revision: 1, change_seq: 100, latest_inbound_id: identifier(2) };
+  const later = { ...first, revision: 2, change_seq: 101, latest_inbound_id: identifier(3) };
+  let handled;
+  const ui = setup(t, (url, options) => {
+    if (url.pathname.endsWith('/handled')) {
+      handled = options.data.seen_checkpoint;
+      return {conversation:{...conversation(1),revision:3,unread_count:1,seen_checkpoint:first}};
+    }
+    if (!url.pathname.endsWith('/messages')) return;
+    if (url.searchParams.has('before_id')) return history(identifier(1), [message(1)], {conversation:{...conversation(1),revision:2,inbound_seq:2,seen_checkpoint:later},next_seq:101});
+    return history(identifier(1), [message(2)], {conversation:{...conversation(1),seen_checkpoint:first},has_more:true});
+  });
+  await ui.app.enter();
+  ui.$('#chat-stream').dispatchEvent(new ui.window.WheelEvent('wheel',{deltaY:-100}));await flush();
+  ui.$('#chat-handled').click();await flush();
+  assert.equal(handled.change_seq,100);
+  assert.equal(handled.latest_inbound_id,identifier(2));
+  assert.equal(ui.$('#chat-handled').hidden,false,'unseen incoming remains pending after the action');
+});
+
+test("a partial delta keeps the previous seen boundary until the whole batch is displayed", async t => {
+  const first = { conversation_id: identifier(1), revision: 1, change_seq: 100, latest_inbound_id: identifier(1) };
+  let complete, received;
+  const ui = setup(t,(url, options)=>{
+    if(url.pathname.endsWith('/handled')) {received=options.data.seen_checkpoint;return {conversation:{...conversation(1),revision:3,seen_checkpoint:first}};}
+    if(!url.pathname.endsWith('/messages'))return;
+    if(url.searchParams.get('after_seq')==='101')return new Promise(resolve=>{complete=()=>resolve(history(identifier(1),[message(3)],{conversation:{...conversation(1),revision:3,seen_checkpoint:{...first,change_seq:102,latest_inbound_id:identifier(3)}},next_seq:102}));});
+    if(url.searchParams.has('after_seq'))return history(identifier(1),[message(2)],{conversation:{...conversation(1),revision:2,seen_checkpoint:{...first,change_seq:102,latest_inbound_id:identifier(3)}},next_seq:101,more_changes:true});
+    return history(identifier(1),[message(1)],{conversation:{...conversation(1),seen_checkpoint:first}});
+  });
+  await ui.app.enter();const polling=ui.poll();await flush();
+  assert.ok(complete);
+  ui.$('#chat-handled').click();await flush();
+  assert.equal(received.change_seq,100);
+  complete();await polling;
+});
+
+test("swiping a list row posts its displayed checkpoint and preserves loaded pages", async t=>{
+  const seen={conversation_id:identifier(1),revision:1,change_seq:100,latest_inbound_id:identifier(1)};
+  let body;
+  const ui=setup(t,(url,options)=>{
+    if(url.pathname.endsWith('/handled')){body=options.data;return {conversation:{...conversation(1),unread:false,unread_count:0,revision:2,seen_checkpoint:seen}};}
+  },{conversations:[{...conversation(1),seen_checkpoint:seen}]});
+  await ui.app.enter();
+  const row=ui.$('.chat-row');
+  const dispatch=(type,x)=>{const e=new ui.window.Event(type);Object.assign(e,{pointerType:'touch',clientX:x});row.dispatchEvent(e);};
+  dispatch('pointerdown',200);dispatch('pointermove',80);dispatch('pointerup',80);await flush();
+  assert.equal(body.seen_checkpoint.change_seq,100);
+  assert.equal(body.seen_checkpoint.conversation_id,identifier(1));
+});
+
+test("a late history response cannot overwrite a newer list counter at the same revision", async t=>{
+  let lists=0;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/chats'))return {conversations:[{...conversation(1),unread_count:++lists===1?1:2,queue_seq:lists===1?'100':'101'}],total:1,unread:1,page:0,has_more:false};
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[message(1)],{conversation:{...conversation(1),queue_seq:'100'}});
+  });
+  await ui.app.enter();await ui.poll();
+  assert.equal(ui.$('.avatar-count').textContent,'2');
 });
