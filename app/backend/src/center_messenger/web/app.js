@@ -31,6 +31,18 @@
     $("#auth-title").textContent = "Вход в кабинет";
     $("#auth-description").textContent = "Войдите с рабочей почтой и паролем.";
     notice(message);
+    setTimeout(clearOrphanPassword, 400); setTimeout(clearOrphanPassword, 1500);
+  }
+  // A browser may fill in a password it saved for another rastudio.org page with no
+  // user name ("Имя пользователя не указано"). That leaves dots in the field and an
+  // empty e-mail, and some tablets make it hard to clear. Drop such a password so the
+  // operator can simply type both fields; a suggestion is still one tap away.
+  function clearOrphanPassword() {
+    const form = $("#login-form"); if (form.hidden) return;
+    const email = form.elements.email, password = form.elements.password;
+    if (email.value || document.activeElement === password || document.activeElement === email) return;
+    const filled = [":autofill", ":-webkit-autofill"].some(selector => { try { return password.matches(selector); } catch (_) { return false; } });
+    if (filled) password.value = "";
   }
   function clearSession(message = "") {
     state.epoch += 1; state.user = null; state.csrf = null; state.workspaces = []; state.workspace = null;

@@ -36,6 +36,9 @@ const { fixture } = require('./browser_fixture.cjs');
       await page.locator('#messages-tab').click(); await page.waitForSelector('.chat-bubble');
       assert.equal(await page.locator('.chat-bubble').count(), 4);
       await page.locator('#chat-search-toggle').click(); assert.equal(await page.locator('#chat-search').isVisible(), true);
+      // Search opens in the header and the same button closes it again.
+      assert.equal(await page.locator('#app').evaluate(e => e.classList.contains('is-searching')), true);
+      await page.locator('#chat-search-toggle').click(); assert.equal(await page.locator('#chat-search').isVisible(), false);
       // Chat filters moved to Profile: nothing next to search opens settings any more.
       assert.equal(await page.locator('#chat-search-wrap button').count(), 0);
       await page.locator('#chat-person-open').click(); await page.waitForFunction(() => document.querySelector('#chat-details-name').textContent === 'Анна Смирнова');

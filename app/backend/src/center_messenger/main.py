@@ -29,7 +29,7 @@ from center_messenger.connector_vault import ConnectorVault
 from center_messenger.crm_api import DirectoryReader
 from center_messenger.crm_api import router as directory_router
 from center_messenger.database import database_is_ready, log_database_error, make_engine
-from center_messenger.http_security import SecurityMiddleware
+from center_messenger.http_security import SecurityMiddleware, StaticCompressionMiddleware
 from center_messenger.max_client import MaxClient
 from center_messenger.max_connections import MaxConnections
 from center_messenger.messaging import Messaging, MessagingWorker
@@ -125,6 +125,7 @@ def create_app(
     )
 
     app.add_middleware(SecurityMiddleware, settings=config)
+    app.add_middleware(StaticCompressionMiddleware)
     app.include_router(accounts_router)
     app.include_router(alfa_router)
     app.include_router(alfa_max_router)

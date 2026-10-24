@@ -129,7 +129,6 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
     } catch (error) { if (current()) { $("#summary-error").textContent = error.message; show($("#summary-error")); } }
     finally { if (current()) summaryTimer = setTimeout(summary, 60000); }
   }
-  $("#chat-search-toggle").addEventListener("click", () => { const target = $("#chat-search-wrap"), open = target.hidden; show(target, open); $("#chat-search-toggle").setAttribute("aria-expanded", String(open)); if (open) $("#chat-search").focus(); });
   $("#chat-person-open").addEventListener("click", () => document.dispatchEvent(new CustomEvent("cm:chat-details-open")));
   $("#profile-sound-settings").addEventListener("click", () => $("#chat-settings-open").click());
   $("#profile-connections").addEventListener("click", async () => {

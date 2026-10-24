@@ -201,7 +201,7 @@ input,textarea{font:inherit;color:inherit}
 
 /* ── Conversation on the wallpapered canvas ─────────────────────── */
 .canvas{flex:1;min-height:0;position:relative;overflow:hidden;
-  background-color:var(--wall);background-image:url(/assets/messenger-wallpaper.png);
+  background-color:var(--wall);background-image:url(/assets/messenger-wallpaper.webp?v=1);
   background-size:cover;background-position:center}
 .canvas::before{content:"";position:absolute;inset:0;background:var(--veil);pointer-events:none;z-index:0}
 /* Messages scroll beneath the floating header; this band keeps that edge soft. */
@@ -525,7 +525,7 @@ input,textarea{font:inherit;color:inherit}
    on it as one rounded card, with the conversation beside them. */
 @container app (min-width:720px){
   .app{flex-direction:row;
-    background:linear-gradient(var(--veil),var(--veil)), url(/assets/messenger-wallpaper.png) center/cover, var(--wall);
+    background:linear-gradient(var(--veil),var(--veil)), url(/assets/messenger-wallpaper.webp?v=1) center/cover, var(--wall);
     padding:calc(var(--sat) + 10px) max(10px,env(safe-area-inset-right,0px))
             calc(var(--sab) + 10px) max(10px,env(safe-area-inset-left,0px))}
   .panes{display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:0}
@@ -1022,3 +1022,61 @@ body:has(#cabinet[hidden]){overflow:auto}
   .pane-prof .profile-chats .item-main:has(> select){display:grid;grid-template-columns:minmax(0,1fr) minmax(200px,320px);column-gap:16px;align-items:center}
   .pane-prof .profile-chats .item-main select{grid-column:2;grid-row:1 / span 2;margin-top:0}
 }
+
+/* ── Search in the header ───────────────────────────────────────────────────────
+   Opens to the right of the logo, in the search button's place; the button turns into
+   a close cross. While searching the view chips and the phone's bottom menu step aside. */
+.title-row .header-search{flex:1;min-width:0;padding:0;display:flex}
+.title-row .header-search[hidden]{display:none}
+.title-row .header-search label{flex:1;height:40px;padding:0 11px;margin:0}
+.title-row .header-search label:focus-within{box-shadow:0 0 0 3px rgba(8,127,120,.12)}
+.app.is-searching .brand{flex:0 0 auto;width:118px;height:30px}
+@media (max-width:420px){.app.is-searching .brand{width:92px;height:24px}}
+#chat-search::-webkit-search-cancel-button,#chat-search::-webkit-search-decoration{-webkit-appearance:none;appearance:none;display:none}
+.app.is-searching #chat-chips{display:none}
+.app.is-searching .tabbar{display:none!important}
+.app.is-searching #chat-search-toggle{border-color:transparent;background:var(--surface-2)}
+
+/* iOS zooms into any field under 16px and does not zoom back out; touch screens get
+   16px fields everywhere. */
+@media (pointer:coarse){input,select,textarea{font-size:16px!important}}
+
+/* ── Sign-in in the cabinet's look ─────────────────────────────────────────────
+   The chat wallpaper behind one floating card with the studio logo, large fields and
+   one clear button; follows the light and dark themes. */
+#auth.auth-layout{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100dvh;padding:24px 16px calc(24px + env(safe-area-inset-bottom,0px));
+  background:linear-gradient(var(--veil),var(--veil)),url(/assets/messenger-wallpaper.webp?v=1) center/cover,var(--wall);
+  font-family:var(--ui);color:var(--ink);overflow:auto}
+#auth[hidden]{display:none}
+#auth .welcome{display:none}
+#auth .auth-panel{display:block;width:100%;max-width:420px;padding:0}
+#auth .auth-card{max-width:none;margin:0;padding:26px 24px 20px;background:var(--surface);color:var(--ink);border:0;border-radius:24px;
+  box-shadow:0 24px 70px rgba(18,40,60,.24)}
+#auth .auth-card::before{content:"";display:block;height:38px;margin:0 0 22px;background:url(/assets/logo-light.png) left center/contain no-repeat}
+:root[data-theme="dark"] #auth .auth-card::before{background-image:url(/assets/logo-dark.png)}
+#auth .eyebrow{display:block;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+#auth h2{margin:6px 0 6px;font-size:26px;font-weight:650;letter-spacing:-.6px;line-height:1.15;color:var(--ink)}
+#auth .auth-card>.muted{margin:0 0 20px;font-size:14px;line-height:1.5;color:var(--muted)}
+#auth form label{display:block;margin:0 0 14px;font-size:13px;font-weight:600;letter-spacing:0;text-transform:none;color:var(--ink)}
+#auth form input{display:block;width:100%;height:48px;margin-top:7px;padding:0 14px;border:1px solid var(--line);border-radius:12px;
+  background:var(--surface-2);color:var(--ink);font:inherit;font-size:16px;font-weight:450;outline:none;box-shadow:none;
+  transition:border-color .15s,box-shadow .15s,background .15s}
+#auth form input::placeholder{color:var(--faint)}
+#auth form input:focus{border-color:var(--primary);background:var(--surface);box-shadow:0 0 0 3px rgba(8,127,120,.14)}
+#auth form input[readonly]{color:var(--muted)}
+#auth form input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px var(--surface-2) inset;-webkit-text-fill-color:var(--ink);caret-color:var(--ink)}
+#auth .password-field{position:relative;display:block;margin-top:7px}
+#auth .password-field input{margin-top:0;padding-right:100px}
+#auth .reveal{position:absolute;right:6px;top:6px;height:36px;min-height:0;padding:0 12px;border:0;border-radius:9px;background:none;
+  color:var(--primary-ink);font-size:13px;font-weight:600}
+#auth .reveal:hover{background:var(--primary-tint)}
+#auth form small{display:block;margin-top:6px;font-size:12px;font-weight:400;color:var(--muted)}
+#auth .primary.full{display:block;width:100%;height:50px;min-height:0;margin:6px 0 0;border:0;border-radius:12px;background:var(--primary);
+  color:var(--on-primary);font-size:15px;font-weight:650;box-shadow:0 6px 18px rgba(8,127,120,.25)}
+#auth .primary.full:hover{background:var(--primary-deep)}
+#auth .primary.full:disabled{opacity:.6}
+#auth .text-button.full{display:block;width:100%;min-height:44px;margin-top:6px;border:0;background:none;color:var(--primary-ink);font-weight:600}
+#auth .form-note{margin:14px 0 0;font-size:12.5px;line-height:1.5;color:var(--muted);text-align:center}
+#auth .notice.error{margin:0 0 16px;padding:10px 12px;border-radius:11px;font-size:13px;line-height:1.45}
+#auth .auth-foot{margin:18px 0 0;padding-top:14px;border-top:1px solid var(--line-soft);font-size:11.5px;color:var(--faint);text-align:center}
+@media (max-width:420px){#auth .auth-card{padding:22px 18px 18px;border-radius:22px}#auth h2{font-size:24px}}

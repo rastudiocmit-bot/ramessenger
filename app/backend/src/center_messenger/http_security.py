@@ -4,6 +4,40 @@ from starlette.responses import JSONResponse
 from center_messenger.config import Settings
 
 
+COMPRESSIBLE = (".js", ".css", ".html", ".svg", ".json", ".txt")
+
+
+def cache_policy(scope, status):
+    """Static files may be cached; pages and API answers never are.
+
+    Assets are kept for a day, then revalidated (StaticFiles answers 304 when a
+    file is unchanged). A longer, immutable lifetime would rely on every change
+    bumping its ?v= number, and two changes have already picked the same number;
+    a day bounds that mistake. Without caching a phone re-downloaded several
+    megabytes on every visit.
+    """
+    if status not in (200, 304) or not scope["path"].startswith("/assets/"):
+        return b"no-store"
+    return b"public, max-age=86400"
+
+
+class StaticCompressionMiddleware:
+    """Gzip the page and text assets. They hold no secrets, so compression cannot
+    leak anything, and on a slow mobile link it cuts the transfer about fourfold."""
+
+    def __init__(self, app, minimum_size=1024):
+        from starlette.middleware.gzip import GZipMiddleware
+
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=minimum_size)
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if path == "/" or (path.startswith("/assets/") and path.lower().endswith(COMPRESSIBLE)):
+            return await self.gzip(scope, receive, send)
+        return await self.app(scope, receive, send)
+
+
 class SecurityMiddleware:
     def __init__(self, app, settings: Settings):
         self.app = app
@@ -41,7 +75,7 @@ class SecurityMiddleware:
                         (b"x-content-type-options", b"nosniff"),
                         (b"x-frame-options", b"DENY"),
                         (b"referrer-policy", b"no-referrer"),
-                        (b"cache-control", b"no-store"),
+                        (b"cache-control", cache_policy(scope, message.get("status"))),
                         (
                             b"content-security-policy",
                             (

@@ -669,6 +669,28 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (detailsDialog.open) detailsDialog.close();
     loadList().catch(error => fail(error));
   }
+  // Search opens in the header, right of the logo, where the search button was. While it
+  // is open the view chips and the phone's bottom menu step aside, and it always searches
+  // every dialog; closing it brings back the view the operator had before.
+  let viewBeforeSearch = null;
+  function setSearching(open) {
+    const wrap = $("#chat-search-wrap"), input = $("#chat-search"), toggle = $("#chat-search-toggle");
+    if (open === !wrap.hidden) return;
+    show(wrap, open); $("#app").classList.toggle("is-searching", open);
+    toggle.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-label", open ? "Закрыть поиск" : "Поиск");
+    toggle.replaceChildren(icon(open ? "close" : "search"));
+    if (open) {
+      const current = state.chatView || "all";
+      if (current !== "all" && current !== "queue") { viewBeforeSearch = current; state.chatView = "all"; setView("all"); }
+      input.focus();
+      return;
+    }
+    const hadQuery = Boolean(input.value); input.value = "";
+    if (viewBeforeSearch) { const back = viewBeforeSearch; viewBeforeSearch = null; state.chatView = back; setView(back); }
+    else if (hadQuery) filtersChanged();
+  }
+  $("#chat-search-toggle").addEventListener("click", () => setSearching($("#chat-search-wrap").hidden));
+  $("#chat-search").addEventListener("keydown", event => { if (event.key === "Escape") { event.preventDefault(); setSearching(false); } });
   $("#chat-search").addEventListener("input", () => { clearTimeout(searchTimer); listSeq += 1; searchTimer = setTimeout(filtersChanged, 250); });
   ["branch", "status"].forEach(id => $(`#chat-${id}`).addEventListener("change", filtersChanged));
   $("#chat-channel").addEventListener("change", () => { filtersChanged(); });
