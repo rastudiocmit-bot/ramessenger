@@ -7,7 +7,11 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
   // Voice input and AI agents (Connections → service settings). Off in the chat unless asked.
   const ai = { settings: { configured: Boolean(options.voice), folder_id: options.voice ? 'b1gexamplefolder0000' : '', key_hint: options.voice ? 'k3y9' : '',
       voice_enabled: Boolean(options.voice), monthly_limit_rub: null, status: options.voice ? 'active' : 'not_configured', error: null, verified_at: null,
-      month_spent_rub: 0, vault_ready: true, models: [{ id: 'yandexgpt-5.1', title: 'YandexGPT Pro 5.1' }, { id: 'aliceai-llm', title: 'Alice AI LLM' }],
+      month_spent_rub: 0, vault_ready: true, models: [{ id: 'yandexgpt-5.1', title: 'YandexGPT Pro 5.1', provider: 'yandex', provider_title: 'Yandex Cloud' },
+        { id: 'aliceai-llm', title: 'Alice AI LLM', provider: 'yandex', provider_title: 'Yandex Cloud' },
+        { id: 'deepseek-flash', title: 'DeepSeek V4.1 Flash', provider: 'deepseek', provider_title: 'DeepSeek' },
+        { id: 'deepseek-v4-pro', title: 'DeepSeek V4 Pro', provider: 'deepseek', provider_title: 'DeepSeek' }],
+      deepseek: { configured: false, key_hint: '', status: 'not_configured', error: null },
       tasks: [{ id: 'voice_input', title: 'Голосовой ввод' }], default_model: 'yandexgpt-5.1', default_prompt: 'Нормализуй текст, убери слова-паразиты.' },
     agents: [], transcribe: [], failNext: 0 };
   context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
@@ -62,7 +66,12 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
         key_hint: entry.body.clear_key ? '' : entry.body.api_key ? entry.body.api_key.slice(-4) : ai.settings.key_hint, status: 'not_configured' },
         { configured: Boolean(entry.body.folder_id) && !entry.body.clear_key && Boolean(entry.body.api_key || ai.settings.key_hint) });
       payload = ai.settings;
-    } else if (p.endsWith('/ai/settings/verify')) { ai.settings.status = 'active'; payload = { ...ai.settings, ok: true }; }
+    } else if (p.endsWith('/ai/deepseek')) {
+      ai.settings.deepseek = entry.body.clear_key ? { configured: false, key_hint: '', status: 'not_configured', error: null }
+        : { configured: true, key_hint: entry.body.api_key.slice(-4), status: 'not_configured', error: null };
+      payload = ai.settings;
+    } else if (p.endsWith('/ai/deepseek/verify')) { ai.settings.deepseek.status = 'active'; payload = { ...ai.settings, ok: true }; }
+    else if (p.endsWith('/ai/settings/verify')) { ai.settings.status = 'active'; payload = { ...ai.settings, ok: true }; }
     else if (p.endsWith('/ai/agents/test')) payload = { text: 'Здравствуйте! Занятие завтра переносится на 17:00.', fallback: false, cost_rub: 0.12, tokens: { input: 140, output: 18 } };
     else if (/\/ai\/agents\/[^/]+\/versions$/.test(p)) payload = { versions: [{ version: 1, name: 'Чистовик', model: 'yandexgpt-5.1', prompt: 'Первая версия', temperature: 0.2, created_at: '2026-10-24T20:00:00Z', author: 'Олег Иванов' }] };
     else if (/\/ai\/agents\/[^/]+$/.test(p)) {

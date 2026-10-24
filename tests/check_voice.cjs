@@ -71,7 +71,18 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     assert.equal(await page.locator('#ai-settings-form [name=api_key]').inputValue(), '', 'the key is not kept in the form');
     await page.locator('#ai-verify').click(); await page.waitForFunction(() => document.querySelector('#ai-status').textContent === 'Работает');
 
+    // DeepSeek: its own key, then its models appear without the "no key" mark.
+    assert.match(await page.locator('#ai-agent-form [name=model]').innerHTML(), /DeepSeek — ключ не добавлен/);
+    await page.locator('#ai-deepseek-form [name=api_key]').fill('sk-' + 'd'.repeat(32));
+    await page.locator('#ai-deepseek-form button[type=submit]').click();
+    await page.waitForFunction(() => document.querySelector('#ai-deepseek-form [name=api_key]').placeholder.includes('dddd'));
+    const dsPut = data.mutations.find(m => m.method === 'PUT' && m.path.endsWith('/ai/deepseek'));
+    assert.deepEqual(dsPut.body, { api_key: 'sk-' + 'd'.repeat(32) });
+    await page.locator('#ai-deepseek-verify').click(); await page.waitForFunction(() => document.querySelector('#ai-deepseek-status').textContent === 'Работает');
+    assert.doesNotMatch(await page.locator('#ai-agent-form [name=model]').innerHTML(), /ключ не добавлен/);
+    await page.locator('#ai-deepseek-card').scrollIntoViewIfNeeded(); await save(page, 'ai-deepseek');
     await page.locator('#ai-agent-new').click(); await page.waitForSelector('#ai-agent-form:not([hidden])');
+    await page.locator('#ai-agent-form [name=model]').selectOption('deepseek-flash');
     assert.equal(await page.locator('#ai-agent-form [name=prompt]').inputValue(), 'Нормализуй текст, убери слова-паразиты.');
     assert.equal(await page.locator('#ai-agent-form [name=is_default]').isChecked(), true, 'the first agent becomes the main one');
     await page.locator('#ai-agent-sample').fill('ну это завтра короче в пять');
@@ -81,6 +92,8 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await page.locator('#ai-agent-form button[type=submit]').click();
     await page.waitForSelector('#ai-agent-list .ai-agent'); await page.waitForSelector('#ai-agent-form', { state: 'hidden' });
     assert.match(await page.locator('#ai-agent-list').textContent(), /Основной/);
+    assert.equal(data.mutations.find(m => m.method === 'POST' && m.path.endsWith('/ai/agents')).body.model, 'deepseek-flash');
+    assert.equal(data.mutations.find(m => m.path.endsWith('/ai/agents/test')).body.model, 'deepseek-flash');
     await page.locator('#ai-agent-list .ai-agent').click(); await page.locator('#ai-agent-versions summary').click();
     await page.waitForSelector('#ai-agent-version-list li');
     await save(page, 'ai-settings');

@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/assets/app.css?v=0.8.34.1">
   <link rel="stylesheet" href="/assets/cabinet.css?v=2.15.2">
   <script src="/assets/icons.js?v=1.2.1" defer=""></script><script src="/assets/directory.js?v=0.9.0" defer=""></script>
-  <script src="/assets/chat.js?v=0.10.3.1" defer=""></script><script src="/assets/voice.js?v=1.0" defer=""></script><script src="/assets/ai.js?v=1.0" defer=""></script>
+  <script src="/assets/chat.js?v=0.10.3.1" defer=""></script><script src="/assets/voice.js?v=1.0" defer=""></script><script src="/assets/ai.js?v=1.1" defer=""></script>
   <script src="/assets/alfa-progress.js?v=0.10.0" defer=""></script>
   <script src="/assets/cabinet.js?v=2.5" defer=""></script><script src="/assets/app.js?v=0.11.1.1" defer=""></script>
 </head>
@@ -107,8 +107,8 @@
               <form id="max-form" autocomplete="off"><label class="fld">Название подключения<input name="name" required="" maxlength="100" value="MAX · бот"></label><label class="fld">API Token MAX-бота<input name="token" type="password" autocomplete="off" required="" maxlength="4096" spellcheck="false"><small>Укажите токен именно бота MAX. Ключи AlfaCRM v2api и X-APP-KEY сюда не подходят.</small></label><small class="form-note">Сервер использует официальный MAX Bot API; настройки штатного MAX AlfaCRM в соседнем блоке остаются независимыми.</small><button class="primary btn" type="submit">Сохранить и проверить</button></form>
             </details>
             <p class="form-note">Не добавляйте один и тот же токен повторно: используйте уже созданную карточку бота.</p>
-          </div></div><div class="connection-section-title ai-section-title"><span class="eyebrow">Голос и AI</span><h2>Голосовой ввод и AI-агенты</h2><p>Речь распознаёт Yandex SpeechKit, текст приводит в порядок модель Yandex AI Studio по инструкции агента.</p></div><div class="connection-services ai-services">
-<div class="settings-card card" id="ai-cloud-card"><div class="card-heading card-h"><h2>Yandex Cloud</h2><span id="ai-status" class="connection-status">Не подключено</span></div><div class="card-b">
+          </div></div><div class="connection-section-title ai-section-title"><span class="eyebrow">Голос и AI</span><h2>Голосовой ввод и AI-агенты</h2><p>Речь распознаёт Yandex SpeechKit, текст приводит в порядок модель Yandex AI Studio или DeepSeek — по инструкции агента.</p></div><div class="connection-services ai-services">
+<div class="ai-providers"><div class="settings-card card" id="ai-cloud-card"><div class="card-heading card-h"><h2>Yandex Cloud</h2><span id="ai-status" class="connection-status">Не подключено</span></div><div class="card-b">
 <p id="ai-error" class="notice error" role="alert" hidden=""></p>
 <form id="ai-settings-form" autocomplete="off">
 <label class="fld">ID каталога<input name="folder_id" maxlength="50" spellcheck="false" autocapitalize="off" placeholder="b1g…"><small>Каталог Yandex Cloud, в котором работают SpeechKit и AI Studio.</small></label>
@@ -117,6 +117,13 @@
 <label class="check-label ai-voice-toggle"><input name="voice_enabled" type="checkbox">Голосовой ввод в чатах для всех, кто пишет сообщения</label>
 <div class="btn-row ai-actions"><button class="primary btn" type="submit">Сохранить</button><button id="ai-verify" class="secondary btn sec" type="button">Проверить связь</button><button id="ai-clear" class="text-button" type="button" hidden="">Удалить ключ</button></div>
 </form></div></div>
+<div class="settings-card card" id="ai-deepseek-card"><div class="card-heading card-h"><h2>DeepSeek</h2><span id="ai-deepseek-status" class="connection-status">Не подключено</span></div><div class="card-b">
+<p id="ai-deepseek-error" class="notice error" role="alert" hidden=""></p>
+<form id="ai-deepseek-form" autocomplete="off">
+<label class="fld">API-ключ DeepSeek<span class="password-field"><input name="api_key" type="password" maxlength="200" autocomplete="off" spellcheck="false" placeholder="sk-…" data-1p-ignore="" data-lpignore="true"><button class="reveal" type="button" aria-label="Показать ключ" aria-pressed="false">Показать</button></span><small>Ключ из platform.deepseek.com → API keys. Хранится зашифрованным. Нужен только агентам с моделью DeepSeek; распознаёт речь по-прежнему Yandex.</small></label>
+<p class="form-note ai-deepseek-note">Текст сообщения для обработки уходит на серверы DeepSeek в Китае. Расходы считаются по пиковому тарифу и входят в общий месячный лимит.</p>
+<div class="btn-row ai-actions"><button class="primary btn" type="submit">Сохранить</button><button id="ai-deepseek-verify" class="secondary btn sec" type="button">Проверить связь</button><button id="ai-deepseek-clear" class="text-button" type="button" hidden="">Удалить ключ</button></div>
+</form></div></div></div>
 <div class="settings-card card" id="ai-agents-card"><div class="card-heading card-h"><h2>AI-агенты</h2><button id="ai-agent-new" class="secondary btn sec" type="button">Новый агент</button></div><div class="card-b">
 <p class="muted small">Агент — инструкция для модели под одну задачу. Основной агент голосового ввода обрабатывает каждую запись перед вставкой в поле сообщения.</p>
 <p id="ai-agents-error" class="notice error" role="alert" hidden=""></p>

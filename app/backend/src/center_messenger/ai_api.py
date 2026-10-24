@@ -22,6 +22,11 @@ class AiSettingsInput(InputModel):
     monthly_limit_rub: float | None = Field(default=None, ge=0, le=1_000_000)
 
 
+class DeepSeekInput(InputModel):
+    api_key: str | None = Field(default=None, max_length=200)
+    clear_key: bool = False
+
+
 class AgentInput(InputModel):
     name: str = Field(min_length=1, max_length=120)
     task: str = Field(default="voice_input", max_length=40)
@@ -66,6 +71,16 @@ def save_ai_settings(workspace_id: UUID, model: AiSettingsInput, request: Reques
 @router.post("/ai/settings/verify")
 def verify_ai_settings(workspace_id: UUID, request: Request):
     return voice(request).verify(identity(request, mutation=True), workspace_id)
+
+
+@router.put("/ai/deepseek")
+def save_deepseek(workspace_id: UUID, model: DeepSeekInput, request: Request):
+    return voice(request).save_deepseek(identity(request, mutation=True), workspace_id, model.model_dump())
+
+
+@router.post("/ai/deepseek/verify")
+def verify_deepseek(workspace_id: UUID, request: Request):
+    return voice(request).verify_deepseek(identity(request, mutation=True), workspace_id)
 
 
 @router.get("/ai/agents")

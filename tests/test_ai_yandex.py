@@ -156,6 +156,47 @@ class GuardsTest(unittest.TestCase):
         self.assertFalse(y.valid_folder("B1G-UPPER"))
         self.assertEqual(y.key_hint(KEY), "aaaa")
 
+class DeepSeekClientTest(unittest.TestCase):
+    def test_request_and_answer(self):
+        import json as _json
+        from center_messenger.ai_deepseek import DeepSeekClient, valid_key
+        seen = {}
+
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self, n): return self.body
+
+        def opener(request, timeout):
+            seen["url"], seen["auth"] = request.full_url, request.headers["Authorization"]
+            seen["body"] = _json.loads(request.data)
+            return Response(_json.dumps({"choices": [{"message": {"content": "Готово."}, "finish_reason": "stop"}],
+                                         "usage": {"prompt_tokens": 50, "completion_tokens": 3}}).encode())
+
+        answer = DeepSeekClient(opener).complete("тест", prompt="P", model="deepseek-flash", temperature=0.2,
+                                                 api_key="sk-" + "a" * 32, folder_id="ignored")
+        self.assertEqual(answer, {"text": "Готово.", "input_tokens": 50, "output_tokens": 3, "truncated": False})
+        self.assertEqual(seen["url"], "https://api.deepseek.com/chat/completions")
+        self.assertEqual(seen["auth"], "Bearer sk-" + "a" * 32)
+        self.assertEqual(seen["body"]["thinking"], {"type": "disabled"})
+        self.assertEqual(seen["body"]["messages"][1], {"role": "user", "content": "тест"})
+        self.assertTrue(valid_key("sk-" + "a" * 32)); self.assertFalse(valid_key("AQVN" + "a" * 32))
+
+    def test_errors(self):
+        import urllib.error
+        from center_messenger.ai_deepseek import DeepSeekClient
+        for status, code in ((401, "unauthorized"), (402, "no_balance"), (429, "rate_limited"), (500, "unavailable")):
+            def opener(request, timeout, status=status):
+                raise urllib.error.HTTPError(request.full_url, status, "x", {}, None)
+            with self.subTest(status=status), self.assertRaises(y.YandexError) as caught:
+                DeepSeekClient(opener).complete("t", prompt="p", model="deepseek-flash", temperature=0, api_key="sk-x")
+            self.assertEqual(caught.exception.code, code)
+        with self.assertRaises(y.YandexError) as caught:
+            DeepSeekClient(lambda *a, **k: None).complete("t", prompt="p", model="gpt-4", temperature=0, api_key="k")
+        self.assertEqual(caught.exception.code, "model_unknown")
+
+
 
 if __name__ == "__main__":
     unittest.main()

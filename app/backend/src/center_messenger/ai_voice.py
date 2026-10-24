@@ -1,5 +1,8 @@
 """Voice input through Yandex Cloud and the workspace's AI agents.
 
+Speech is always recognised by Yandex SpeechKit; an agent may rewrite the text
+with a Yandex model or with DeepSeek, each provider with its own sealed key.
+
 Settings and agents belong to owners and administrators; recognition is open to
 members who may write in chats. Network calls never run inside a database
 transaction. Audio and texts are not stored or logged: the usage ledger keeps
@@ -11,25 +14,47 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import text
 
+from center_messenger import ai_deepseek
 from center_messenger.accounts import audit
+from center_messenger.ai_deepseek import DeepSeekClient
 from center_messenger.ai_yandex import (
     DEFAULT_MODEL, DEFAULT_PROMPT, MODELS, YandexClient, YandexError, accept_normalized,
-    check_audio, key_hint, model_cost, silence, stt_cost, valid_folder, valid_key,
+    check_audio, key_hint, silence, stt_cost, valid_folder, valid_key,
 )
 from center_messenger.auth_security import AuthError
 
 SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:yandex-ai")
 PURPOSE = "yandex-ai"
+DEEPSEEK_SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:deepseek-ai")
+DEEPSEEK_PURPOSE = "deepseek-ai"
+PROVIDERS = {"yandex": "Yandex Cloud", "deepseek": "DeepSeek"}
+
+# Every model an agent may use: provider, title and price in roubles per 1000 tokens.
+CATALOG = {key: {"provider": "yandex", "title": value["title"], "input": value["input"], "output": value["output"]}
+           for key, value in MODELS.items()} | {
+    key: {"provider": "deepseek", "title": value["title"], **ai_deepseek.rub_per_1k(key)}
+    for key, value in ai_deepseek.MODELS.items()}
+
+
+def provider_of(model):
+    return CATALOG.get(model, {}).get("provider", "yandex")
+
+
+def model_cost(model, input_tokens, output_tokens):
+    price = CATALOG.get(model, CATALOG[DEFAULT_MODEL])
+    return (input_tokens * price["input"] + output_tokens * price["output"]) / 1000
 TASKS = {"voice_input": "Голосовой ввод"}
 VOICE_PER_HOUR = 60
 
 ERRORS = {
-    "unauthorized": (502, "Yandex Cloud отклонил ключ. Проверьте API-ключ и роли сервисного аккаунта в «Подключениях»."),
-    "rate_limited": (429, "Yandex Cloud временно ограничил запросы. Повторите через минуту."),
-    "bad_request": (422, "Yandex Cloud не принял запрос. Попробуйте ещё раз."),
-    "unavailable": (503, "Yandex Cloud сейчас недоступен. Повторите позже."),
-    "network": (503, "Не удалось связаться с Yandex Cloud. Повторите позже."),
-    "bad_response": (502, "Yandex Cloud вернул непонятный ответ. Повторите позже."),
+    "unauthorized": (502, "{name} отклонил ключ. Проверьте API-ключ в «Подключениях»."),
+    "rate_limited": (429, "{name} временно ограничил запросы. Повторите через минуту."),
+    "bad_request": (422, "{name} не принял запрос. Попробуйте ещё раз."),
+    "unavailable": (503, "{name} сейчас недоступен. Повторите позже."),
+    "network": (503, "Не удалось связаться с {name}. Повторите позже."),
+    "bad_response": (502, "{name} вернул непонятный ответ. Повторите позже."),
+    "no_balance": (502, "На счёте {name} закончились средства. Пополните баланс."),
+    "not_connected": (409, "{name} не подключён: добавьте API-ключ в «Подключениях»."),
     "content_filter": (422, "Модель отказалась обрабатывать этот текст."),
     "model_unknown": (422, "Эта модель не поддерживается."),
     "audio_format": (422, "Запись повреждена. Попробуйте записать ещё раз."),
@@ -38,9 +63,13 @@ ERRORS = {
 }
 
 
-def _fail(code):
-    status, detail = ERRORS.get(code, (502, "Не удалось обработать запрос к Yandex Cloud."))
-    return AuthError(status, detail)
+def _message(code, provider="yandex"):
+    status, detail = ERRORS.get(code, (502, "Не удалось обработать запрос к {name}."))
+    return status, detail.format(name=PROVIDERS[provider])
+
+
+def _fail(code, provider="yandex"):
+    return AuthError(*_message(code, provider))
 
 
 def _iso(value):
@@ -51,7 +80,8 @@ def _agent_public(row):
     return {
         "id": str(row["id"]), "name": row["name"], "task": row["task"],
         "task_title": TASKS.get(row["task"], row["task"]), "model": row["model"],
-        "model_title": MODELS.get(row["model"], {}).get("title", row["model"]),
+        "model_title": CATALOG.get(row["model"], {}).get("title", row["model"]),
+        "provider": provider_of(row["model"]),
         "prompt": row["prompt"], "temperature": float(row["temperature"]),
         "enabled": bool(row["enabled"]), "is_default": bool(row["is_default"]),
         "version": row["version"], "updated_at": _iso(row["updated_at"]),
@@ -70,7 +100,7 @@ def _clean_agent(data):
         raise AuthError(422, "Укажите название агента, до 120 символов.")
     if task not in TASKS:
         raise AuthError(422, "Неизвестная задача агента.")
-    if model not in MODELS:
+    if model not in CATALOG:
         raise AuthError(422, "Выберите модель из списка.")
     if not 1 <= len(prompt) <= 4000:
         raise AuthError(422, "Инструкция агента должна быть от 1 до 4000 символов.")
@@ -81,9 +111,10 @@ def _clean_agent(data):
 
 
 class AiVoice:
-    def __init__(self, alfa, client=None):
+    def __init__(self, alfa, client=None, deepseek=None):
         self.accounts, self.vault = alfa.accounts, alfa.vault
         self.client = client or YandexClient()
+        self.deepseek = deepseek or DeepSeekClient()
 
     # ── reading ────────────────────────────────────────────────────────────
     @staticmethod
@@ -119,11 +150,19 @@ class AiVoice:
             "voice_enabled": bool(row and row["voice_enabled"]),
             "monthly_limit_rub": float(row["monthly_limit_rub"]) if row and row["monthly_limit_rub"] is not None else None,
             "status": row["status"] if row else "not_configured",
-            "error": ERRORS.get(error, (0, "Проверка не прошла."))[1] if error else None,
+            "error": _message(error)[1] if error else None,
             "verified_at": _iso(row["verified_at"]) if row else None,
             "month_spent_rub": round(spent, 2),
             "vault_ready": self.vault.ready,
-            "models": [{"id": key, "title": value["title"]} for key, value in MODELS.items()],
+            "deepseek": {
+                "configured": bool(row and row["deepseek_key_ciphertext"]),
+                "key_hint": row["deepseek_key_hint"] if row else "",
+                "status": row["deepseek_status"] if row else "not_configured",
+                "error": _message(row["deepseek_error_code"], "deepseek")[1]
+                if row and row["deepseek_error_code"] else None,
+            },
+            "models": [{"id": key, "title": value["title"], "provider": value["provider"],
+                        "provider_title": PROVIDERS[value["provider"]]} for key, value in CATALOG.items()],
             "tasks": [{"id": key, "title": value} for key, value in TASKS.items()],
             "default_model": DEFAULT_MODEL, "default_prompt": DEFAULT_PROMPT,
         }
@@ -133,12 +172,18 @@ class AiVoice:
             self.accounts._workspace(db, actor, workspace, manage=True)
             return self._public(db, workspace)
 
-    def _credentials(self, db, workspace):
+    def _credentials(self, db, workspace, *, yandex=True):
+        """Decrypted keys: {"yandex", "folder", "deepseek"}; a missing provider is None."""
         row = self._settings(db, workspace)
-        if not row or not row["key_ciphertext"] or not row["folder_id"]:
+        if yandex and (not row or not row["key_ciphertext"] or not row["folder_id"]):
             raise AuthError(409, "Сначала укажите API-ключ и ID каталога Yandex Cloud.")
-        secret = self.vault.open(workspace, SECRET_ID, row["key_ciphertext"], purpose=PURPOSE)
-        return row, secret["api_key"], row["folder_id"]
+        creds = {"yandex": None, "folder": row["folder_id"] if row else "", "deepseek": None}
+        if row and row["key_ciphertext"]:
+            creds["yandex"] = self.vault.open(workspace, SECRET_ID, row["key_ciphertext"], purpose=PURPOSE)["api_key"]
+        if row and row["deepseek_key_ciphertext"]:
+            creds["deepseek"] = self.vault.open(workspace, DEEPSEEK_SECRET_ID, row["deepseek_key_ciphertext"],
+                                                purpose=DEEPSEEK_PURPOSE)["api_key"]
+        return creds
 
     def _usage(self, actor, workspace, *, kind, agent=None, seconds=0, tokens=(0, 0), cost=0.0,
                outcome="ok", error=None):
@@ -200,7 +245,8 @@ class AiVoice:
     def verify(self, actor, workspace):
         with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
-            _, key, folder = self._credentials(db, workspace)
+            creds = self._credentials(db, workspace)
+        key, folder = creds["yandex"], creds["folder"]
         cost, tokens, error = stt_cost(0.5), (0, 0), None
         try:
             self.client.recognize(silence(0.5), api_key=key)
@@ -220,6 +266,54 @@ class AiVoice:
             db.execute(text(
                 "INSERT INTO ai_usage(workspace_id,id,user_id,kind,audio_seconds,input_tokens,output_tokens,"
                 "cost_rub,outcome,error_code) VALUES (:w,:id,:u,'verify',0.5,:ti,:to,:c,:o,:e)"
+            ), {"w": workspace, "id": uuid4(), "u": actor.user_id, "ti": tokens[0], "to": tokens[1],
+                "c": round(cost, 4), "o": "error" if error else "ok", "e": error})
+            return self._public(db, workspace) | {"ok": error is None}
+
+    def save_deepseek(self, actor, workspace, data):
+        key = str(data.get("api_key") or "").strip()
+        clear = bool(data.get("clear_key"))
+        if not key and not clear:
+            raise AuthError(422, "Вставьте API-ключ DeepSeek.")
+        if key and not ai_deepseek.valid_key(key):
+            raise AuthError(422, "Ключ DeepSeek начинается с «sk-», дальше латинские буквы и цифры.")
+        with self.accounts.transaction(actor) as db:
+            self.accounts._workspace(db, actor, workspace, manage=True)
+            cipher, hint = (None, "") if clear else (
+                self.vault.seal(workspace, DEEPSEEK_SECRET_ID, {"api_key": key}, purpose=DEEPSEEK_PURPOSE), key_hint(key))
+            db.execute(text(
+                "INSERT INTO ai_settings(workspace_id,deepseek_key_ciphertext,deepseek_key_hint,updated_by) "
+                "VALUES (:w,:c,:h,:u) ON CONFLICT (workspace_id) DO UPDATE SET "
+                "deepseek_key_ciphertext=EXCLUDED.deepseek_key_ciphertext,deepseek_key_hint=EXCLUDED.deepseek_key_hint,"
+                "deepseek_status='not_configured',deepseek_error_code=NULL,"
+                "version=ai_settings.version+1,updated_at=now(),updated_by=EXCLUDED.updated_by"
+            ), {"w": workspace, "c": cipher, "h": hint, "u": actor.user_id})
+            audit(db, "ai_deepseek_updated", user_id=actor.user_id, workspace_id=workspace)
+            return self._public(db, workspace)
+
+    def verify_deepseek(self, actor, workspace):
+        with self.accounts.transaction(actor) as db:
+            self.accounts._workspace(db, actor, workspace, manage=True)
+            key = self._credentials(db, workspace, yandex=False)["deepseek"]
+        if not key:
+            raise AuthError(409, "Сначала сохраните API-ключ DeepSeek.")
+        model = next(iter(ai_deepseek.MODELS))
+        tokens, cost, error = (0, 0), 0.0, None
+        try:
+            answer = self.deepseek.complete("Проверка связи", prompt="Ответь одним словом: готово.",
+                                            model=model, temperature=0, api_key=key, max_tokens=20)
+            tokens = (answer["input_tokens"], answer["output_tokens"])
+            cost = model_cost(model, *tokens)
+        except YandexError as failure:
+            error = failure.code
+        with self.accounts.transaction(actor) as db:
+            self.accounts._workspace(db, actor, workspace, manage=True)
+            db.execute(text(
+                "UPDATE ai_settings SET deepseek_status=:s,deepseek_error_code=CAST(:e AS text) WHERE workspace_id=:w"
+            ), {"w": workspace, "s": "error" if error else "active", "e": error})
+            db.execute(text(
+                "INSERT INTO ai_usage(workspace_id,id,user_id,kind,input_tokens,output_tokens,"
+                "cost_rub,outcome,error_code) VALUES (:w,:id,:u,'verify',:ti,:to,:c,:o,CAST(:e AS text))"
             ), {"w": workspace, "id": uuid4(), "u": actor.user_id, "ti": tokens[0], "to": tokens[1],
                 "c": round(cost, 4), "o": "error" if error else "ok", "e": error})
             return self._public(db, workspace) | {"ok": error is None}
@@ -328,14 +422,18 @@ class AiVoice:
                                   "created_at": _iso(r["created_at"]), "author": r["display_name"]}
                                  for r in rows]}
 
-    def _normalize(self, raw, agent, key, folder):
+    def _normalize(self, raw, agent, creds):
         """(text, tokens, cost, fallback, error) — the raw text is kept whenever the model fails."""
         if not raw:
             return raw, (0, 0), 0.0, False, None
+        provider = provider_of(agent["model"])
+        client, key = (self.deepseek, creds["deepseek"]) if provider == "deepseek" else (self.client, creds["yandex"])
+        if not key:
+            return raw, (0, 0), 0.0, True, "not_connected"
         try:
-            answer = self.client.complete(raw, prompt=agent["prompt"], model=agent["model"],
-                                          temperature=float(agent["temperature"]), api_key=key,
-                                          folder_id=folder, max_tokens=min(2000, max(200, len(raw) * 2)))
+            answer = client.complete(raw, prompt=agent["prompt"], model=agent["model"],
+                                     temperature=float(agent["temperature"]), api_key=key,
+                                     folder_id=creds["folder"], max_tokens=min(2000, max(200, len(raw) * 2)))
         except YandexError as failure:
             return raw, (0, 0), 0.0, True, failure.code
         tokens = (answer["input_tokens"], answer["output_tokens"])
@@ -350,12 +448,13 @@ class AiVoice:
             raise AuthError(422, "Введите проверочный текст, до 2000 символов.")
         with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
-            _, key, folder = self._credentials(db, workspace)
-        normalized, tokens, cost, fallback, error = self._normalize(sample, values, key, folder)
-        self._usage(actor, workspace, kind="test", tokens=tokens, cost=cost,
-                    outcome="fallback" if fallback else "ok", error=error)
+            creds = self._credentials(db, workspace, yandex=False)
+        normalized, tokens, cost, fallback, error = self._normalize(sample, values, creds)
+        if error != "not_connected":
+            self._usage(actor, workspace, kind="test", tokens=tokens, cost=cost,
+                        outcome="fallback" if fallback else "ok", error=error)
         if fallback and error not in (None, "unusable"):
-            raise _fail(error)
+            raise _fail(error, provider_of(values["model"]))
         return {"text": normalized, "fallback": fallback, "cost_rub": round(cost, 4),
                 "tokens": {"input": tokens[0], "output": tokens[1]}}
 
@@ -382,7 +481,8 @@ class AiVoice:
             ), {"w": workspace, "id": str(agent_id) if agent_id else None}).mappings().one_or_none()
             if agent_id and agent is None:
                 raise AuthError(404, "Агент не найден или выключен.")
-            _, key, folder = self._credentials(db, workspace)
+            creds = self._credentials(db, workspace)
+        key = creds["yandex"]
         try:
             self.accounts.throttle(f"ai-voice:{workspace}:{actor.user_id}", limit=VOICE_PER_HOUR, minutes=60)
         except AuthError as error:
@@ -401,12 +501,14 @@ class AiVoice:
                   "fallback": False, "warning": None}
         tokens, error = (0, 0), None
         if agent:
-            normalized, tokens, model_spent, fallback, error = self._normalize(raw, agent, key, folder)
+            normalized, tokens, model_spent, fallback, error = self._normalize(raw, agent, creds)
             cost += model_spent
             result |= {"text": normalized, "fallback": fallback,
                        "agent": {"id": str(agent["id"]), "name": agent["name"]}}
             if fallback:
-                result["warning"] = "Текст вставлен без обработки: агент сейчас недоступен."
+                result["warning"] = ("Текст вставлен без обработки: " + PROVIDERS[provider_of(agent["model"])]
+                                     + " не подключён." if error == "not_connected"
+                                     else "Текст вставлен без обработки: агент сейчас недоступен.")
         if not raw:
             result["warning"] = "Речь не распознана. Попробуйте говорить ближе к микрофону."
         self._usage(actor, workspace, kind="voice", agent=agent["id"] if agent else None, seconds=seconds,

@@ -39,7 +39,7 @@ class ConnectorVault:
 
     @staticmethod
     def _aad(workspace: UUID, connection: UUID, purpose="alfa"):
-        if purpose not in {"alfa", "alfa-max-browser", "yandex-ai"}:
+        if purpose not in {"alfa", "alfa-max-browser", "yandex-ai", "deepseek-ai"}:
             raise ValueError("Unsupported connector secret purpose")
         return f"center-messenger:{purpose}:v1:{workspace}:{connection}".encode()
 
