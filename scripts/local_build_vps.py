@@ -64,7 +64,10 @@ def backup():
     os.chmod(dest,0o600)
     if result.returncode!=0 or dest.stat().st_size<1024:
         raise RuntimeError("Backup failed")
-    run("pg_restore","--list",str(dest),timeout=60)
+    with dest.open("rb") as source:
+        validation=subprocess.run(["docker","exec","-i","center-messenger-db-1","pg_restore","--list"],stdin=source,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=False,timeout=60)
+    if validation.returncode!=0:
+        raise RuntimeError("Backup verification failed: "+validation.stderr.decode(errors="replace")[:500])
     return dest
 
 def main(preview):
