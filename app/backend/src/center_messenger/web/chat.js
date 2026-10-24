@@ -630,6 +630,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $(".chat-list-scroll").addEventListener("scroll", maybeLoadMore, { passive: true });
   $("#chat-retry").addEventListener("click", () => { listRetryRequired = false; loadList(true).catch(error => fail(error)); });
   $("#chat-handled").addEventListener("click", markHandled);
+  // The name plate always opens the card; the info button opens and closes it.
+  document.addEventListener("cm:chat-details-open", () => {
+    if (detailsDialog.open && !detailsDialog.classList.contains("is-closing")) return;
+    openDetails().catch(error => fail(error));
+  });
   $("#chat-details").addEventListener("click", () => {
     if (detailsDialog.open && detailsDialog.dataset.mode === "docked") closeDetails(); else openDetails().catch(error => fail(error));
   });
@@ -877,7 +882,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const epoch = state.epoch, gen = generation, conversation = selected;
     const refresh = $("#chat-details-refresh"); refresh.hidden = !isAdmin() || !contactId; refresh.disabled = !isAdmin();
     familyPending(); const seq = detailsSeq;
-    detailsDialog.classList.remove("is-closing"); presentDetails();
+    clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing"); presentDetails();
     if (!contactId) { familyUnlinked(); return; }
     try {
       const result = await api(`${chatPath(conversation)}/family`);
@@ -920,7 +925,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (detailsDialog.open) { quietCloses += 1; detailsDialog.close(); }
     detailsDialog.dataset.mode = docked ? "docked" : "overlay";
     detailsDialog.classList.toggle("docked", docked);
-    chatLayout.classList.toggle("details-docked", docked);
     if (docked) { chatLayout.append(detailsDialog); detailsDialog.show(); }
     else { document.body.append(detailsDialog); detailsDialog.showModal(); }
     renderPin();
@@ -970,7 +974,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   detailsDialog.addEventListener("close", () => {
     clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing"); detailsPanel.style.removeProperty("--drag");
     if (quietCloses > 0) { quietCloses -= 1; return; }
-    detailsDialog.classList.remove("is-refreshing"); chatLayout.classList.remove("details-docked");
+    if (detailsDialog.open) return; // A late event from a close that a reopen has already replaced.
+    detailsDialog.classList.remove("is-refreshing");
     detailsSeq += 1; family = null; renderPin();
   });
   async function openCards(item) {

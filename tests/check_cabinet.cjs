@@ -36,6 +36,8 @@ const { fixture } = require('./browser_fixture.cjs');
       await page.locator('[data-close="chat-filters-dialog"]').click();
       await page.locator('#chat-person-open').click(); await page.waitForFunction(() => document.querySelector('#chat-details-name').textContent === 'Анна Смирнова');
       await page.locator('[data-close="chat-details-dialog"]').click();
+      // A closed client card must leave nothing on screen (it once stayed visible under the list).
+      await page.waitForFunction(() => { const d = document.querySelector('#chat-details-dialog'); return !d.open && d.getBoundingClientRect().width === 0; });
       assert.ok(data.calls.some(c => c.path.endsWith('/chats/client-0/family')));
       assert.equal(await page.locator('#chat-input').isDisabled(), role === 'observer');
       assert.equal(await page.locator('#chat-handled').isVisible(), role !== 'observer');
