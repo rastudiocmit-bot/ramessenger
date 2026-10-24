@@ -1036,6 +1036,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .app.is-searching #chat-chips{display:none}
 .app.is-searching .tabbar{display:none!important}
 .app.is-searching #chat-search-toggle{border-color:transparent;background:var(--surface-2)}
+@media (max-width:719px){#chat-search-toggle{position:relative;top:-5px}}
 
 /* iOS zooms into any field under 16px and does not zoom back out; touch screens get
    16px fields everywhere. */
