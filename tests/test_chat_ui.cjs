@@ -545,3 +545,30 @@ test("a late history response cannot overwrite a newer list counter at the same 
   await ui.app.enter();await ui.poll();
   assert.equal(ui.$('.avatar-count').textContent,'2');
 });
+
+test("family balance shows the CRM total while keeping the subscription amount separate", async t=>{
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(90)}});
+    if(url.pathname.endsWith('/family'))return {id:identifier(90),name:'Родитель',phones:[],emails:[],today:'2026-10-24',students:[{id:identifier(91),name:'Ребёнок',balance:'3962.50',groups:[],cards:[{id:'7',branch_id:'1',branch_name:'Филиал',status:'client',needs_refresh:false,paid_lesson_count:3,subscriptions:[{id:40,name:'Модельная школа',balance:'2725.00',begin:'2026-10-01',end:'2027-07-04'}]}]}]};
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  const amount=ui.$('.family-stats .family-stat strong');
+  assert.match(amount.textContent.replace(/\s/g,''),/^3962,5₽$/);
+  assert.match(amount.parentElement.title,/базовый счёт и абонементы/);
+  assert.match(ui.$('.family-item-value').textContent.replace(/\s/g,''),/^2725₽$/);
+});
+
+test("negative family debt uses the total including base money, even with positive subscriptions", async t=>{
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(90)}});
+    if(url.pathname.endsWith('/family'))return {id:identifier(90),name:'Родитель',phones:[],emails:[],today:'2026-10-24',students:[{id:identifier(91),name:'Ребёнок',balance:'-120.75',groups:[],cards:[{id:'7',branch_id:'1',branch_name:'Филиал',status:'client',needs_refresh:false,subscriptions:[{id:40,name:'Абонемент',balance:'2725.00'}]}]}]};
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.match(ui.$('.family-stats .negative strong').textContent.replace(/\s/g,''),/^-120,75₽$/);
+  assert.match(ui.$('.family-note.debt').textContent,/Общий баланс клиента отрицательный/);
+  assert.doesNotMatch(ui.$('.family-note.debt').textContent,/Баланс по абонементам/);
+});

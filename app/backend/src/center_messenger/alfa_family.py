@@ -84,7 +84,7 @@ def _lesson(raw, customer_id):
 
 
 def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=None):
-    """Read bounded child facts while using the latest synchronized source customer row."""
+    """Read live customer totals and bounded subscription/lesson details."""
     today = today or date.today()
     root = f"/v2api/{positive_id(branch_id)}"
     customer_id = positive_id(customer_id)
@@ -94,6 +94,24 @@ def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=
         or positive_id(source_customer.get("branch_id")) != branch_id
     ):
         raise AlfaError("invalid_response")
+    # Customer.balance is AlfaCRM's total money balance (base account and
+    # subscriptions). CustomerTariff.balance is only one component; adding it
+    # again would double-count money. Never reuse the directory snapshot when
+    # the operator explicitly refreshes this card.
+    customer = None
+    removed = (2, 0) if source_customer.get("status") == "archive" else (0, 2)
+    for state in removed:
+        rows = pages(client, f"{root}/customer/index",
+                     {"id": customer_id, "is_study": 2, "removed": state}, maximum=1)
+        if rows:
+            if positive_id(rows[0]["id"]) != customer_id:
+                raise AlfaError("invalid_response")
+            customer = rows[0]
+            break
+    if customer is None:
+        raise AlfaError("invalid_response")
+    money = source_balance(customer.get("balance"))
+    paid = source_lessons(customer.get("paid_lesson_count"))
     raw_subscriptions = pages(
         client,
         f"{root}/customer-tariff/index?customer_id={customer_id}",
@@ -157,27 +175,36 @@ def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=
             lesson = _lesson(raw, customer_id)
             lesson["status"] = status
             lessons.append(lesson)
-    money = source_balance(source_customer.get("balance"))
     return {
         "today": today.isoformat(),
         "balance": money,
-        "paid_lesson_count": source_lessons(source_customer.get("paid_lesson_count")),
+        "paid_lesson_count": paid,
         "subscriptions": subscriptions,
         "lessons": lessons,
     }
 
 
-def subscriptions_balance(cards):
-    """Sum remaining balance across a student's non-archived subscriptions."""
-    total = None
+def customer_balance(cards):
+    """Sum authoritative totals once per CRM customer, never subscription rows.
+
+    The same global Customer ID is observed in several branches. Prefer the
+    latest live observation; equally recent conflicting values are unknown,
+    not an arbitrary or duplicated amount. Distinct financial cards of the
+    selected child are additive; another child's money is not included.
+    """
+    customers = {}
     for card in cards:
-        for item in card.get("subscriptions", []):
-            if item.get("archived"):
-                continue
-            amount = source_balance(item.get("balance"))
-            if amount is None:
-                continue
-            total = amount if total is None else total + amount
+        customers.setdefault(positive_id(card["id"]), []).append(card)
+    total = None
+    for observations in customers.values():
+        latest = max(card.get("balance_updated_at") or "" for card in observations)
+        amounts = {source_balance(card.get("balance")) for card in observations
+                   if (card.get("balance_updated_at") or "") == latest}
+        amounts.discard(None)
+        if len(amounts) != 1:
+            return None
+        amount = amounts.pop()
+        total = amount if total is None else total + amount
     return str(total) if total is not None else None
 
 
