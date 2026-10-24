@@ -23,8 +23,8 @@ class MaxConnections:
     def transaction(self, actor, workspace, *, lock=False):
         return self.alfa._transaction(actor, workspace, lock=lock)
 
-    def chat_transaction(self, actor, workspace, *, lock=False):
-        return self.alfa.chat_transaction(actor, workspace, lock=lock)
+    def chat_transaction(self, actor, workspace, *, lock=False, snapshot=False):
+        return self.alfa.chat_transaction(actor, workspace, lock=lock, snapshot=snapshot)
 
     @staticmethod
     def row(db, workspace, connection):

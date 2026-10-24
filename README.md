@@ -56,12 +56,17 @@ docker run --rm --entrypoint alembic <image> -c /app/alembic.ini history
 ```sh
 npx playwright install --with-deps chromium
 npm run test:scroll
+npm run test:progress
 ```
 
 Проверяются 201 сообщение, нативное колесо мыши, сохранение позиции и отсутствие
 пропусков при старых/новых обновлениях. Для уже установленного Chromium можно
 задать `CM_TEST_CHROMIUM_EXECUTABLE`; дополнительные аргументы передаются JSON-массивом
 в `CM_TEST_CHROMIUM_ARGS`. Доступ к рабочим сообщениям и отправка клиентам не нужны.
+Проверка `test:progress` открывает весь кабинет с вымышленным API: ошибка 503,
+зависший запрос с отменой по таймауту, восстановление статуса и прекращение
+опроса при выходе из подключений. Проверка блокировок в `test_history_snapshot.py`
+требует обычной PostgreSQL; для PGlite она явно пропускается.
 
 ## Репозиторий и развёртывание
 

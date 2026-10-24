@@ -223,3 +223,5 @@ body:has(dialog[open]){overflow:hidden}
 .switch input:focus-visible+.switch-slider{outline:3px solid #8ed7cf;outline-offset:2px}
 #member-sections-dialog{width:max-content;max-width:calc(100% - 32px);padding-left:10px;padding-right:10px}
 #member-sections-dialog .member-head,#member-sections-dialog .muted,#member-sections-dialog .form-note,#member-sections-dialog .dialog-actions{width:380px;max-width:100%}
+
+.sync-progress.is-paused .sync-spinner,.sync-progress.is-offline .sync-spinner{animation:none;border-color:#b8c6c1}.sync-progress.is-paused .sync-progress-fill,.sync-progress.is-offline .sync-progress-fill{animation:none;transform:none;background:#b8c6c1}.sync-progress-streams{padding-left:19px;margin:10px 0 0;line-height:1.65}

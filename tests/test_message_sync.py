@@ -24,13 +24,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app/backend/src"))
 
 from center_messenger.alfa_max import AlfaMaxConnections, AlfaMaxWorker
-from center_messenger.alfa_history import PROJECTION_VERSION, RECHECK_INTERVAL, advance_history, history_coverage, history_pending, plan_history
+from center_messenger.alfa_history import PROJECTION_VERSION, RECHECK_INTERVAL, advance_history, history_coverage, history_pending, plan_history, retry_history, verify_saved_pages
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser, _message_time, parse_history_html
 from bs4 import BeautifulSoup
 from center_messenger.chat_api import ChatReader, SendInput
 from center_messenger.chat_store import changed, project_event, refresh_unread
 from center_messenger.crm_api import DirectoryReader
 from center_messenger.auth_security import AuthError
+from center_messenger.database import log_database_error
+from center_messenger.history_audit import compare_source_history
+from sqlalchemy.exc import OperationalError
 
 
 class HistoryCursorTests(unittest.TestCase):
@@ -62,6 +65,32 @@ class HistoryCursorTests(unittest.TestCase):
         self.assertEqual(cursor["1:receive"], 10)
         self.assertEqual(cursor["catchup:1:receive"], 1)
         self.assertEqual(cursor["until:1:receive"], "30")
+
+    def test_source_verification_identifies_missing_and_duplicate_ids_without_messages(self):
+        browser = Mock()
+        pages = [{"messages": [{"record_id": n} for n in values], "total": 6,
+                  "row_count": 2, "has_more": i < 2}
+                 for i, values in enumerate((("6", "5"), ("5", "4"), ("2", "1")))]
+        browser.read_histories.side_effect = lambda origin, state, requests: ([pages[r[2]] for r in requests], state)
+        report = compare_source_history(browser, "https://example.test", {}, 4, "sent", {"1", "2", "3", "4", "5"})
+        self.assertEqual(report["missing_ids"], ["6"])
+        self.assertEqual(report["duplicate_source_ids"], ["5"])
+        self.assertEqual(report["saved_not_observed_ids"], ["3"])
+        self.assertEqual(report["distinct_source_rows"], 5)
+        self.assertEqual(report["observed_rows"], 6)
+        self.assertEqual(report["pages_checked"], 3)
+
+    def test_database_error_diagnostics_never_log_sql_parameters_or_driver_text(self):
+        logger = Mock()
+        original = RuntimeError("secret message contents")
+        original.sqlstate = "57014"
+        error = OperationalError("SELECT 'secret query'", {"token": "secret token"}, original)
+        log_database_error(logger, error, operation="GET /api/workspaces/{workspace_id}/chat-updates")
+        args = logger.error.call_args.args
+        output = args[0] % args[1:]
+        self.assertIn("57014", output)
+        self.assertIn("OperationalError", output)
+        self.assertNotIn("secret", output)
 
 
 class PageTests(unittest.TestCase):
@@ -536,6 +565,70 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(report["streams"][0]["missing_rows"], 1)
         self.assertFalse(report["history_complete"])
 
+    def test_persistent_gap_stops_replays_but_keeps_new_messages_and_other_archives(self):
+        def page(request):
+            if request == (1, "receive", 0):
+                return {"messages": [self.row("1")], "has_more": False, "total": 2}
+            return {"messages": [], "has_more": False, "total": 0}
+        cursor = self.run_worker({}, page_result=page)
+        self.assertEqual(cursor["retries:1:receive"], 1)
+        cursor = self.run_worker(cursor, page_result=page)
+        self.assertIn("paused:1:receive", cursor)
+        self.assertEqual(cursor["error:1:receive"], "history_gap")
+        self.assertFalse(history_pending(cursor))
+        for _ in range(3):
+            cursor = self.run_worker(cursor, page_result=page)
+            self.assertEqual(cursor["error:1:receive"], "history_gap")
+            self.assertEqual(cursor["scan_pages:1:receive"], 1)
+        report = history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2])
+        self.assertTrue(report["history_paused"])
+        self.assertFalse(report["history_complete"])
+        self.assertFalse(report["totals_verified"])
+        self.assertFalse(report["backfill_pending"])
+        def new_page(request):
+            if request == (1, "receive", 0):
+                return {"messages": [self.row("3", body="New live message")], "has_more": False, "total": 3}
+            return page(request)
+        cursor = self.run_worker(cursor, page_result=new_page)
+        self.assertEqual({m["payload"]["crm_record_id"] for m in self.messages()}, {"1", "3"})
+        self.assertIn("paused:1:receive", cursor)
+        cursor, _ = plan_history(cursor, [1, 2], datetime.now(UTC) + RECHECK_INTERVAL + timedelta(seconds=1))
+        self.assertNotIn("paused:1:receive", cursor)
+        self.assertNotIn("retries:1:receive", cursor)
+
+    def test_manual_retry_resumes_only_paused_archives_and_repairs_the_gap(self):
+        original = {"projection_version": PROJECTION_VERSION, "streams": ["1:receive", "1:sent"],
+                    "paused:1:receive": (datetime.now(UTC) + RECHECK_INTERVAL).isoformat(),
+                    "error:1:receive": "history_gap", "1:receive": 0, "1:sent": 19}
+        cursor = retry_history(original)
+        self.assertNotIn("paused:1:receive", cursor)
+        self.assertEqual(cursor["1:sent"], 19)
+        self.assertIn("paused:1:receive", original)
+        cursor = self.run_worker(cursor, page_result=lambda request: {
+            "messages": [self.row("1"), self.row("2")] if request == (1, "receive", 0) else [],
+            "has_more": False, "total": 2 if request[:2] == (1, "receive") else 0})
+        report = history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2])
+        self.assertTrue(report["history_complete"])
+        self.assertEqual(len(self.messages()), 2)
+
+    def test_projection_failure_cannot_advance_past_missing_source_ids(self):
+        def page(request):
+            return {"messages": [self.row("20")] if request == (1, "receive", 4) else [], "has_more": True}
+        cursor = {"projection_version": PROJECTION_VERSION, "1:receive": 4}
+        with patch.object(self.service, "_project_page"):
+            for _ in range(3):
+                cursor = self.run_worker(cursor, page_result=page)
+                self.assertEqual(cursor["1:receive"], 4)
+                self.assertEqual(cursor["error:1:receive"], "history_projection")
+                self.assertEqual(cursor["missing_ids:1:receive"], ["20"])
+        self.assertIn("paused:1:receive", cursor)
+        cursor = self.run_worker(cursor, page_result=page)
+        self.assertNotIn((1, "receive", 4), self.service.browser.read_histories.call_args.args[2])
+        cursor = self.run_worker(retry_history(cursor), page_result=lambda request: {
+            "messages": [self.row("20")] if request == (1, "receive", 0) else [], "has_more": False})
+        self.assertNotIn("error:1:receive", cursor)
+        self.assertEqual(len(self.messages()), 1)
+
     def test_coverage_counts_source_rows_once_for_bulk_recipients(self):
         self.add_customer(uuid4(), 2, 8)
         row = self.row("1", direction="out", actor="automation")
@@ -550,6 +643,18 @@ class MessageSyncTests(unittest.TestCase):
         self.assertTrue(report["totals_verified"])
         self.assertEqual(report["streams"][1]["source_rows"], 1)
         self.assertEqual(len(self.messages()), 2)
+
+    def test_page_receipt_accepts_a_saved_recipient_projection_without_a_legacy_base_alias(self):
+        self.add_customer(uuid4(), 2, 8)
+        row = self.row("1", direction="out", actor="automation")
+        row["customers"].append({"branch_id": 2, "customer_id": 8, "name": "Other", "status": "archive"})
+        self.project(row)
+        self.db.execute(text("DELETE FROM source_records WHERE workspace_id=:w AND connection_id=:c "
+                             "AND namespace='alfa_max' AND external_record_id='out:1:1'"),
+                        {"w": self.workspace, "c": self.channel})
+        result = {"messages": [row], "has_more": False}
+        verify_saved_pages(self.db, self.workspace, self.channel, [(1, "sent", 0)], [result])
+        self.assertNotIn("error", result)
 
     def test_progress_detects_an_active_worker_and_only_counts_its_channel(self):
         self.project(self.row())

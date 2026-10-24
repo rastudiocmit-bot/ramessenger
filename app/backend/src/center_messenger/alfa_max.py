@@ -9,13 +9,18 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4, uuid5
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from center_messenger.accounts import audit
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser
-from center_messenger.alfa_history import advance_history, history_coverage, history_pending, plan_history
+from center_messenger.alfa_history import (
+    advance_history, history_coverage, history_pending, plan_history,
+    reconcile_history, retry_history, verify_saved_pages,
+)
 from center_messenger.auth_security import AuthError
 from center_messenger.chat_store import changed, refresh_unread
 from center_messenger.crm_api import DirectoryReader
+from center_messenger.database import log_database_error
 from center_messenger.message_order import message_order, source_order, visible_message
 
 ERRORS = {
@@ -50,6 +55,8 @@ ERRORS = {
     "not_connected": "Сначала подключите отдельную веб-сессию AlfaCRM для MAX.",
     "history_unavailable": "В истории AlfaCRM пока нет связанной карточки клиента.",
     "history_incomplete": "В AlfaCRM записей больше, чем сохранено в базе. Повторно проверяем всю историю.",
+    "history_gap": "После повторного обхода число записей не совпало. Проверка архива приостановлена на 6 часов; новые сообщения продолжают поступать. Для повтора нажмите «Синхронизировать историю».",
+    "history_projection": "Не все прочитанные ID сообщений сохранены. Страница будет проверена повторно; позиция обхода не изменена.",
     "settings_changed": "Настройки AlfaCRM изменились. Подключите веб-сессию заново.",
     "internal": "Не удалось обновить историю AlfaCRM MAX. Повторите позже.",
 }
@@ -103,8 +110,8 @@ class AlfaMaxConnections:
         return self._sms_templates
 
     @contextmanager
-    def _transaction(self, actor, workspace, *, lock=False):
-        with self.alfa._transaction(actor, workspace, lock=lock) as db:
+    def _transaction(self, actor, workspace, *, lock=False, snapshot=False):
+        with self.alfa._transaction(actor, workspace, lock=lock, snapshot=snapshot) as db:
             yield db
 
     @staticmethod
@@ -200,10 +207,9 @@ class AlfaMaxConnections:
         ]
 
     def progress(self, actor, workspace):
-        with self._transaction(actor, workspace) as db:
-            # Projectors publish rows and cursors under the exclusive workspace
-            # lock. Read their coverage together, never across two commits.
-            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR SHARE"), {"w": workspace})
+        # A read-only snapshot keeps counters and cursors consistent without
+        # waiting for, or blocking, the projector's exclusive workspace lock.
+        with self._transaction(actor, workspace, snapshot=True) as db:
             row = self._row(db, workspace)
             if row is None:
                 return {
@@ -448,6 +454,9 @@ class AlfaMaxConnections:
             row = self._row(db, workspace)
             if row is None or row["state"] != "active":
                 raise AuthError(409, "Сначала подключите веб-сессию AlfaCRM MAX.")
+            cursor = retry_history(row["history_cursor"] or {})
+            db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) "
+                            "WHERE workspace_id=:w"), {"w": workspace, "cursor": json.dumps(cursor)})
             self._schedule(db, workspace, row["connection_id"])
             audit(
                 db,
@@ -1129,8 +1138,8 @@ class AlfaMaxWorker:
             results, session = self.service.browser.read_histories(
                 origin, session, requests, on_progress=heartbeat, continue_on_error=True
             )
-            updates = advance_history(cursor, requests, results)
-            page_error = next((result["error"] for result in results if result.get("error")), None)
+            updates = [(branch, result["messages"]) for (branch, _, _), result in zip(requests, results, strict=True)
+                       if not result.get("error")]
             heartbeat()
             self.service.sms_templates(origin, session, branches[0])
             phase = "persist_history"
@@ -1151,21 +1160,32 @@ class AlfaMaxWorker:
                     self.service._project_page(
                         db, workspace, connection, crm_connection, branch, records
                     )
-                # A completed traversal with fewer persisted source identities
-                # than CRM reports is not complete. Replay instead of silently
-                # accepting a skipped page or a legacy projection mismatch.
+                verify_saved_pages(db, workspace, connection, requests, results)
+                advance_history(cursor, requests, results)
+                for request, result in zip(requests, results, strict=True):
+                    if result.get("missing_ids"):
+                        logging.getLogger(__name__).error(
+                            "AlfaCRM MAX projection gap workspace=%s branch=%s direction=%s page=%s missing_ids=%s",
+                            workspace, *request, result["missing_ids"],
+                        )
                 finished = any(cursor.get(f"finished:{key}") and
                                cursor[f"finished:{key}"] != original_cursor.get(f"finished:{key}")
                                for key in cursor["streams"])
                 if finished:
                     coverage = history_coverage(db, workspace, connection, cursor, branches)
+                    reconcile_history(cursor, original_cursor, coverage)
                     for stream in coverage["streams"]:
-                        if stream["complete"] and stream["missing_rows"]:
-                            key = f"{stream['branch_id']}:{stream['direction']}"
-                            cursor[key] = 0
-                            cursor[f"complete:{key}"] = False
-                            cursor[f"error:{key}"] = "history_incomplete"
-                            page_error = "history_incomplete"
+                        key = f"{stream['branch_id']}:{stream['direction']}"
+                        if stream["missing_rows"] and cursor.get(f"error:{key}") in {"history_incomplete", "history_gap"}:
+                            logging.getLogger(__name__).warning(
+                                "AlfaCRM MAX coverage gap workspace=%s branch=%s direction=%s saved=%s expected=%s retry=%s paused=%s",
+                                workspace, stream["branch_id"], stream["direction"], stream["source_rows"],
+                                stream["expected_rows"], cursor.get(f"retries:{key}", 0),
+                                cursor.get(f"paused:{key}"),
+                            )
+                page_error = next((result["error"] for result in results if result.get("error")), None)
+                status_error = page_error or next((cursor.get(f"error:{key}") for key in cursor["streams"]
+                                                   if cursor.get(f"error:{key}")), None)
                 db.execute(
                     text(
                         "UPDATE alfa_max_settings SET session_ciphertext=:session,"
@@ -1178,7 +1198,7 @@ class AlfaMaxWorker:
                         "session": encrypted,
                         "cursor": json.dumps(cursor),
                         "success": bool(updates),
-                        "error": page_error,
+                        "error": status_error,
                     },
                 )
                 # Keep backfilling older pages quickly; once every branch and
@@ -1240,14 +1260,13 @@ class AlfaMaxWorker:
                     self._release(db, workspace, connection, lease, delay)
             except Exception:
                 pass
-            tb = traceback.format_exc()
-            logging.getLogger(__name__).error(
-                "AlfaCRM MAX history sync failed phase=%s exception=%s delay=%d\n%s",
-                phase,
-                type(error).__name__,
-                delay,
-                tb,
-            )
+            if isinstance(error, SQLAlchemyError):
+                log_database_error(logging.getLogger(__name__), error, operation=f"alfa_max_sync:{phase}")
+            else:
+                logging.getLogger(__name__).error(
+                    "AlfaCRM MAX history sync failed phase=%s exception=%s delay=%d\n%s",
+                    phase, type(error).__name__, delay, traceback.format_exc(),
+                )
         duration = time.monotonic() - sync_start
         logging.getLogger(__name__).info(
             "AlfaCRM MAX sync completed workspace=%s connection=%s duration=%.1fs",

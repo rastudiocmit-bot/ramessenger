@@ -53,22 +53,23 @@
     document.querySelectorAll('input[type="password"], .password-field input').forEach(input => { input.value = ""; input.type = "password"; });
     document.querySelectorAll(".reveal").forEach(button => { button.textContent = "Показать"; button.setAttribute("aria-label", "Показать пароль"); button.setAttribute("aria-pressed", "false"); });
   }
-  async function api(path, { method = "GET", data, track = true } = {}) {
+  async function api(path, { method = "GET", data, track = true, timeoutMs = 0 } = {}) {
     const epoch = state.epoch;
     const headers = { "Accept": "application/json" };
     if (method !== "GET") {
       headers["Content-Type"] = "application/json";
       if (state.csrf) headers["X-CSRF-Token"] = state.csrf;
     }
-    let response;
+    let response, payload = null;
+    const controller = timeoutMs ? new AbortController() : null;
+    const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      response = await fetch(`/api${path}`, { method, headers, credentials: "same-origin", cache: "no-store", body: method === "GET" ? undefined : JSON.stringify(data || {}) });
+      response = await fetch(`/api${path}`, { method, headers, credentials: "same-origin", cache: "no-store", signal: controller?.signal, body: method === "GET" ? undefined : JSON.stringify(data || {}) });
+      if (response.status !== 204) {
+        try { payload = await response.json(); } catch (error) { if (controller?.signal.aborted) throw error; }
+      }
     } catch (_) { throw new Error("Не удалось связаться с сервисом. Проверьте соединение."); }
-    if (track && epoch !== state.epoch) throw new DOMException("Устаревший запрос", "AbortError");
-    let payload = null;
-    if (response.status !== 204) {
-      try { payload = await response.json(); } catch (_) { /* Generic failure below. */ }
-    }
+    finally { if (timeout !== null) clearTimeout(timeout); }
     if (track && epoch !== state.epoch) throw new DOMException("Устаревший запрос", "AbortError");
     if (!response.ok) {
       const error = new Error(typeof payload?.detail === "string" ? payload.detail : "Не удалось выполнить действие. Попробуйте позже.");
@@ -150,6 +151,7 @@
     state.pane = pane;
     const sections = grantedSections();
     if (!sections[state.pane]) state.pane = sections.messages ? "messages" : "overview";
+    if (state.pane !== "connections") alfaMaxProgress.reset();
     show($("#overview-tab"), sections.overview); show($("#team-tab"), sections.team); show($("#messages-tab"), sections.messages); show($("#clients-tab"), sections.clients); show($("#connections-tab"), sections.connections); show($("#security-tab"), sections.security);
     if (state.pane !== "clients") directory.leave();
     if (state.pane !== "messages") chat.leave();
@@ -473,6 +475,7 @@
   });
 
   function resetAlfaMax() {
+    alfaMaxProgress.reset();
     state.alfaMax = null; state.alfaMaxBusy = false;
     $("#alfa-max-connect-form").reset(); $("#alfa-max-otp-form").reset();
     $("#alfa-max-status").textContent = "Не подключено";
@@ -524,36 +527,8 @@
     $("#alfa-max-info").textContent = details.join(" · ");
     notice(!payload.vault_ready ? "На сервере не настроен ключ хранения веб-сессий." : (payload.error || ""), $("#alfa-max-error"));
     alfaMaxButtons();
-    if (payload.state === "active") loadAlfaMaxProgress();
-  }
-  function stopAlfaMaxProgress() {
-    if (state.alfaMaxProgressTimer) { clearTimeout(state.alfaMaxProgressTimer); state.alfaMaxProgressTimer = null; }
-  }
-  function scheduleAlfaMaxProgress() {
-    stopAlfaMaxProgress();
-    state.alfaMaxProgressTimer = setTimeout(loadAlfaMaxProgress, 2000);
-  }
-  async function loadAlfaMaxProgress() {
-    const workspace = state.workspace;
-    if (!workspace) return;
-    let payload;
-    try {
-      payload = await api("/workspaces/" + workspace.id + "/integrations/alfa-max/sync-progress");
-    } catch (_) { stopAlfaMaxProgress(); return; }
-    if (workspace.id !== state.workspace?.id) return;
-    if (!payload.configured || payload.state !== "active") { stopAlfaMaxProgress(); show($("#alfa-max-progress"), false); return; }
-    show($("#alfa-max-progress"));
-    const streams = payload.streams || [], done = streams.filter(s => s.complete && !s.missing_rows).length;
-    const issue = payload.error || streams.find(s => s.error)?.error;
-    $("#alfa-max-progress").classList.toggle("is-complete", Boolean(payload.history_complete && !issue));
-    $("#alfa-max-progress-text").textContent = issue ? "История загружена не полностью"
-      : payload.history_complete ? "Обход всей истории завершён" : "Загружаем историю за весь период…";
-    const period = payload.oldest_at ? " · С " + date(payload.oldest_at) + " по " + date(payload.newest_at) : "";
-    $("#alfa-max-progress-detail").textContent = "В базе сообщений: " + payload.messages + " · Диалогов: " + payload.conversations
-      + " · Журналов проверено: " + done + " из " + streams.length + period + (issue ? " · " + issue : "");
-    if (payload.backfill_pending || payload.syncing) {
-      scheduleAlfaMaxProgress();
-    }
+    if (payload.state === "active") alfaMaxProgress.start();
+    else alfaMaxProgress.reset();
   }
   async function alfaMaxAction(action, success) {
     if (state.alfaMaxBusy || !state.workspace) return;
@@ -615,5 +590,6 @@
   }
   const directory = window.CenterDirectory({ $, state, api, node, show, notice, date });
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast, confirm, renderPane });
+  const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date });
   start();
 })();
