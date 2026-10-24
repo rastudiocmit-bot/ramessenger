@@ -1,0 +1,14 @@
+[Unit]
+Description=Guarded local-source Center Messenger build and deployment
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/center-messenger-github
+ExecStart=/usr/bin/python3 /opt/center-messenger-github/local_build_vps.py
+TimeoutStartSec=2400
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
