@@ -9,25 +9,25 @@
     theme = normalize(value);
     root.dataset.theme = theme;
     document.querySelector('meta[name="color-scheme"]')?.setAttribute("content", theme);
-    const control = document.querySelector("#chat-theme");
-    if (control) control.value = theme;
+    for (const control of document.querySelectorAll("[data-theme-control],#chat-theme")) {
+      if (control.type === "checkbox") control.checked = theme === "dark";
+      else control.value = theme;
+    }
   }
   // This script runs before stylesheets, so a saved dark theme does not flash light.
   // System colour preferences never change the explicitly chosen application theme.
   apply(theme);
 
   function bind() {
-    const control = document.querySelector("#chat-theme");
-    if (!control) return;
-    control.value = theme;
-    control.addEventListener("change", () => {
-      apply(control.value);
-      const status = document.querySelector("#chat-theme-status");
+    apply(theme);
+    for (const control of document.querySelectorAll("[data-theme-control],#chat-theme")) control.addEventListener("change", () => {
+      apply(control.type === "checkbox" ? control.checked ? "dark" : "light" : control.value);
+      const statuses = document.querySelectorAll("[data-theme-status],#chat-theme-status");
       try {
         localStorage.setItem(key, theme);
-        if (status) { status.textContent = ""; status.hidden = true; }
+        for (const status of statuses) { status.textContent = ""; status.hidden = true; }
       } catch (_) {
-        if (status) {
+        for (const status of statuses) {
           status.textContent = "Тема применена. Браузер запретил сохранение настройки; после закрытия страницы выбор может сброситься.";
           status.hidden = false;
         }

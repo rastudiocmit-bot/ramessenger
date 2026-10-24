@@ -33,15 +33,20 @@ const root = path.join(__dirname, "../app/backend/src/center_messenger/web");
     });
     await page.route("**/*", route => {
       const url = new URL(route.request().url()), pathname = url.pathname;
+      if (url.hostname !== "synthetic.example.test") return route.abort();
       if (pathname === "/") return route.fulfill({ contentType: "text/html", body: fs.readFileSync(root + "/index.html", "utf8") });
       if (pathname.startsWith("/assets/")) {
         const file = path.join(root, path.basename(pathname));
-        return fs.existsSync(file) ? route.fulfill({ contentType: file.endsWith(".js") ? "application/javascript" : "text/css", body: fs.readFileSync(file) }) : route.abort();
+        const ext = path.extname(file), mime = { ".js": "application/javascript", ".css": "text/css", ".woff2": "font/woff2", ".jpg": "image/jpeg", ".png": "image/png" }[ext];
+        return fs.existsSync(file) ? route.fulfill({ contentType: mime, body: fs.readFileSync(file) }) : route.abort();
       }
       let payload;
       if (pathname === "/api/auth/status") payload = { setup_required: false };
       else if (pathname === "/api/auth/session") payload = { user: { id: "test", display_name: "Test", email: "test@example.test" }, csrf: "test",
         workspaces: [{ id: "test", name: "Synthetic workspace", role: "owner", timezone: "Europe/Moscow" }] };
+      else if (pathname.endsWith("/summary")) payload = { incoming: 0, previous_incoming: 0, waiting: 0, new_leads: 0, average_response_seconds: null, days: [], branches: [], operators: [] };
+      else if (pathname.endsWith("/chats/context")) payload = { channels: [], branches: [] };
+      else if (pathname.endsWith("/chat-updates")) payload = { updates: [], next_seq: 0, has_more: false };
       else if (pathname.endsWith("/sync-progress")) {
         statusRequests += 1;
         if (statusRequests === 2) return route.fulfill({ status: 503, contentType: "application/json", body: '{"detail":"Temporary failure"}' });

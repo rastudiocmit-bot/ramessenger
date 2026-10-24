@@ -1,0 +1,42 @@
+"use strict";
+(() => {
+const I = {
+  back:'<path d="M15 19 8 12l7-7"/>',
+  search:'<circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/>',
+  close:'<path d="M18 6 6 18M6 6l12 12"/>',
+  info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.4"/>',
+  // Centred on the glyph's centre of mass, not its bounding box: the tail sits low-left,
+  // so a box-centred plane still reads as pushed up and to the right.
+  send:'<g transform="translate(-1.34 0.34)"><path d="M4.3 11.2 19 4.6c.8-.4 1.6.4 1.3 1.2l-5.1 14.3c-.3.8-1.4.9-1.8.1l-2.9-5.4-5.3-2.3c-.8-.3-.8-1-.1-1.3z" fill="currentColor" stroke="none"/></g>',
+  bolt:'<path d="M13 2 4.5 13.2h6.2L10 22l8.6-11.3h-6.2z"/>',
+  clip:'<path d="M20 11.5 12.2 19a4.6 4.6 0 0 1-6.5-6.5l8-7.7a3 3 0 0 1 4.3 4.3l-8 7.7a1.5 1.5 0 0 1-2.1-2.1l7.4-7.1"/>',
+  check:'<path d="m4 12.5 5 5L20 6.5"/>',
+  checks:'<path d="m1.5 12.5 4.6 4.6L15.5 7.6"/><path d="m9.5 15.5 1.6 1.6L20.5 7.6"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/>',
+  warn:'<path d="M12 3.8 2.8 20h18.4z"/><path d="M12 10v4M12 17v.4"/>',
+  retry:'<path d="M20 11A8 8 0 1 0 18 17"/><path d="M20 5v6h-6"/>',
+  chats:'<path d="M20.5 12.4c0 4.2-3.8 7.6-8.5 7.6-1.1 0-2.2-.2-3.1-.5L4 21l1.4-3.8A7.2 7.2 0 0 1 3.5 12.4C3.5 8.2 7.3 4.8 12 4.8s8.5 3.4 8.5 7.6Z"/>',
+  queue:'<path d="M4 7h11M4 12h8M4 17h11"/><path d="m16.5 15.5 2 2 3.5-4"/>',
+  user:'<circle cx="12" cy="8.5" r="3.8"/><path d="M4.8 20a7.4 7.4 0 0 1 14.4 0"/>',
+  moon:'<path d="M20 13.5A8.2 8.2 0 0 1 10.5 4a8.3 8.3 0 1 0 9.5 9.5Z"/>',
+  file:'<path d="M14 3.5H7.5A1.5 1.5 0 0 0 6 5v14a1.5 1.5 0 0 0 1.5 1.5h9A1.5 1.5 0 0 0 18 19V7.5z"/><path d="M14 3.5V7a.5.5 0 0 0 .5.5H18"/>',
+  exit:'<path d="M15.5 16.5 20 12l-4.5-4.5"/><path d="M20 12H9"/><path d="M13 4.5H5.5A1.5 1.5 0 0 0 4 6v12a1.5 1.5 0 0 0 1.5 1.5H13"/>',
+  shield:'<path d="M12 3.5 5 6v5.6c0 4 2.9 7.6 7 8.9 4.1-1.3 7-4.9 7-8.9V6z"/>',
+  crm:'<rect x="3.5" y="5" width="17" height="14.5" rx="2.5"/><path d="M3.5 9.5h17M8.5 5v4.5"/>',
+  bell:'<path d="M18 16V11a6 6 0 1 0-12 0v5l-1.6 2.4h15.2z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
+  eye:'<path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/>',
+  lock:'<rect x="4.5" y="10.5" width="15" height="9.5" rx="2.5"/><path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"/>',
+  chart:'<path d="M4 20V9M10 20V4M16 20v-7M22 20H2"/>',
+  people:'<circle cx="9" cy="8.5" r="3.4"/><path d="M2.8 19.5a6.4 6.4 0 0 1 12.4 0"/><path d="M16.4 5.4a3.4 3.4 0 0 1 0 6.3M17.6 14.2a6.4 6.4 0 0 1 3.6 5.3"/>',
+  team:'<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M8 9.5h8M8 14h5"/>',
+  plug:'<path d="M9 3v6M15 3v6"/><path d="M6.5 9h11v3.2a5.5 5.5 0 0 1-11 0z"/><path d="M12 17.7V21"/>',
+  building:'<path d="M4 20.5V5.2L13 3v17.5"/><path d="M13 9.5h7v11"/><path d="M2.5 20.5h19"/><path d="M7 8.2v.4M7 12v.4M9.8 8.2v.4M9.8 12v.4M16.3 13v.4M16.3 16.6v.4"/>',
+  plus:'<path d="M12 5.5v13M5.5 12h13"/>',
+  stop:'<rect x="6.5" y="6.5" width="11" height="11" rx="2.5"/>',
+  copy:'<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.5"/><path d="M15.5 5.5h-9A2 2 0 0 0 4.5 7.5v9"/>',
+  out:'<path d="M14 4.5h5.5V10"/><path d="M19.5 4.5 11 13"/><path d="M18 14.5v4a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6h4"/>',
+  more:'<circle cx="5.5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor"/>',
+  cog:'<circle cx="12" cy="12" r="3.1"/><path d="M12 2.8v2.6M12 18.6v2.6M21.2 12h-2.6M5.4 12H2.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8M18.5 18.5l-1.8-1.8M7.3 7.3 5.5 5.5"/>',
+};
+window.CenterIcon = name => { const e = document.createElementNS("http://www.w3.org/2000/svg", "svg"); e.setAttribute("viewBox", "0 0 24 24"); e.setAttribute("fill", "none"); e.setAttribute("stroke", "currentColor"); e.setAttribute("stroke-width", "1.9"); e.setAttribute("stroke-linecap", "round"); e.setAttribute("stroke-linejoin", "round"); e.setAttribute("aria-hidden", "true"); e.innerHTML = I[name] || I.more; return e; };
+})();

@@ -1,0 +1,81 @@
+// Synthetic data only. Every request is intercepted; no real CRM or MAX delivery.
+const fs = require('node:fs');
+const path = require('node:path');
+const web = path.join(__dirname, '../app/backend/src/center_messenger/web');
+async function fixture(context, role = 'owner', sections = ['overview', 'messages', 'security']) {
+  const calls = [], mutations = [], errors = [], unexpected = [];
+  context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
+  const conversations = Array.from({ length: 40 }, (_, n) => ({ id: 'client-' + n,
+    name: n === 0 ? 'Анна Смирнова' : 'Клиент ' + String(n + 1).padStart(2, '0'), students: [n === 0 ? 'Миша, 6 лет' : 'Ученик ' + (n + 1)],
+    status: n % 2 ? 'lead' : 'client', channel_name: 'MAX через AlfaCRM', contact_id: 'contact-' + n,
+    unread: n < 3, unread_count: n < 3 ? n + 1 : 0, can_send: role !== 'observer', revision: 1, inbound_seq: 3,
+    last_message_at: '2026-10-24T11:00:00Z', waiting_since: '2026-10-24T11:00:00Z', preview: 'Подскажите, пожалуйста, расписание занятий', last_direction: 'in' }));
+  const messages = [
+    { id: 'm1', text: 'Здравствуйте! Подскажите, есть ли места на подготовку к школе для Миши?', direction: 'in', actor_type: 'contact', state: 'received' },
+    { id: 'm2', text: 'Анна, добрый день! Да, места есть. Можем предложить вторник и четверг в 17:00.', direction: 'out', actor_type: 'human', state: 'read' },
+    { id: 'm3', text: 'Напоминаем о занятии сегодня в 17:00. Будем рады видеть Мишу!', direction: 'out', actor_type: 'automation', template_name: 'Напоминание о занятии', state: 'accepted' },
+    { id: 'm4', text: 'Спасибо! Запишите нас, пожалуйста, на пробное занятие.', direction: 'in', actor_type: 'contact', state: 'received' }
+  ].map((m, n) => ({ ...m, occurred_at: `2026-10-24T10:0${n}:00Z`, customer_branch_id: '1',
+    sort_time: String(1792836000000000 + n * 60000000), crm_order: String(n + 1), version: 1, attachments: [] }));
+  const contacts = conversations.slice(0, 9).map((c, n) => ({ id: c.contact_id, name: c.name, status: c.status,
+    students: c.students, student_count: 1, groups: ['Подготовка к школе'], group_count: 1,
+    max_connected: true, max_bot_connected: true, needs_review: false }));
+  const family = { id: 'contact-0', name: conversations[0].name, phones: ['+7 900 000-00-00'], emails: [], today: '2026-10-24',
+    max_connected: true, max_bot_connected: true, students: [{ id: 'student-0', name: 'Миша Смирнов', dob: '2020-05-14', balance: 2400,
+      groups: [], cards: [{ id: '100', branch_id: '1', branch_name: 'Центральный', status: 'client', needs_refresh: false, subscriptions: [], url: 'https://example.s20.online/customer/view?id=100' }] }] };
+  const members = [{ user_id: 'test', display_name: 'Олег Иванов', email: 'demo@example.test', role },
+    { user_id: 'operator-1', display_name: 'Мария Петрова', email: 'operator@example.test', role: 'operator', sections: ['messages', 'security'] }];
+  const branches = [{ id: '1', name: 'Центральный' }, { id: '2', name: 'Северный' }];
+  const channels = [{ id: 'native', name: 'MAX через AlfaCRM', kind: 'alfa_max_browser', enabled: true, status: 'active' }];
+  const metrics = { incoming: 268, previous_incoming: 240, waiting: 3, average_response_seconds: 240, new_leads: 18,
+    days: [24, 43, 36, 48, 41, 46, 30].map((incoming, n) => ({ label: ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'][n], incoming })),
+    branches: [{ name: 'Центральный', incoming: 164 }, { name: 'Северный', incoming: 104 }],
+    operators: [{ name: 'Мария Петрова', answered: 73, average_response_seconds: 210 }, { name: 'Олег Иванов', answered: 51, average_response_seconds: 270 }] };
+  await context.route('**/*', async route => {
+    const request = route.request(), url = new URL(request.url()), p = url.pathname, method = request.method();
+    if (url.hostname !== 'cabinet.example.test') return route.abort();
+    if (p === '/') return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(web + '/index.html') });
+    if (p.startsWith('/assets/')) {
+      const file = path.join(web, path.basename(p));
+      if (!fs.existsSync(file)) { unexpected.push(p); return route.abort(); }
+      const mime = { '.js': 'application/javascript', '.css': 'text/css', '.woff2': 'font/woff2', '.png': 'image/png', '.jpg': 'image/jpeg' }[path.extname(file)];
+      return route.fulfill({ contentType: mime, body: fs.readFileSync(file) });
+    }
+    const entry = { method, path: p, query: url.search, body: request.postDataJSON(), csrf: request.headers()['x-csrf-token'] }; calls.push(entry);
+    if (method !== 'GET') mutations.push(entry);
+    let payload;
+    if (p === '/api/auth/status') payload = { setup_required: false };
+    else if (p === '/api/auth/session') payload = { user: { id: 'test', display_name: 'Олег Иванов', email: 'demo@example.test' }, csrf: 'synthetic-csrf',
+      workspaces: [{ id: 'test', name: 'Развивайся', role, timezone: 'Europe/Moscow', sections }] };
+    else if (p === '/api/auth/sessions') payload = { sessions: [{ id: 'session', current: true, device_label: 'Chrome · Linux', last_seen_at: '2026-10-24T11:00:00Z' }] };
+    else if (p === '/api/auth/logout') payload = {};
+    else if (p.endsWith('/chats/context')) payload = { channels, branches, can_write: role !== 'observer', send_attachments: false };
+    else if (p.endsWith('/summary')) payload = metrics;
+    else if (p.endsWith('/chat-updates')) payload = { updates: [], next_seq: 4, has_more: false };
+    else if (p.endsWith('/chats')) {
+      const view = url.searchParams.get('view'), status = url.searchParams.get('status');
+      const shown = conversations.filter(c => (view !== 'unread' || c.unread) && (!status || c.status === status));
+      payload = { conversations: shown, total: shown.length, unread: 3, page: 0, has_more: false };
+    } else if (p.endsWith('/messages')) {
+      const conversation = conversations.find(c => p.includes('/' + c.id + '/'));
+      if (method === 'POST') {
+        messages.push({ ...messages[1], id: 'sent-' + messages.length, text: entry.body.text });
+        payload = { request_id: entry.body.request_id, state: 'accepted' };
+      } else payload = { conversation, messages, next_seq: messages.length, has_more: false, more_changes: false, total: messages.length };
+    } else if (p.endsWith('/handled')) { conversations.find(c => p.includes('/' + c.id + '/')).unread = false; payload = {}; }
+    else if (p.endsWith('/family') || /\/(directory|chat-contacts)\/contacts\//.test(p)) payload = family;
+    else if (/\/(directory|chat-contacts)\/sync$/.test(p)) payload = { configured: true, state: 'idle', last_success_at: '2026-10-24T11:00:00Z', auto_refresh: false, interval_minutes: 30, stats: {} };
+    else if (/\/(directory|chat-contacts)$/.test(p)) payload = { contacts, total: contacts.length, branches, snapshot: 'run-1', page: 0, has_more: false };
+    else if (p.endsWith('/members')) payload = { members };
+    else if (/\/members\/.*\/role$/.test(p)) { members.find(m => p.includes('/' + m.user_id + '/')).role = entry.body.role; payload = {}; }
+    else if (p.endsWith('/integrations/max')) payload = { vault_ready: true, channels: [{ id: 'bot', name: 'MAX-бот', kind: 'max_bot', bot_name: '@center_bot', enabled: true, verified: true, can_send: true }] };
+    else if (/\/integrations\/max\/bot\/(check|disable|enable)$/.test(p)) payload = {};
+    else if (p.endsWith('/integrations/alfa')) payload = { configured: true, status: 'active', vault_ready: true, branches, origin: 'https://example.s20.online', email: 'demo@example.test', last_success_at: '2026-10-24T11:00:00Z' };
+    else if (p.endsWith('/integrations/alfa-max')) payload = { configured: true, state: 'active', vault_ready: true, crm_configured: true, branches };
+    else if (p.endsWith('/sync-progress')) payload = { configured: true, state: 'active', messages: 120, conversations: 40, backfill_pending: false, history_complete: true, streams: [] };
+    else { unexpected.push(method + ' ' + p); return route.fulfill({ status: 501, contentType: 'application/json', body: '{"detail":"Unmocked request"}' }); }
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) });
+  });
+  return { calls, mutations, errors, unexpected, conversations, messages };
+}
+module.exports = { fixture };

@@ -103,8 +103,12 @@ class DirectoryReader:
         max_status="all",
         max_bot_status="connected_first",
         page=0,
+        chat_only=False,
     ):
-        with self.connections._transaction(actor, workspace) as db:
+        transaction = self.connections.chat_transaction if chat_only else self.connections._transaction
+        with transaction(actor, workspace, snapshot=True) as db:
+            if chat_only and self.connections.accounts._workspace(db, actor, workspace)["role"] == "operator":
+                raise AuthError(403, "Откройте карточку семьи из её диалога.")
             snapshot = self._published(db, workspace)
             result = {
                 "contacts": [],
@@ -135,6 +139,15 @@ class DirectoryReader:
                 "d.workspace_id=:w AND d.run_id=:r AND EXISTS "
                 "(SELECT 1 FROM alfa_customers c WHERE " + scope + " AND c.contact_id=d.contact_id)"
             )
+            if chat_only:
+                where += (" AND EXISTS(SELECT 1 FROM conversations accessible JOIN connections channel "
+                          "ON channel.workspace_id=accessible.workspace_id AND channel.id=accessible.connection_id "
+                          "WHERE accessible.workspace_id=d.workspace_id AND accessible.contact_id=d.contact_id "
+                          "AND accessible.kind='direct' AND ((channel.kind='max_bot' AND EXISTS("
+                          "SELECT 1 FROM max_settings bot WHERE bot.workspace_id=accessible.workspace_id "
+                          "AND bot.connection_id=accessible.connection_id)) OR (channel.kind='alfa_max_browser' AND EXISTS("
+                          "SELECT 1 FROM alfa_max_settings native WHERE native.workspace_id=accessible.workspace_id "
+                          "AND native.connection_id=accessible.connection_id))))")
             if query.strip():
                 where += (
                     " AND d.search_vector @@ to_tsquery('simple',:search)"
@@ -237,8 +250,15 @@ class DirectoryReader:
             result["has_more"] = (page + 1) * 30 < result["total"]
             return result
 
-    def detail(self, actor, workspace, contact_id, *, branch=None):
-        with self.connections._transaction(actor, workspace) as db:
+    def detail(self, actor, workspace, contact_id, *, branch=None, conversation=None):
+        transaction = self.connections.chat_transaction if conversation else self.connections._transaction
+        with transaction(actor, workspace, snapshot=True) as db:
+            if conversation and not db.execute(text(
+                "SELECT 1 FROM conversations c JOIN connections cn ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id "
+                "WHERE c.workspace_id=:w AND c.id=:conversation AND c.contact_id=:contact AND c.kind='direct' "
+                "AND cn.kind IN ('max_bot','alfa_max_browser')"
+            ), {"w": workspace, "conversation": conversation, "contact": contact_id}).scalar_one_or_none():
+                raise AuthError(404, "Контакт недоступен в этом диалоге.")
             snapshot = self._published(db, workspace)
             if snapshot is None:
                 raise AuthError(404, "Контакт недоступен.")

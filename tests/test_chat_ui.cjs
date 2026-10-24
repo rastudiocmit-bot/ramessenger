@@ -43,6 +43,9 @@ function setup(t, handler, { conversations = [conversation(1)], autoFrames = fal
     calls.push(parsed);
     const result = handler && await handler(parsed, options);
     if (result !== undefined) return result;
+    if (parsed.pathname.endsWith("/chats/context")) return { channels: [
+      { id: "native", name: "AlfaCRM", kind: "alfa_max_browser" },
+      { id: "bot", name: "Bot", kind: "max_bot" }], branches: [], can_write: true };
     if (parsed.pathname.endsWith("/integrations/max")) return { vault_ready: true, channels: [
       { id: "native", name: "AlfaCRM", kind: "alfa_max_browser" },
       { id: "bot", name: "Bot", kind: "max_bot" }] };
@@ -86,7 +89,7 @@ test("unread count uses a badge inside the avatar and preserves the client initi
     { ...conversation(3), unread: false, unread_count: 0 }] });
   await ui.app.enter();
   const avatars = [...ui.window.document.querySelectorAll("#chat-list .contact-avatar")];
-  assert.equal(avatars[0].querySelector(".avatar-letter").textContent, "P");
+  assert.equal(avatars[0].querySelector(".avatar-letter").textContent, "P1");
   assert.equal(avatars[0].querySelector(".avatar-count").textContent, "1");
   assert.equal(avatars[1].querySelector(".avatar-count").textContent, "99");
   assert.match(avatars[1].getAttribute("aria-label"), /150/);

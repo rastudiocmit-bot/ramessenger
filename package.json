@@ -5,7 +5,8 @@
     "test": "node --test tests/test_*_ui.cjs",
     "test:scroll": "node tests/check_chat_scroll.cjs",
     "test:progress": "node tests/check_alfa_progress.cjs",
-    "test:appearance": "node tests/check_appearance.cjs"
+    "test:appearance": "node tests/check_appearance.cjs",
+    "test:cabinet": "node tests/check_cabinet.cjs"
   },
   "devDependencies": {
     "jsdom": "30.1.3",

@@ -6,7 +6,8 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   let page = 0, total = 0, more = false, actionBusy = false, listBusy = false;
   const cache = new Map();
   const active = () => state.user && state.workspace && state.pane === "clients";
-  const path = () => `/workspaces/${state.workspace.id}/directory`;
+  const readonly = () => !["owner", "admin"].includes(state.workspace?.role);
+  const path = () => `/workspaces/${state.workspace.id}/${readonly() ? "chat-contacts" : "directory"}`;
   const current = (epoch, gen) => epoch === state.epoch && gen === generation;
   const running = () => ["running", "queued"].includes(status?.state);
   function fail(error) { if (error.name !== "AbortError") notice(error.message, $("#directory-error")); }
@@ -23,6 +24,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
     status = null; snapshot = null; items = []; page = 0; total = 0; more = false; actionBusy = false; listBusy = false;
     $("#directory-list").replaceChildren(); $("#crm-card-options").replaceChildren();
     if ($("#crm-card-dialog").open) $("#crm-card-dialog").close();
+    if ($("#directory-contact-dialog")?.open) $("#directory-contact-dialog").close();
     $("#directory-search").value = ""; $("#directory-status").value = ""; $("#directory-max").value = "connected_first";
     $("#directory-branch").replaceChildren(new Option("Все филиалы", ""));
     $("#sync-auto").checked = true; $("#sync-interval").value = "30";
@@ -35,19 +37,22 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   }
   function buttons() {
     const working = running();
-    $("#directory-sync").disabled = !status?.configured || working || actionBusy;
+    ["#directory-sync", "#directory-stop"].forEach(id => show($(id), !readonly()));
+    if ($(".sync-options")) show($(".sync-options"), !readonly());
+    if ($("#directory-readonly")) show($("#directory-readonly"), readonly());
+    $("#directory-sync").disabled = !status?.configured || working || actionBusy || readonly();
     $("#directory-sync").textContent = working ? "Загрузка идёт…" : status?.last_success_at ? "Обновить из CRM" : "Загрузить из CRM";
-    show($("#directory-stop"), working || Boolean(status?.auto_refresh));
-    $("#directory-stop").disabled = actionBusy;
+    show($("#directory-stop"), !readonly() && (working || Boolean(status?.auto_refresh)));
+    $("#directory-stop").disabled = actionBusy || readonly();
     $("#directory-stop").textContent = working ? "Остановить загрузку" : "Отключить автообновление";
-    $("#sync-auto").disabled = working || actionBusy;
-    $("#sync-interval").disabled = working || actionBusy;
+    $("#sync-auto").disabled = working || actionBusy || readonly();
+    $("#sync-interval").disabled = working || actionBusy || readonly();
     $("#directory-more").disabled = listBusy;
   }
   function renderStatus() {
     const working = running(), last = status.last_success_at;
     $("#sync-indicator").className = working ? "spinner" : status.error ? "connection-dot sync-failed" : "connection-dot";
-    $("#sync-title").textContent = working ? (status.phase || "Готовим загрузку") : !status.configured ? "Подключите АльфаCRM в разделе «Подключения»" : status.error ? "Обновление остановлено" : last ? "Данные сохранены в базе" : "Готово к первой загрузке";
+    $("#sync-title").textContent = working ? (status.phase || "Готовим загрузку") : !status.configured ? readonly() ? "Справочник ещё не загружен" : "Подключите АльфаCRM в разделе «Подключения»" : status.error ? "Обновление остановлено" : last ? "Данные сохранены в базе" : "Готово к первой загрузке";
     const counts = [];
     if (working) {
       if (status.stats.customers) counts.push(`Карточек: ${status.stats.customers}`);
@@ -131,24 +136,23 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   function renderList() {
     const list = $("#directory-list"); list.replaceChildren();
     for (const item of items) {
-      const row = node("div", undefined, "contact-row"); row.dataset.id = item.id;
+      const row = node("div", undefined, "contact-row mrow"); row.dataset.id = item.id;
       row.classList.toggle("selected", item.id === selected);
-      const avatar = node("button", undefined, `contact-avatar status-${item.status}`);
+      const avatar = node("button", undefined, `contact-avatar ava ${item.status} status-${item.status}`);
       avatar.type = "button"; avatar.title = `Открыть карточку АльфаCRM: ${item.name}`;
       avatar.setAttribute("aria-label", avatar.title);
       avatar.append(node("span", item.name.trim().slice(0, 1).toLocaleUpperCase("ru"), "avatar-letter"), node("span", "↗", "avatar-open"));
       avatar.addEventListener("click", () => openCards(item.id).catch(fail));
-      const body = node("button", undefined, "contact-select"); body.type = "button";
+      const body = node("button", undefined, "contact-select mrow-main"); body.type = "button";
       body.setAttribute("aria-label", `Выбрать контакт: ${item.name}`);
       body.setAttribute("aria-pressed", String(item.id === selected));
       body.append(node("strong", item.name), node("span", item.students.join(", ") + (item.student_count > item.students.length ? ` и ещё ${item.student_count - item.students.length}` : ""), "contact-students"));
-      const meta = node("span", undefined, "contact-meta");
-      meta.append(node("span", labels[item.status], `status-label status-${item.status}`));
-      meta.append(node("span", item.max_bot_connected ? "MAX-бот подключён" : "MAX-бот не подключён", `status-label ${item.max_bot_connected ? "status-client" : "status-unlinked"}`));
-      if (item.max_connected) meta.append(node("span", "MAX через AlfaCRM", "small-tag"));
-      if (item.needs_review) meta.append(node("span", "Уточнить контакт", "review-label"));
-      body.append(meta); body.addEventListener("click", () => selectContact(item.id).catch(fail));
-      row.append(avatar, body); list.append(row);
+      body.addEventListener("click", () => selectContact(item.id).catch(fail));
+      const pill = node("span", labels[item.status], `pill ${item.status}`);
+      const crm = node("button", undefined, "iconbtn plain"); crm.type = "button"; crm.setAttribute("aria-label", `Открыть в АльфаCRM: ${item.name}`);
+      if (window.CenterIcon) crm.append(window.CenterIcon("out")); else crm.textContent = "↗";
+      crm.addEventListener("click", () => openCards(item.id).catch(fail));
+      row.append(avatar, body, pill, crm); list.append(row);
     }
     $("#directory-count").textContent = String(total);
     $("#directory-visible-count").textContent = total ? `${items.length} из ${total}` : "";
@@ -172,6 +176,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
     selected = id; renderList();
     if (mobile) $("#directory-layout").classList.add("has-selection");
     const detail = $("#directory-detail"); detail.setAttribute("aria-busy", "true");
+    const dialog = $("#directory-contact-dialog"); if (dialog && !dialog.open) dialog.showModal();
     const loading = node("div", "Загружаем сведения…", "empty"); detail.replaceChildren(loading);
     try {
       const payload = await getContact(id);

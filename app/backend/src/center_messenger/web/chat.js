@@ -1,5 +1,14 @@
 "use strict";
 window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, renderPane }) => {
+  const icon = name => window.CenterIcon ? window.CenterIcon(name) : node("span", name === "checks" ? "✓✓" : name === "check" ? "✓" : "", "icon-fallback");
+  let branchNames = new Map();
+  const quickReplies = [
+    ["Пробное занятие", "Здравствуйте! Записала вас на пробное занятие. Подскажите, какой день недели удобнее — будни после 17:00 или суббота утром?"],
+    ["Перенос занятия", "Занятие перенесено. Подтвердите, пожалуйста, что новое время вам подходит."],
+    ["Оплата получена", "Оплату получили, абонемент продлён. Спасибо!"],
+    ["Остаток занятий", "По абонементу осталось занятий — отправляю актуальный остаток. Продлим на тот же формат?"],
+    ["Уточнить филиал", "Подскажите, пожалуйста, какой филиал вам удобнее?"]
+  ];
   const statuses = { client: "Клиент", lead: "Лид", archive: "Архивный", unlinked: "Связать с CRM" };
   const sendLabels = { queued: "В очереди", sending: "Отправляем…", accepted: "Принято MAX", delivered: "Доставлено", read: "Прочитано", failed: "Не отправлено", unknown: "Результат неизвестен", cancelled: "Отменено" };
   let generation = 0, listSeq = 0, selectionSeq = 0, linkSeq = 0, cardSeq = 0, detailsSeq = 0;
@@ -58,11 +67,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       $("#max-add").open = botChannels.length === 0;
       const list = $("#max-channels"); list.replaceChildren();
       for (const channel of botChannels) {
-        const card = node("section", undefined, "max-channel");
+        const card = node("section", undefined, "max-channel mrow");
         const heading = node("div", undefined, "max-channel-heading");
         const info = node("div"); info.append(node("strong", channel.name), node("small", channel.bot_name || "Доступ ещё не проверен"));
         const status = channel.can_send ? (channel.last_inbound_at ? "Приём включён" : "Ожидаем первое сообщение") : channel.error ? "Нужна проверка" : channel.verified ? "Доступ проверен" : "Токен сохранён";
-        heading.append(info, node("span", status, `small-tag${channel.error ? " integration-error" : ""}`)); card.append(heading);
+        const statusNode = node("span", undefined, "dotline " + (channel.enabled ? "on" : "off")); statusNode.append(node("i"), node("span", channel.enabled ? "Активен" : "Отключён")); statusNode.title = status;
+        const avatar = node("span", undefined, "item-icon"); avatar.append(icon("chats"));
+        heading.append(info, statusNode); card.append(avatar, heading);
         if (channel.error) card.append(node("p", channel.error, "notice error"));
         if (channel.failed_events) card.append(node("p", `Не разобрано событий: ${channel.failed_events}. Они сохранены в базе; требуется проверка формата.`, "notice error"));
         const detail = [];
@@ -73,10 +84,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         actions.append(button("Проверить доступ", "secondary compact", () => channelAction(channel, "check")),
           button(channel.enabled ? "Отключить приём" : "Включить приём", channel.enabled ? "text-button" : "primary compact", () => channelAction(channel, channel.enabled ? "disable" : "enable")),
           button("Обновить токен", "text-button", () => {
+            if ($("#bot-actions-dialog").open) $("#bot-actions-dialog").close();
             tokenChannel = channel.id; const form = $("#max-token-form"); form.reset(); form.elements.name.value = channel.name;
             notice("", $("#max-token-error")); $("#max-token-dialog").showModal();
           }));
-        actions.querySelectorAll("button").forEach(el => { el.disabled = actionBusy; }); card.append(actions); list.append(card);
+        actions.querySelectorAll("button").forEach(el => { el.disabled = actionBusy; el.classList.add("btn"); if (!el.classList.contains("primary")) el.classList.add("sec"); });
+        const settings = button("", "iconbtn plain", () => { $("#bot-actions-body").replaceChildren(actions); $("#bot-actions-dialog").showModal(); });
+        settings.setAttribute("aria-label", `Настройки бота: ${channel.name}`); settings.append(icon("cog")); settings.disabled = actionBusy;
+        card.append(settings); list.append(card);
       }
       const previous = $("#chat-channel").value;
       $("#chat-channel").replaceChildren(new Option("Все каналы MAX", ""), ...channels.map(c => new Option(c.name, c.id)));
@@ -92,6 +107,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#max-channels").querySelectorAll("button").forEach(el => { el.disabled = true; });
     try {
       await api(`${channelPath()}/${channel.id}/${action}`, { method: "POST" });
+      if (valid(epoch, gen) && $("#bot-actions-dialog").open) $("#bot-actions-dialog").close();
       if (valid(epoch, gen)) toast(action === "enable" ? "Приём включён. Напишите боту из своего MAX, чтобы проверить переписку." : action === "check" ? "Доступ MAX проверен." : "Приём отключён.");
     } catch (error) { if (valid(epoch, gen)) fail(error, $("#max-error")); }
     finally { if (valid(epoch, gen)) { actionBusy = false; await connections(); } }
@@ -132,26 +148,54 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const signature = JSON.stringify([items, selected]); if (!force && signature === lastList) return; lastList = signature;
     const list = $("#chat-list"), scroller = $(".chat-list-scroll"), top = scroller.scrollTop; list.replaceChildren();
     for (const item of items) {
-      const row = node("div", undefined, `chat-row${item.unread ? " unread" : ""}${item.id === selected ? " selected" : ""}`); row.dataset.id = item.id;
-      const avatar = button("", `contact-avatar status-${item.status}`, () => openCards(item));
+      const row = node("div", undefined, `row chat-row${item.unread ? " unread waiting" : ""}${item.id === selected ? " selected" : ""}`); row.dataset.id = item.id; row.setAttribute("aria-current", String(item.id === selected));
+      const avatar = button("", `contact-avatar ava ${item.status}${item.unread ? " pulsing" : ""} status-${item.status}`, () => openCards(item));
       avatar.title = item.contact_id ? `Открыть карточку АльфаCRM: ${item.name}` : "Связать диалог с контактом АльфаCRM"; avatar.setAttribute("aria-label", avatar.title);
-      const letter = item.name.trim().slice(0, 1).toLocaleUpperCase("ru");
+      const letter = item.name.trim().split(/\s+/).slice(0, 2).map(part => part.slice(0, 1)).join("").toLocaleUpperCase("ru");
       avatar.append(node("span", letter, "avatar-letter"), node("span", item.contact_id ? "↗" : "+", "avatar-open"));
       if (item.unread_count > 0) {
-        const count = node("span", String(Math.min(item.unread_count, 99)), "avatar-count");
+        const count = node("span", String(Math.min(item.unread_count, 99)), "avatar-count ava-n");
         count.setAttribute("aria-hidden", "true"); avatar.append(count);
         avatar.setAttribute("aria-label", `${avatar.title}. Непрочитанных сообщений: ${item.unread_count}`);
       }
-      const body = button("", "chat-select", () => select(item.id)); body.setAttribute("aria-label", `Открыть переписку: ${item.name}`); body.setAttribute("aria-pressed", String(item.id === selected));
-      const heading = node("span", undefined, "chat-row-heading"); heading.append(node("strong", item.name), node("time", item.last_message_at ? time(item.last_message_at) : ""));
+      const body = button("", "chat-select row-main", () => select(item.id)); body.setAttribute("aria-label", `Открыть переписку: ${item.name}`); body.setAttribute("aria-pressed", String(item.id === selected));
+      const heading = node("span", undefined, "row-top"); heading.append(node("strong", item.name, "row-name"), node("time", listTime(item), "row-time"));
       body.append(heading);
-      if (item.students.length) body.append(node("span", item.students.join(", "), "contact-students"));
-      body.append(node("span", item.preview || "Вложение или начало диалога", "chat-preview"));
+      if (item.students.length) body.append(node("span", item.students.join(" · "), "row-kids contact-students"));
+      const bottom = node("span", undefined, "row-bot");
+      bottom.append(node("span", item.preview || "Вложение или начало диалога", "row-prev"));
+      if (item.last_direction === "out" && !item.unread && item.last_state) { const tick = node("span", undefined, "tick" + (item.last_state === "read" ? " read" : "")); tick.title = sendLabels[item.last_state] || ""; tick.append(icon(["read", "delivered"].includes(item.last_state) ? "checks" : "check")); bottom.append(tick); }
+      body.append(bottom);
       const meta = node("span", undefined, "contact-meta");
       if (channels.length > 1) meta.append(node("small", item.channel_name, "muted"));
-      body.append(meta); row.append(avatar, body); list.append(row);
+      if (meta.childNodes.length) body.append(meta);
+      row.append(avatar, body); const wrap = node("div", undefined, "row-wrap");
+      const action = node("div", "Обработано", "row-action"); action.prepend(icon("check"));
+      wrap.append(action, row); list.append(wrap); wireSwipe(row, item);
     }
     scroller.scrollTop = top;
+  }
+  function listTime(item) {
+    const waiting = item.waiting_since && item.unread ? Math.max(0, Math.floor((Date.now() - Date.parse(item.waiting_since)) / 60000)) : null;
+    if (waiting !== null && Number.isFinite(waiting)) return "ждёт " + (waiting < 60 ? waiting + " мин" : waiting < 1440 ? Math.floor(waiting / 60) + " ч" : Math.floor(waiting / 1440) + " дн");
+    if (!item.last_message_at) return "";
+    const at = new Date(item.last_message_at), today = new Date();
+    if (dayKey(at) === dayKey(today)) return time(at);
+    if (dayKey(at) === dayKey(new Date(today.getTime() - 86400000))) return "вчера";
+    if (today - at < 6 * 86400000) return new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, weekday: "short" }).format(at);
+    return new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, day: "2-digit", month: "2-digit", ...(at.getFullYear() === today.getFullYear() ? {} : { year: "numeric" }) }).format(at);
+  }
+  function wireSwipe(row, item) {
+    let start = null, distance = 0;
+    row.addEventListener("pointerdown", event => { if (event.pointerType !== "mouse" && item.unread && state.workspace?.role !== "observer") { start = event.clientX; distance = 0; } });
+    row.addEventListener("pointermove", event => { if (start === null) return; distance = Math.min(0, event.clientX - start); row.style.transform = `translateX(${Math.max(-120, distance)}px)`; });
+    const end = async () => {
+      if (start === null) return; start = null; row.style.transform = "";
+      if (distance > -70 || actionBusy) return;
+      try { await api(`${chatPath(item.id)}/handled`, { method: "POST" }); await loadList(); }
+      catch (error) { fail(error); }
+    };
+    row.addEventListener("pointerup", end); row.addEventListener("pointercancel", () => { start = null; row.style.transform = ""; });
   }
   function time(value) {
     const d = new Date(value); return Number.isNaN(d.getTime()) ? "" : new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, hour: "2-digit", minute: "2-digit" }).format(d);
@@ -208,6 +252,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
           : "Диалогов по этому запросу пока нет. Новые сообщения появятся после обращения клиента к боту.";
       $("#chat-visible-count").textContent = payload.total ? `${items.length} из ${payload.total}` : "";
       $("#chat-unread-count").textContent = String(payload.unread); show($("#chat-unread-count"), payload.unread > 0);
+      if ($("#chat-chip-unread")) { $("#chat-chip-unread").textContent = String(payload.unread); show($("#chat-chip-unread"), payload.unread > 0); }
       if (!selected && items.length) await select((items.find(item => item.unread) || items[0]).id, false);
       else if (selected && currentItem()) renderHeader();
       if (hasMore) requestAnimationFrame(() => maybeLoadMore());
@@ -222,21 +267,23 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const data = cache.get(selected), item = currentItem(); if (!data) return;
     const name = item?.name || data.meta?.peer_name || "Контакт MAX";
     const person = $("#chat-person"); person.replaceChildren(node("strong", name));
-    const caption = item?.students?.join(", ") || data.meta?.channel_name || "MAX";
+    const caption = [item?.students?.join(" · "), data.meta?.channel_name || "MAX"].filter(Boolean).join(" · ");
     person.append(node("small", caption));
-    show($("#chat-handled"), Boolean(data.meta?.unread));
+    if ($("#chat-header-avatar")) { const avatar = $("#chat-header-avatar"); avatar.className = `ava ${item?.status || "me"}`; avatar.textContent = name.split(/\s+/).slice(0, 2).map(part => part[0]).join("").toLocaleUpperCase("ru"); }
+    show($("#chat-handled"), Boolean(data.meta?.unread) && state.workspace?.role !== "observer");
     show($("#chat-details"), Boolean(data.meta));
     $("#chat-handled").disabled = actionBusy;
-    const unavailable = !data.meta?.can_send;
+    const unavailable = !data.meta?.can_send || state.workspace?.role === "observer";
     $("#chat-input").disabled = unavailable || Boolean(data.pending);
+    if ($("#chat-templates")) $("#chat-templates").disabled = unavailable || Boolean(data.pending);
     const send = $("#chat-send");
-    send.disabled = unavailable || historyBusy;
+    send.disabled = unavailable || historyBusy || (!data.pending && !$("#chat-input").value.trim());
     send.classList.toggle("is-retry", Boolean(data.pending));
     send.setAttribute("aria-label", data.pending ? "Проверить отправку" : "Отправить");
     send.title = data.pending ? "Проверить отправку" : "Отправить";
     const hint = $("#chat-send-hint");
     hint.hidden = !unavailable && !data.pending;
-    hint.textContent = unavailable ? "Проверьте подключение MAX, чтобы отправить ответ." : data.pending ? "Связь прервалась. Кнопка проверит тот же запрос без повторного сообщения." : "";
+    hint.textContent = state.workspace?.role === "observer" ? "Роль «Наблюдатель» открывает переписку только для чтения." : unavailable ? "Проверьте подключение MAX, чтобы отправить ответ." : data.pending ? "Связь прервалась. Кнопка проверит тот же запрос без повторного сообщения." : "";
   }
   function compareMessages(a, b) {
     const value = message => BigInt(message.sort_time ?? Math.trunc(new Date(message.occurred_at).getTime()) * 1000);
@@ -323,13 +370,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const message = messages[i];
       const messageDay = dayKey(message.occurred_at);
       const label = new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, day: "numeric", month: "long", year: "numeric" }).format(new Date(message.occurred_at));
-      if (messageDay !== day) { history.append(node("div", label, "chat-day")); day = messageDay; }
+      if (messageDay !== day) { history.append(node("div", messageDay === todayKey ? "Сегодня" : label, "chat-day sep")); day = messageDay; }
       if (message.actor_type === "automation") {
-        const bubble = node("div", undefined, "chat-bubble system"); bubble.dataset.id = message.id;
-        const body = node("p", message.text || "", "system-body");
+        const bubble = node("div", undefined, "chat-bubble system sys"); bubble.dataset.id = message.id;
+        const body = node("p", message.text || "", "system-body sys-body");
         body.hidden = !data.expanded.has(message.id);
-        const glyph = node("span", body.hidden ? "+" : "−", "system-toggle-glyph");
-        const toggle = button("", "system-toggle", () => {
+        const glyph = node("span", body.hidden ? "+" : "−", "system-toggle-glyph glyph");
+        const toggle = button("", "system-toggle sys-toggle", () => {
           const opening = body.hidden;
           body.hidden = !opening;
           if (opening) data.expanded.add(message.id); else data.expanded.delete(message.id);
@@ -339,34 +386,40 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         toggle.append(glyph);
         toggle.type = "button"; toggle.setAttribute("aria-expanded", String(!body.hidden));
         const when = (dayKey(message.occurred_at) !== todayKey ? shortDate(message.occurred_at) + " " : "") + time(message.occurred_at);
-        const row = node("div", undefined, "system-row");
-        const right = node("span", undefined, "system-right");
-        right.append(node("time", when, "system-time"), toggle);
-        row.append(
-          node("span", `Системное сообщение: ${message.template_name || "Системное сообщение"}`, "system-label"),
-          right
-        );
+        const row = node("div", undefined, "system-row sys-row");
+        const right = node("span", undefined, "system-right sys-right");
+        right.append(node("time", when, "system-time sys-time"), toggle);
+        const label = node("span", undefined, "system-label sys-label");
+        label.title = `Системное сообщение: ${message.template_name || "Системное сообщение"}`;
+        label.append(icon("cog"), node("b", message.template_name || "Системное сообщение")); row.append(label, right);
+        toggle.addEventListener("click", event => event.stopPropagation());
+        bubble.addEventListener("click", () => { if (!String(window.getSelection?.() || "")) toggle.click(); });
         bubble.append(row, body);
         if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
         history.append(bubble);
         continue;
       }
-      const next = messages[i + 1];
-      const grouped = Boolean(next && next.actor_type !== "automation" && next.direction === message.direction
-        && dayKey(next.occurred_at) === messageDay);
-      const bubble = node("div", undefined, `chat-bubble ${message.direction === "out" ? "outgoing" : "incoming"}${grouped ? "" : " has-tail"}`); bubble.dataset.id = message.id;
-      if (message.forwarded) bubble.append(node("small", "Пересланное сообщение", "chat-forwarded"));
-      bubble.append(node("p", message.deleted ? "Сообщение удалено" : message.text || (message.forwarded ? "Пересланное содержимое пока недоступно" : message.attachments.length ? "" : "Содержимое сообщения недоступно"), message.deleted ? "muted" : ""));
+      const next = messages[i + 1], previous = messages[i - 1];
+      const grouped = Boolean(next && next.actor_type !== "automation" && next.direction === message.direction && next.actor_type === message.actor_type && dayKey(next.occurred_at) === messageDay);
+      const first = !previous || previous.actor_type !== message.actor_type || previous.direction !== message.direction || dayKey(previous.occurred_at) !== messageDay;
+      const bubble = node("div", undefined, `chat-bubble msg ${message.direction === "out" ? "out outgoing" : "in incoming"}${first ? " first" : ""}${grouped ? "" : " last"}${message.state === "failed" ? " failed" : ""}`); bubble.dataset.id = message.id;
+      const content = node("div", undefined, "bub");
+      const branch = branchNames.get(String(message.customer_branch_id));
+      if (first && branch) { const top = node("span", undefined, "bub-top"); top.append(node("span", branch, "branch")); content.append(top); }
+      if (message.forwarded) content.append(node("small", "Пересланное сообщение", "chat-forwarded"));
+      content.append(node("span", message.deleted ? "Сообщение удалено" : message.text || (message.forwarded ? "Пересланное содержимое пока недоступно" : message.attachments.length ? "" : "Содержимое сообщения недоступно"), message.deleted ? "muted msg-text" : "msg-text"));
       if (!message.deleted) for (const [index, type] of message.attachments.entries()) {
         const names = { image: "Изображение", video: "Видео", audio: "Аудио", file: "Файл", contact: "Контакт", location: "Геопозиция", sticker: "Стикер" };
-        bubble.append(node("span", `${message.attachment_names?.[index] || names[type] || "Вложение"} · открыть в MAX`, "chat-attachment"));
+        const attachment = node("span", undefined, "att chat-attachment"); attachment.append(icon("file"), node("span", `${message.attachment_names?.[index] || names[type] || "Вложение"} · открыть в MAX`)); content.append(attachment);
       }
-      const meta = node("div", undefined, "chat-bubble-meta");
-      if (message.edited && !message.deleted) meta.append(node("span", "изменено"));
-      if (dayKey(message.occurred_at) !== todayKey) meta.append(node("time", shortDate(message.occurred_at), "chat-date"));
+      const meta = node("span", undefined, "meta");
+      if (message.edited && !message.deleted) meta.append(node("span", "изменено", "ed"));
       meta.append(node("time", time(message.occurred_at)));
-      if (message.direction === "out") meta.append(node("span", sendLabels[message.state] || "", `send-state state-${message.state}`));
-      bubble.append(meta);
+      if (message.direction === "out") {
+        const status = node("span", undefined, `send-state state-${message.state}`); status.title = sendLabels[message.state] || "";
+        status.append(icon(["delivered", "read"].includes(message.state) ? "checks" : ["queued", "sending", "unknown"].includes(message.state) ? "clock" : message.state === "failed" ? "warn" : "check"), node("span", sendLabels[message.state] || "", "sr")); meta.append(status);
+      }
+      content.append(meta); bubble.append(content);
       if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
       history.append(bubble);
     }
@@ -456,13 +509,18 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   async function enter() {
     const epoch = state.epoch, gen = generation;
     clearTimeout(timer); notice("", $("#chat-error"));
-    await connections();
     try {
-      const alfa = await api(`${base()}/integrations/alfa`);
+      const context = await api(`${chatPath()}/context`);
       if (!valid(epoch, gen) || !active()) return;
+      channels = context.channels || [];
+      const channel = $("#chat-channel"), chosen = channel.value;
+      channel.replaceChildren(new Option("Все каналы MAX", ""), ...channels.map(c => new Option(c.name, c.id)));
+      if (channels.some(c => c.id === chosen)) channel.value = chosen;
       const old = $("#chat-branch").value;
-      $("#chat-branch").replaceChildren(new Option("Все филиалы", ""), ...alfa.branches.map(b => new Option(b.name, b.id)));
-      if (alfa.branches.some(b => b.id === old)) $("#chat-branch").value = old;
+      const branches = context.branches || [];
+      branchNames = new Map(branches.map(b => [String(b.id), b.name]));
+      $("#chat-branch").replaceChildren(new Option("Все филиалы", ""), ...branches.map(b => new Option(b.name, b.id)));
+      if (branches.some(b => String(b.id) === old)) $("#chat-branch").value = old;
       await loadList();
       if (selected && !currentItem()) await select(selected, false);
     } catch (error) { if (valid(epoch, gen)) fail(error); }
@@ -508,10 +566,24 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function resizeCompose() {
     const input = $("#chat-input");
     input.style.height = "auto";
-    input.style.height = `${Math.min(Math.max(input.scrollHeight, 44), 160)}px`;
+    input.style.height = `${Math.min(Math.max(input.scrollHeight, 44), 128)}px`;
   }
   $("#chat-compose").addEventListener("submit", event => { event.preventDefault(); submit(); });
-  $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; resizeCompose(); unlockSound(); });
+  $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; resizeCompose(); renderHeader(); unlockSound(); });
+  $("#chat-templates").addEventListener("click", () => {
+    const target = selected, data = cache.get(target); if (!data || $("#chat-input").disabled) return;
+    const options = $("#chat-template-options"); options.replaceChildren();
+    for (const [title, text] of quickReplies) {
+      const item = button("", "item", () => {
+        if (target !== selected || $("#chat-input").disabled) return;
+        $("#chat-input").value = text;
+        $("#chat-input").dispatchEvent(new Event("input", { bubbles: true }));
+        $("#chat-templates-dialog").close(); $("#chat-input").focus();
+      });
+      const body = node("span", undefined, "item-main"); body.append(node("strong", title), node("small", text)); item.append(body); options.append(item);
+    }
+    $("#chat-templates-dialog").showModal();
+  });
   $("#chat-input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(min-width: 761px)").matches) { event.preventDefault(); submit(); } });
   $("#chat-stream").addEventListener("scroll", () => { if ($("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
   $("#chat-stream").addEventListener("wheel", event => { if (event.deltaY < 0 && $("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
@@ -530,14 +602,20 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-search").addEventListener("input", () => { clearTimeout(searchTimer); listSeq += 1; searchTimer = setTimeout(filtersChanged, 250); });
   ["branch", "status"].forEach(id => $(`#chat-${id}`).addEventListener("change", filtersChanged));
   $("#chat-channel").addEventListener("change", () => { filtersChanged(); });
-  document.querySelectorAll("[data-chat-view]").forEach(el => el.addEventListener("click", () => { view = el.dataset.chatView; document.querySelectorAll("[data-chat-view]").forEach(b => b.classList.toggle("active", b === el)); filtersChanged(); }));
+  function setView(next, reload = true) {
+    view = next === "lead" ? "all" : next;
+    $("#chat-status").value = next === "lead" ? "lead" : "";
+    document.querySelectorAll("[data-chat-view]").forEach(b => { const chosen = b.dataset.chatView === next; b.classList.toggle("active", chosen); b.setAttribute("aria-pressed", String(chosen)); });
+    if (reload) filtersChanged();
+  }
+  document.querySelectorAll("[data-chat-view]").forEach(el => el.addEventListener("click", () => { state.chatView = el.dataset.chatView; setView(el.dataset.chatView); document.dispatchEvent(new CustomEvent("cm:chat-view")); }));
   $(".chat-list-scroll").addEventListener("scroll", maybeLoadMore, { passive: true });
   $("#chat-retry").addEventListener("click", () => { listRetryRequired = false; loadList(true).catch(error => fail(error)); });
   $("#chat-handled").addEventListener("click", markHandled);
   $("#chat-details").addEventListener("click", openDetails);
   $("#chat-go-connections").addEventListener("click", () => renderPane("connections").catch(error => fail(error)));
   $("#chat-detach").addEventListener("click", () => { window.open("/?view=messages", "center-messenger-chat", "popup=yes,width=1280,height=860,resizable=yes,scrollbars=yes"); });
-  $("#chat-list-toggle").addEventListener("click", () => { const layout = $("#chat-layout"); if (matchMedia("(max-width: 1100px)").matches) layout.classList.remove("has-selection"); else layout.classList.toggle("list-collapsed"); });
+  $("#chat-list-toggle").addEventListener("click", () => { const layout = $("#chat-layout"); if (matchMedia("(max-width: 719px)").matches) layout.classList.remove("has-selection"); else layout.classList.toggle("list-collapsed"); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && active()) schedule(150); });
 
   async function markHandled() {
@@ -665,6 +743,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     }
   }
   async function refreshSelected(force) {
+    if (!["owner", "admin"].includes(state.workspace?.role)) return;
     if (familyBusy || !family || !familySelected) return;
     const student = family.students.find(item => item.id === familySelected);
     if (!student) return;
@@ -684,7 +763,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     } catch (error) {
       if (valid(epoch, gen) && seq === detailsSeq && $("#chat-details-dialog").open) { renderFamily(); toast(error.message, true); }
     } finally {
-      familyBusy = false; $("#chat-details-refresh").disabled = false;
+      familyBusy = false; $("#chat-details-refresh").disabled = !["owner", "admin"].includes(state.workspace?.role);
       if (familySelected !== student.id && valid(epoch, gen) && seq === detailsSeq && $("#chat-details-dialog").open) refreshSelected(false).catch(error => fail(error));
     }
   }
@@ -693,13 +772,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (!data?.meta) return;
     if (!contactId) { openLink(selected); return; }
     const epoch = state.epoch, gen = generation, seq = ++detailsSeq, conversation = selected;
+    $("#chat-details-refresh").disabled = !["owner", "admin"].includes(state.workspace?.role);
     const dialog = $("#chat-details-dialog"); family = null; familySelected = null; familyAttempted.clear();
     $("#chat-details-name").textContent = "Загружаем сведения…";
     $("#chat-details-contact").replaceChildren(); $("#chat-details-sync").textContent = "";
     $("#chat-details-children").replaceChildren(); $("#chat-details-student").replaceChildren();
     if (!dialog.open) dialog.showModal();
     try {
-      const result = await api(`${base()}/directory/contacts/${contactId}`);
+      const result = await api(`${chatPath(conversation)}/family`);
       if (!valid(epoch, gen) || seq !== detailsSeq || !dialog.open || conversation !== selected) return;
       family = result; renderFamily(); refreshSelected(false).catch(error => fail(error));
     } catch (error) { if (valid(epoch, gen) && seq === detailsSeq && dialog.open) $("#chat-details-name").textContent = error.message; }
@@ -708,22 +788,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-details-dialog").addEventListener("close", () => { detailsSeq += 1; family = null; });
   async function openCards(item) {
     if (!item.contact_id) return openLink(item.id);
-    const epoch = state.epoch, gen = generation, seq = ++cardSeq;
-    const dialog = $("#crm-card-dialog"), options = $("#crm-card-options");
-    options.replaceChildren(node("p", "Загружаем карточки…", "muted")); if (!dialog.open) dialog.showModal();
-    try {
-      const contact = await api(`${base()}/directory/contacts/${item.contact_id}`);
-      if (!valid(epoch, gen) || seq !== cardSeq || !dialog.open) return;
-      options.replaceChildren();
-      for (const student of contact.students) for (const card of student.cards) {
-        const url = new URL(card.url); if (url.protocol !== "https:" || !/^[a-z0-9-]+\.s20\.online$/i.test(url.hostname)) continue;
-        const link = node("a", undefined, "crm-card-link"); link.href = url.href; link.target = "center-messenger-crm"; link.rel = "noopener noreferrer";
-        link.append(node("strong", student.name), node("small", `${card.branch_name} · ${statuses[card.status]}`), node("span", "↗", "crm-link-arrow")); options.append(link);
-      }
-    } catch (error) { if (valid(epoch, gen) && seq === cardSeq && dialog.open) options.replaceChildren(node("p", error.message, "notice error")); }
+    await select(item.id, false); await openDetails();
   }
   async function openLink(id) {
     if (!id) return;
+    if (!["owner", "admin"].includes(state.workspace?.role)) { toast("Попросите администратора связать диалог с карточкой CRM.", true); return; }
     linkConversation = id; linkSeq += 1; $("#chat-link-search").value = ""; notice("", $("#chat-link-error"));
     const data = entry(id); show($("#chat-unlink"), Boolean(data.meta?.contact_id));
     $("#chat-link-results").replaceChildren(); $("#chat-link-dialog").showModal();
@@ -784,6 +853,22 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       for (const key of ["client", "lead", "archive"]) if (["soft", "clear", "low", "off"].includes(saved[key])) sounds[key] = saved[key];
     }
   } catch (_) { /* Storage is optional. */ }
+  function hydrateSounds() {
+    $("#chat-sound-enabled").checked = sounds.enabled; $("#chat-volume").value = String(sounds.volume);
+    for (const key of ["client", "lead", "archive"]) $(`#chat-tone-${key}`).value = sounds[key];
+    if ($("#profile-sound")) $("#profile-sound").checked = sounds.enabled;
+  }
+  hydrateSounds();
+  let previewEnabled = true;
+  try { previewEnabled = localStorage.getItem("cm-notification-preview") !== "false"; } catch (_) { /* Optional preference. */ }
+  if ($("#profile-preview")) {
+    $("#profile-preview").checked = previewEnabled;
+    $("#profile-preview").addEventListener("change", () => {
+      previewEnabled = $("#profile-preview").checked;
+      try { localStorage.setItem("cm-notification-preview", String(previewEnabled)); } catch (_) { /* Optional preference. */ }
+      if (!previewEnabled) { $("#chat-new-marker").textContent = "Новое сообщение"; $("#chat-new-marker").title = "Открыть новое сообщение"; }
+    });
+  }
   function unlockSound() {
     if (!sounds.enabled) return;
     try { soundContext ||= new AudioContext(); if (soundContext.state === "suspended") soundContext.resume().catch(() => {}); } catch (_) { /* Browser audio may be unavailable. */ }
@@ -807,6 +892,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function saveSounds() {
     sounds = { enabled: $("#chat-sound-enabled").checked, volume: Number($("#chat-volume").value), client: $("#chat-tone-client").value, lead: $("#chat-tone-lead").value, archive: $("#chat-tone-archive").value };
     try { localStorage.setItem("cm-sound", JSON.stringify(sounds)); } catch (_) { /* Optional preference storage. */ }
+    if ($("#profile-sound")) $("#profile-sound").checked = sounds.enabled;
     unlockSound();
   }
   $("#chat-settings-open").addEventListener("click", () => {
@@ -820,14 +906,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
 
   // A workspace change cursor covers every conversation, independently of list filters.
   function watch() {
-    if (!state.user || !state.workspace || !["owner", "admin"].includes(state.workspace.role)) { clearTimeout(notifyTimer); notifyTimer = null; return; }
+    if (!state.user || !state.workspace || !(["owner", "admin"].includes(state.workspace.role) || state.workspace.sections?.includes("messages"))) { clearTimeout(notifyTimer); notifyTimer = null; return; }
     if (notifyEpoch !== state.epoch) { clearTimeout(notifyTimer); notifyTimer = null; notifySeq = null; notifyBusy = false; pollBusy = false; historyBusy = false; notifyEpoch = state.epoch; }
     if (!notifyBusy && (notifyTimer === null || notifyTimer === undefined)) notifyTimer = setTimeout(notifyPoll, 300);
   }
   async function notifyPoll() {
     const epoch = state.epoch, gen = generation;
     notifyTimer = null;
-    if (!state.user || !state.workspace || !["owner", "admin"].includes(state.workspace.role)) return;
+    if (!state.user || !state.workspace || !(["owner", "admin"].includes(state.workspace.role) || state.workspace.sections?.includes("messages"))) return;
     let delay = 3500; notifyBusy = true;
     try {
       const result = await api(`${base()}/chat-updates${notifySeq === null ? "" : `?after_seq=${notifySeq}`}`);
@@ -842,7 +928,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }
       if (latest) {
         notifyTarget = latest.id;
-        const marker = $("#chat-new-marker"); marker.textContent = `Новое: ${latest.name}`; marker.title = `Открыть новое сообщение: ${latest.name}`; show(marker);
+        const marker = $("#chat-new-marker"); marker.textContent = previewEnabled ? `Новое: ${latest.name}${latest.preview ? ": " + latest.preview : ""}` : "Новое сообщение"; marker.title = previewEnabled ? `Открыть новое сообщение: ${latest.name}` : "Открыть новое сообщение"; show(marker);
         // Coordinate two open chat windows without storing message content or IDs.
         if (navigator.locks) navigator.locks.request("cm-message-sound", { ifAvailable: true }, async lock => { if (lock) { playTone(latest.status); await new Promise(resolve => setTimeout(resolve, 1000)); } }).catch(() => {});
         else playTone(latest.status);
@@ -870,5 +956,5 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function endDrag() { drag = null; layout.classList.remove("resizing"); }
   resizer.addEventListener("pointerup", endDrag); resizer.addEventListener("pointercancel", endDrag); resizer.addEventListener("lostpointercapture", endDrag);
   resizer.addEventListener("keydown", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); resize(event.key === "Home" ? 300 : event.key === "End" ? 640 : width + (event.key === "ArrowRight" ? 20 : -20)); } });
-  return { reset, connections, enter, watch, leave: () => { clearTimeout(timer); selectionSeq += 1; } };
+  return { reset, connections, enter, watch, setView, leave: () => { clearTimeout(timer); selectionSeq += 1; } };
 };
