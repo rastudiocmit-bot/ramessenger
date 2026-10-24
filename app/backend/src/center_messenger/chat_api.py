@@ -35,6 +35,34 @@ EFFECTIVE_UNREAD = (
 )
 
 
+# Shared by each avatar and the all-pages lead counter.
+UNREAD_MESSAGE_COUNT = (
+    "(SELECT count(*) FROM messages i WHERE i.workspace_id=c.workspace_id "
+    "AND i.conversation_id=c.id AND i.direction='in' "
+    "AND i.actor_type='contact' "
+    "AND " + visible_message("i") + " "
+    "AND " + EFFECTIVE_UNREAD + " "
+    "AND (c.handled_inbound_id IS NULL OR (i.occurred_at," + source_order("i") + ",i.id) > "
+    "(SELECT h.occurred_at," + source_order("h") + ",h.id FROM messages h "
+    "WHERE h.workspace_id=c.workspace_id AND h.id=c.handled_inbound_id)) "
+    "AND NOT EXISTS (SELECT 1 FROM messages r LEFT JOIN send_commands s ON "
+    "s.workspace_id=r.workspace_id AND s.id=r.send_command_id "
+    "WHERE r.workspace_id=i.workspace_id AND r.conversation_id=i.conversation_id "
+    "AND r.direction='out' AND r.actor_type='human' "
+    "AND " + visible_message("r") + " "
+    "AND coalesce(r.payload->>'failed','false')<>'true' "
+    "AND (r.send_command_id IS NULL OR s.state IN "
+    "('accepted','delivered','read')) "
+    "AND (r.occurred_at>i.occurred_at OR (r.occurred_at=i.occurred_at "
+    "AND i.payload->>'branch_id' IS NOT NULL "
+    "AND i.payload->>'branch_id'=r.payload->>'branch_id' "
+    "AND CASE WHEN r.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
+    "AND i.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
+    "THEN (r.payload->>'crm_order')::numeric"
+    ">(i.payload->>'crm_order')::numeric ELSE false END))))"
+)
+
+
 class SendInput(InputModel):
     request_id: UUID
     text: str = Field(min_length=1, max_length=4000)
@@ -335,10 +363,6 @@ class ChatReader:
                       "AND am.connection_id IS NOT NULL AND c.last_message_at IS NOT NULL))")
             if connection:
                 where += " AND c.connection_id=:connection"
-            if view == "unread":
-                where += " AND " + EFFECTIVE_UNREAD
-            if view == "unlinked":
-                where += " AND c.contact_id IS NULL"
             if snapshot:
                 params.update(run=snapshot["run"], crm=snapshot["connection_id"])
                 scope = (
@@ -348,15 +372,13 @@ class ChatReader:
                 )
                 if branch:
                     scope += " AND a.branch_id=:branch"
-                if status:
-                    scope += " AND a.status=:status"
-                if branch or status:
+                if branch:
                     where += " AND EXISTS (SELECT 1 FROM alfa_customers a WHERE " + scope + ")"
                 where += (
                     " AND (cn.kind <> 'alfa_max_browser' OR am.crm_connection_id=:crm)"
                 )
             else:
-                if branch or status:
+                if branch:
                     where += " AND false"
             if query.strip():
                 where += " AND (c.peer_name ILIKE :like OR p.display_name ILIKE :like"
@@ -376,6 +398,20 @@ class ChatReader:
                 "AND am.connection_id=c.connection_id LEFT JOIN contacts p ON "
                 "p.workspace_id=c.workspace_id AND p.id=c.contact_id "
             )
+            # Facets share branch/channel/search scope, not the active chip or
+            # status filter. Count visible unanswered messages beyond page one.
+            lead_where = where + " AND " + EFFECTIVE_UNREAD + (" AND EXISTS (SELECT 1 FROM alfa_customers a WHERE "
+                                  + scope + " AND a.status='lead')" if snapshot else " AND false")
+            lead_unread = db.execute(text(
+                "SELECT coalesce(sum(" + UNREAD_MESSAGE_COUNT + "),0) " + joins + " WHERE " + lead_where
+            ), params).scalar_one()
+            if status:
+                where += (" AND EXISTS (SELECT 1 FROM alfa_customers a WHERE " + scope + " AND a.status=:status)"
+                          if snapshot else " AND false")
+            if view == "unread":
+                where += " AND " + EFFECTIVE_UNREAD
+            if view == "unlinked":
+                where += " AND c.contact_id IS NULL"
             counts = (
                 db.execute(
                     text(
@@ -410,29 +446,7 @@ class ChatReader:
                         + " AS effective_unread,"
                         + LATEST_INBOUND_ID
                         + " AS latest_inbound_id,"
-                        "(SELECT count(*) FROM messages i WHERE i.workspace_id=c.workspace_id "
-                        "AND i.conversation_id=c.id AND i.direction='in' "
-                        "AND i.actor_type='contact' "
-                        "AND " + visible_message("i") + " "
-                        "AND " + EFFECTIVE_UNREAD + " "
-                        "AND (c.handled_inbound_id IS NULL OR (i.occurred_at," + source_order("i") + ",i.id) > "
-                        "(SELECT h.occurred_at," + source_order("h") + ",h.id FROM messages h "
-                        "WHERE h.workspace_id=c.workspace_id AND h.id=c.handled_inbound_id)) "
-                        "AND NOT EXISTS (SELECT 1 FROM messages r LEFT JOIN send_commands s ON "
-                        "s.workspace_id=r.workspace_id AND s.id=r.send_command_id "
-                        "WHERE r.workspace_id=i.workspace_id AND r.conversation_id=i.conversation_id "
-                        "AND r.direction='out' AND r.actor_type='human' "
-                        "AND " + visible_message("r") + " "
-                        "AND coalesce(r.payload->>'failed','false')<>'true' "
-                        "AND (r.send_command_id IS NULL OR s.state IN "
-                        "('accepted','delivered','read')) "
-                        "AND (r.occurred_at>i.occurred_at OR (r.occurred_at=i.occurred_at "
-                        "AND i.payload->>'branch_id' IS NOT NULL "
-                        "AND i.payload->>'branch_id'=r.payload->>'branch_id' "
-                        "AND CASE WHEN r.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
-                        "AND i.payload->>'crm_order' ~ '^[0-9]{1,19}$' "
-                        "THEN (r.payload->>'crm_order')::numeric"
-                        ">(i.payload->>'crm_order')::numeric ELSE false END)))) AS unread_count,"
+                        + UNREAD_MESSAGE_COUNT + " AS unread_count,"
                         "(SELECT jsonb_build_object('direction',lm.direction,'state',CASE WHEN lm.payload->>'failed'='true' THEN 'failed' "
                         "ELSE coalesce(ls.state,CASE WHEN lm.direction='out' THEN 'accepted' ELSE 'received' END) END) "
                         "FROM messages lm LEFT JOIN send_commands ls ON ls.workspace_id=lm.workspace_id AND ls.id=lm.send_command_id "
@@ -504,6 +518,7 @@ class ChatReader:
                 "conversations": result,
                 "total": counts["total"],
                 "unread": counts["unread"],
+                "lead_unread": int(lead_unread),
                 "page": page,
                 "has_more": (page + 1) * 30 < counts["total"],
             }

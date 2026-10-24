@@ -55,7 +55,8 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     else if (p.endsWith('/chats')) {
       const view = url.searchParams.get('view'), status = url.searchParams.get('status');
       const shown = conversations.filter(c => (view !== 'unread' || c.unread) && (!status || c.status === status));
-      payload = { conversations: shown, total: shown.length, unread: 3, page: 0, has_more: false };
+      const lead_unread = conversations.filter(c => c.status === 'lead' && c.unread).reduce((sum, c) => sum + c.unread_count, 0);
+      payload = { conversations: shown, total: shown.length, unread: 3, lead_unread, page: 0, has_more: false };
     } else if (p.endsWith('/messages')) {
       const conversation = conversations.find(c => p.includes('/' + c.id + '/'));
       if (method === 'POST') {

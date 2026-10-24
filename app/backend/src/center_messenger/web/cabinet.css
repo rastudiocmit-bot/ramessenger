@@ -308,7 +308,7 @@ input,textarea{font:inherit;color:inherit}
   border-radius:16px;box-shadow:var(--card);padding:0 6px 0 6px;transition:box-shadow .15s}
 .field:focus-within{box-shadow:0 4px 24px rgba(25,45,36,.17)}
 .field textarea{flex:1;min-width:0;border:0;background:none;resize:none;outline:none;font-size:15px;
-  line-height:1.45;padding:14px 4px;max-height:128px;min-height:48px}
+  line-height:1.45;padding:14px 4px;max-height:none;min-height:48px;overflow:hidden}
 .field textarea::placeholder{color:var(--faint)}
 .field .iconbtn{background:none;border:0;width:38px;height:48px;border-radius:12px}
 .send{width:48px;height:48px;flex:none;border-radius:50%;background:var(--send);color:#fff;
@@ -609,7 +609,13 @@ body:has(#cabinet[hidden]){overflow:auto}
 #chat-history-status{font-size:12px;text-align:center;color:var(--muted)}
 #chat-history-note{font-size:10px;text-align:center;color:var(--faint);margin:6px 0}
 .compose #chat-send-hint{position:absolute;bottom:100%;left:0;right:0;padding:8px 10px;background:var(--glass);border-radius:10px;font-size:12px;color:var(--ink)}
-.compose textarea{display:block;width:100%;border-radius:0;box-shadow:none;min-height:44px;max-height:128px;line-height:1.45;font-family:var(--ui);padding:12px 2px}
+.compose textarea{display:block;width:100%;border-radius:0;box-shadow:none;min-height:44px;max-height:none;overflow:hidden;line-height:1.45;font-family:var(--ui);padding:12px 2px}
+/* Let the composer grow upwards without covering the latest messages. For a
+   draft taller than the viewport, the conversation canvas scrolls as a whole. */
+.canvas{display:flex;flex-direction:column;overflow-y:auto;scrollbar-width:none}
+.canvas::-webkit-scrollbar{display:none}
+.canvas>.stream{position:relative;inset:auto;flex:1 1 0%;min-height:86px;padding-bottom:8px}
+.canvas>.compose{position:relative;inset:auto;flex:none;margin:0 max(8px,env(safe-area-inset-right,0px)) calc(var(--sab) + 8px) max(8px,env(safe-area-inset-left,0px))}
 .compose .field>.send-plane,.send-plane{display:contents}
 .send .chat-send-retry{display:none}
 .send.is-retry .send-plane{display:none}
