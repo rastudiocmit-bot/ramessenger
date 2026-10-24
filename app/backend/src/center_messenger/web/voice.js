@@ -15,7 +15,11 @@
 //   unless the operator taps «Изменить». Anything doubtful (agent fallback, a
 //   warning, nothing recognised) is never sent automatically: it goes to the field.
 window.CenterVoice = ({ $, state, api, toast }) => {
-  const LIMIT = 30, RATE = 16000, HOLD_MS = 220, CANCEL_PX = 90, SEND_DELAY = 3000;
+  const LIMIT = 30, RATE = 16000, HOLD_MS = 220, CANCEL_PX = 90;
+  // Time to read the dictated text before it goes: about 12 characters a second
+  // (an unhurried reading pace for a message one is checking), never under 7 s
+  // and never over 30 s.
+  const sendDelay = text => Math.round(Math.min(30000, Math.max(7000, 2500 + text.length * 85)));
   const STREAM_HOLD_MS = 450, STILL_PX = 10;
   const stream = $("#chat-stream");
   const compose = $("#chat-compose"), input = $("#chat-input"), button = $("#chat-voice");
@@ -35,6 +39,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
       <div class="voice-hold-hint"></div>
     </div>
     <div class="voice-hold-card" hidden>
+      <button type="button" class="voice-hold-clear" aria-label="Удалить текст, ничего не отправлять" title="Удалить"></button>
       <p class="voice-hold-text"></p>
       <p class="voice-hold-note">Отправим автоматически. Нажмите мимо — не отправлять.</p>
       <div class="voice-hold-bar"><i></i></div>
@@ -42,6 +47,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
         <button type="button" class="btn primary voice-hold-send">Отправить</button></div>
     </div>`;
   layer.querySelector(".voice-hold-mic").append(icon("mic"));
+  layer.querySelector(".voice-hold-clear").append(icon("close"));
   document.body.append(layer);
   const orb = layer.querySelector(".voice-hold-orb"), holdTime = layer.querySelector(".voice-hold-time");
   const holdHint = layer.querySelector(".voice-hold-hint"), card = layer.querySelector(".voice-hold-card");
@@ -75,7 +81,19 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   const supported = () => Boolean(navigator.mediaDevices?.getUserMedia && (window.AudioContext || window.webkitAudioContext));
   const available = () => Boolean(state.voiceInput) && state.workspace && !input.disabled && !compose.hidden && supported();
 
+  // Composer: a small ✕ in the field's top-right corner clears the message.
+  const clear = $("#chat-clear");
+  clear.addEventListener("click", () => {
+    if (!input.value) return;
+    input.value = ""; input.dispatchEvent(new Event("input", { bubbles: true })); render();
+  });
+  // chat.js sets the field without an input event (draft restore, after sending):
+  // keep the ✕ and the phone's mic/send swap in step with it.
+  setInterval(() => {
+    if (clear.hidden !== (!input.value || input.disabled) && !document.hidden) render();
+  }, 400);
   function render() {
+    clear.hidden = !input.value || input.disabled;
     const can = available(), busy = Boolean(recording || pending || failedAudio);
     // On a phone one round button: the microphone while the field is empty, "send" once there is text.
     const empty = !input.value.trim();
@@ -112,13 +130,21 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     holdHint.textContent = kind === "recording" ? "Отпустите — отправим\nПроведите вверх — отмена"
       : kind === "cancel" ? "Отпустите — запись удалится" : kind === "working" ? "Распознаём и улучшаем текст…" : "";
   }
+  // While a finger holds (on the list or the microphone) the chat underneath must
+  // neither scroll nor select text.
+  const scroller = stream.closest(".canvas") || stream;
+  function lockList(on) {
+    document.documentElement.classList.toggle("voice-holding", on);
+    if (on) window.getSelection?.()?.removeAllRanges();
+  }
   function closeHold() {
+    lockList(false);
     if (preview) { clearTimeout(preview.timer); preview = null; }
     hold = null; layer.hidden = true; layer.dataset.phase = ""; card.hidden = true;
   }
   async function beginHold() {
     if (!hold) return;
-    hold.armed = true; navigator.vibrate?.(15);
+    hold.armed = true; navigator.vibrate?.(15); lockList(true); hold.scrollTop = scroller.scrollTop;
     holdTime.textContent = `0:00 / ${clock(LIMIT)}`; orb.style.setProperty("--level", "0");
     holdPhase("recording");
     const mine = hold;
@@ -149,8 +175,9 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     const before = input.value.trim();
     cardText.textContent = before ? `${before} ${text}` : text; holdPhase("preview");
     bar.style.animation = "none"; void bar.offsetWidth; bar.style.animation = "";
-    bar.style.animationDuration = `${SEND_DELAY}ms`;
-    preview = { text, timer: setTimeout(() => { if (mine === run) commit(true); }, SEND_DELAY) };
+    const delay = sendDelay(cardText.textContent);
+    bar.style.animationDuration = `${delay}ms`;
+    preview = { text, timer: setTimeout(() => { if (mine === run) commit(true); }, delay) };
     layer.querySelector(".voice-hold-send").focus({ preventScroll: true });
   }
   function commit(sendNow) {
@@ -278,6 +305,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     if (event.pointerType !== "touch" || !event.isPrimary || !available() || recording || pending || hold || preview) return;
     if (event.target.closest(interactive)) return;
     hold = { id: event.pointerId, x: event.clientX, y: event.clientY, armed: false, released: false, source: "stream" };
+    document.documentElement.classList.add("voice-pending");
     hold.timer = setTimeout(() => {
       if (hold?.source !== "stream") return;
       try { stream.setPointerCapture(hold.id); } catch (_) { /* The pointer may already be gone. */ }
@@ -288,19 +316,27 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   stream.addEventListener("pointermove", event => {
     if (hold?.source !== "stream" || event.pointerId !== hold.id) return;
     if (!hold.armed) {
-      if (Math.hypot(event.clientX - hold.x, event.clientY - hold.y) > STILL_PX) { clearTimeout(hold.timer); hold = null; }
+      if (Math.hypot(event.clientX - hold.x, event.clientY - hold.y) > STILL_PX) { clearTimeout(hold.timer); hold = null; pendingOff(); }
       return;
     }
+    if (hold.scrollTop != null && scroller.scrollTop !== hold.scrollTop) scroller.scrollTop = hold.scrollTop;
     if (recording) holdPhase(hold.y - event.clientY > CANCEL_PX ? "cancel" : "recording");
   });
   stream.addEventListener("pointerup", event => { if (hold?.source === "stream" && event.pointerId === hold.id) endHold(false); });
   stream.addEventListener("pointercancel", event => {
     if (hold?.source !== "stream" || event.pointerId !== hold.id) return;
     if (hold.armed) endHold(true); else { clearTimeout(hold.timer); hold = null; }
+    pendingOff();
   });
+  function pendingOff() { document.documentElement.classList.remove("voice-pending"); }
+  document.addEventListener("pointerup", pendingOff, true);
+  // Any scroll that slips through while recording is put back.
+  scroller.addEventListener("scroll", () => {
+    if (hold?.armed && hold.scrollTop != null && scroller.scrollTop !== hold.scrollTop) scroller.scrollTop = hold.scrollTop;
+  }, { passive: true });
   // While a hold is pending or recording: no scrolling, text selection or long-press menu.
-  stream.addEventListener("touchmove", event => { if (hold?.source === "stream" && hold.armed && event.cancelable) event.preventDefault(); }, { passive: false });
-  stream.addEventListener("selectstart", event => { if (hold?.source === "stream") event.preventDefault(); });
+  scroller.addEventListener("touchmove", event => { if (hold?.armed && event.cancelable) event.preventDefault(); }, { passive: false });
+  document.addEventListener("selectstart", event => { if (hold) event.preventDefault(); }, true);
   stream.addEventListener("contextmenu", event => { if (hold?.source === "stream") event.preventDefault(); });
   button.addEventListener("pointermove", event => {
     if (!hold?.armed || event.pointerId !== hold.id || !recording) return;
@@ -313,6 +349,10 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   button.addEventListener("touchstart", event => { if (event.cancelable) event.preventDefault(); }, { passive: false });
   button.addEventListener("touchend", event => { if (event.cancelable) event.preventDefault(); }, { passive: false });
   layer.querySelector(".voice-hold-send").addEventListener("click", () => commit(true));
+  layer.querySelector(".voice-hold-clear").addEventListener("click", event => {
+    event.stopPropagation(); if (!preview) return;
+    closeHold(); render(); toast("Текст удалён, ничего не отправлено.");
+  });
   layer.querySelector(".voice-hold-edit").addEventListener("click", () => { commit(false); input.focus(); });
   // A tap on the free space around the card means "no": stop the countdown and
   // leave the text in the field, unsent.

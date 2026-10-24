@@ -1199,3 +1199,24 @@ body:has(#cabinet[hidden]){overflow:auto}
 .voice-hold-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .voice-hold-actions .btn{height:52px;min-height:0;font-size:16px;font-weight:650;border-radius:14px}
 @media (prefers-reduced-motion:reduce){.voice-hold,.voice-hold-ring{animation:none!important;transition:none}}
+
+/* While a finger holds to dictate: nothing under it is selected or scrolled. */
+.voice-pending #chat-stream,.voice-holding #chat-stream,.voice-holding .voice-hold{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.voice-holding .pane-chat .canvas{overflow:hidden!important;touch-action:none;overscroll-behavior:none}
+.voice-hold{-webkit-user-select:none;user-select:none}
+.voice-hold-card{position:relative}
+.voice-hold-text{padding-right:28px}
+.voice-hold-clear{position:absolute;top:10px;right:10px;width:32px;height:32px;min-height:0;padding:0;border:0;border-radius:50%;
+  display:grid;place-items:center;background:var(--sunken);color:var(--muted)}
+.voice-hold-clear:hover{background:var(--line);color:var(--ink)}
+.voice-hold-clear svg{width:16px;height:16px}
+/* Composer ✕ above the paperclip. */
+.field-side{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;align-self:stretch;flex:none}
+.field-clear{position:relative;width:22px;height:22px;min-height:0;padding:0;margin:4px 0 0;border:0;border-radius:50%;flex:none;
+  display:grid;place-items:center;background:var(--sunken);color:var(--muted);cursor:pointer}
+.field-clear::before{content:"";position:absolute;inset:-8px}
+.field-clear:hover{background:var(--line);color:var(--ink)}
+.field-clear svg{width:12px;height:12px;stroke-width:2.6}
+.field-clear[hidden]{display:none}
+.field-side .field-clear:not([hidden])+.iconbtn{height:26px;margin-bottom:11px}
+.field-side .field-clear:not([hidden]){margin-bottom:auto}

@@ -138,8 +138,10 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await phone.mouse.up();
     await phone.waitForSelector('#voice-hold[data-phase="preview"]');
     assert.equal(await phone.locator('.voice-hold-text').textContent(), 'Здравствуйте! Завтра занятие в 17:00.');
+    const countdown = await phone.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.voice-hold-bar i')).animationDuration));
+    assert.ok(countdown >= 7, `countdown at least 7 s, got ${countdown}`);
     await save(phone, 'voice-hold-preview');
-    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 6000 });
+    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 12000 });
     await phone.waitForTimeout(300);
     assert.equal(sent().length, before + 1, 'sent automatically after the countdown');
     assert.equal(sent().at(-1).body.text, 'Здравствуйте! Завтра занятие в 17:00.');
@@ -159,7 +161,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await phone.locator('.voice-hold-edit').click();
     await phone.waitForSelector('#voice-hold', { state: 'hidden' });
     assert.equal(await phone.locator('#chat-input').inputValue(), 'Здравствуйте! Завтра занятие в 17:00.');
-    await phone.waitForTimeout(3500); assert.equal(sent().length, before + 1, '«Изменить» never sends');
+    await phone.waitForTimeout(8000); assert.equal(sent().length, before + 1, '«Изменить» never sends');
 
     // A doubtful result (agent fallback) is never sent: it lands in the field.
     await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
@@ -180,7 +182,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     assert.equal(await phone.locator('#chat-voice-panel').isHidden(), true, 'no panel buttons under the finger');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await phone.waitForSelector('#voice-hold[data-phase="preview"]');
-    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 6000 }); await phone.waitForTimeout(300);
+    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 12000 }); await phone.waitForTimeout(300);
     assert.equal(sent().length, before + 2, 'touch hold sends too');
     assert.notEqual(await phone.evaluate(() => document.activeElement?.id), 'chat-input', 'the keyboard does not pop up');
 
@@ -194,7 +196,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await holdMic(800); await phone.mouse.up(); await phone.waitForSelector('#voice-hold[data-phase="preview"]');
     await phone.touchscreen.tap(195, 120); await phone.waitForSelector('#voice-hold', { state: 'hidden' });
     assert.equal(await phone.locator('#chat-input').inputValue(), 'Здравствуйте! Завтра занятие в 17:00.');
-    await phone.waitForTimeout(3500); assert.equal(sent().length, sentNow + 1, 'a tap outside never sends');
+    await phone.waitForTimeout(8000); assert.equal(sent().length, sentNow + 1, 'a tap outside never sends');
 
     // Hold a finger still on the message list: the same recording and auto-send.
     // A swipe scrolls and a tap does nothing.
@@ -217,12 +219,42 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     assert.equal(await phone.locator('#voice-hold').isHidden(), true, 'a swipe scrolls, it does not record');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [spot] });
     await phone.waitForSelector('#voice-hold[data-phase="recording"]'); await phone.waitForTimeout(1000);
+    // The list under the finger neither scrolls nor gets selected while recording.
+    const scrollBefore = await phone.evaluate(() => document.querySelector('.pane-chat .canvas').scrollTop);
+    for (let step = 1; step <= 5; step += 1) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: spot.x, y: spot.y + step * 12 }] });
+      await phone.waitForTimeout(30);
+    }
+    assert.equal(await phone.evaluate(() => document.querySelector('.pane-chat .canvas').scrollTop), scrollBefore, 'no scroll while recording');
+    assert.equal(await phone.evaluate(() => String(window.getSelection())), '', 'nothing selected');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [spot] });
     await save(phone, 'voice-hold-list');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await phone.waitForSelector('#voice-hold[data-phase="preview"]');
-    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 6000 }); await phone.waitForTimeout(300);
+    await phone.waitForSelector('#voice-hold', { state: 'hidden', timeout: 12000 }); await phone.waitForTimeout(300);
     assert.equal(phoneData.ai.transcribe.length, listHeard + 1);
     assert.equal(sent().length, listSent + 1, 'a hold on the message list sends too');
+
+    // ✕ on the preview: the text is dropped, nothing sent, the field untouched.
+    const clearSent = sent().length;
+    await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
+    await holdMic(800); await phone.mouse.up(); await phone.waitForSelector('#voice-hold[data-phase="preview"]');
+    await save(phone, 'voice-hold-preview-clear');
+    await phone.locator('.voice-hold-clear').tap(); await phone.waitForSelector('#voice-hold', { state: 'hidden' });
+    assert.equal(await phone.locator('#chat-input').inputValue(), '');
+    await phone.waitForTimeout(8000); assert.equal(sent().length, clearSent, '✕ never sends');
+
+    // ✕ in the composer clears the field; hidden while it is empty.
+    assert.equal(await phone.locator('#chat-clear').isHidden(), true);
+    await phone.locator('#chat-input').fill('Черновик, который не нужен');
+    await phone.waitForSelector('#chat-clear:not([hidden])'); await save(phone, 'composer-clear');
+    const clearBox = await phone.locator('#chat-clear').boundingBox(), clipBox = await phone.locator('#chat-attachment').boundingBox();
+    assert.ok(clearBox.y + clearBox.height <= clipBox.y + 2 && Math.abs((clearBox.x + clearBox.width / 2) - (clipBox.x + clipBox.width / 2)) < 3,
+      '✕ sits right above the paperclip');
+    await phone.locator('#chat-clear').tap();
+    assert.equal(await phone.locator('#chat-input').inputValue(), '');
+    await phone.waitForSelector('#chat-clear', { state: 'hidden' });
+    await phone.waitForSelector('#chat-voice:not([hidden])');
 
     // A short tap still opens the old recording panel.
     await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');
