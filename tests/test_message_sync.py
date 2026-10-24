@@ -377,6 +377,40 @@ class MessageSyncTests(unittest.TestCase):
         result = self.reader.listing(None, self.workspace)
         self.assertEqual(result["conversations"][0]["preview"], "Automated reminder")
 
+    def test_dialog_order_is_unread_then_read_newest_first_across_all_loaded_pages(self):
+        entries = []
+        for n in range(38):
+            contact = uuid4()
+            self.add_customer(contact, 1, 100+n)
+            self.project(self.row(str(100+n), customer=100+n, at=self.at + timedelta(minutes=n)))
+            conversation = self.db.execute(text("SELECT id FROM conversations WHERE workspace_id=:w AND contact_id=:contact"),
+                                           {"w": self.workspace, "contact": contact}).scalar_one()
+            unread = n % 6 != 0
+            if not unread:
+                self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, conversation)
+            entries.append((unread, n, str(conversation)))
+        expected = [c for _, _, c in sorted(entries, key=lambda x: (not x[0], -x[1]))]
+        first = self.reader.listing(None, self.workspace)
+        second = self.reader.listing(None, self.workspace, page=1)
+        self.assertEqual([c["id"] for c in first["conversations"] + second["conversations"]], expected)
+        self.assertEqual([c["id"] for c in self.reader.listing(None, self.workspace, through_page=1)["conversations"]], expected)
+        self.assertEqual(first["unread"], 31)
+        self.reader.handle(SimpleNamespace(user_id=self.user), self.workspace, UUID(expected[0]))
+        refreshed = self.reader.listing(None, self.workspace, through_page=1)["conversations"]
+        self.assertEqual([c["id"] for c in refreshed if c["unread"]], expected[1:31])
+
+    def test_dialog_order_and_time_use_visible_messages_even_with_stale_cached_time(self):
+        self.add_customer(uuid4(), 1, 8)
+        self.project(self.row("1", customer=7, body="Older"),
+                     self.row("2", customer=8, body="Newer", at=self.at + timedelta(microseconds=1)),
+                     self.row("3", customer=7, direction="out", actor="automation", body="Hidden", at=self.at + timedelta(days=1)))
+        self.db.execute(text("UPDATE messages SET payload=payload||jsonb_build_object('deleted',true) "
+                             "WHERE workspace_id=:w AND payload->>'crm_record_id'='3'"), {"w": self.workspace})
+        rows = self.reader.listing(None, self.workspace)["conversations"]
+        self.assertEqual([c["preview"] for c in rows], ["Newer", "Older"])
+        self.assertEqual(rows[1]["last_message_at"], self.at)
+        self.assertEqual(int(rows[0]["last_message_sort_time"]) - int(rows[1]["last_message_sort_time"]), 1)
+
     def test_outgoing_only_clients_are_visible_in_the_all_messages_list(self):
         self.project(self.row("1", direction="out", actor="automation", body="Only outgoing"))
         result = self.reader.listing(None, self.workspace)

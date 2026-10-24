@@ -447,21 +447,22 @@ class ChatReader:
                         + LATEST_INBOUND_ID
                         + " AS latest_inbound_id,"
                         + UNREAD_MESSAGE_COUNT + " AS unread_count,"
-                        "(SELECT jsonb_build_object('direction',lm.direction,'state',CASE WHEN lm.payload->>'failed'='true' THEN 'failed' "
-                        "ELSE coalesce(ls.state,CASE WHEN lm.direction='out' THEN 'accepted' ELSE 'received' END) END) "
-                        "FROM messages lm LEFT JOIN send_commands ls ON ls.workspace_id=lm.workspace_id AND ls.id=lm.send_command_id "
-                        "WHERE lm.workspace_id=c.workspace_id AND lm.conversation_id=c.id AND " + visible_message("lm") +
-                        " ORDER BY " + message_order("lm", descending=True) + " LIMIT 1) AS last_meta,"
-                        "(SELECT m.text FROM messages m WHERE "
-                        "m.workspace_id=c.workspace_id "
-                        "AND m.conversation_id=c.id AND " + visible_message() + " ORDER BY "
-                        + message_order(descending=True) + " LIMIT 1) AS preview "
+                        "last_visible.occurred_at AS visible_last_message_at,"
+                        "(extract(epoch FROM last_visible.occurred_at)*1000000)::numeric(30,0)::text AS last_message_sort_time,"
+                        "CASE WHEN last_visible.id IS NOT NULL THEN jsonb_build_object("
+                        "'direction',last_visible.direction,'state',last_visible.state) END AS last_meta,"
+                        "last_visible.text AS preview "
                         + joins
+                        + " LEFT JOIN LATERAL (SELECT lm.id,lm.occurred_at,lm.text,lm.direction,"
+                        "CASE WHEN lm.payload->>'failed'='true' THEN 'failed' ELSE coalesce(ls.state,"
+                        "CASE WHEN lm.direction='out' THEN 'accepted' ELSE 'received' END) END AS state "
+                        "FROM messages lm LEFT JOIN send_commands ls ON ls.workspace_id=lm.workspace_id "
+                        "AND ls.id=lm.send_command_id WHERE lm.workspace_id=c.workspace_id "
+                        "AND lm.conversation_id=c.id AND " + visible_message("lm")
+                        + " ORDER BY " + message_order("lm", descending=True) + " LIMIT 1) last_visible ON true "
                         + " WHERE "
                         + where
-                        + " ORDER BY "
-                        + EFFECTIVE_UNREAD
-                        + " DESC,c.last_message_at DESC NULLS LAST,"
+                        + " ORDER BY effective_unread DESC NULLS LAST,last_visible.occurred_at DESC NULLS LAST,"
                         "c.id LIMIT :limit OFFSET :offset"
                     ),
                     params,
@@ -507,7 +508,8 @@ class ChatReader:
                         "status": {3: "client", 2: "lead", 1: "archive"}.get(
                             family.get("weight"), "unlinked"
                         ),
-                        "last_message_at": row["last_message_at"],
+                        "last_message_at": row["visible_last_message_at"],
+                        "last_message_sort_time": row["last_message_sort_time"],
                         "last_direction": (row["last_meta"] or {}).get("direction"),
                         "last_state": (row["last_meta"] or {}).get("state"),
                         "waiting_since": row["last_inbound_at"] if row["effective_unread"] else None,
