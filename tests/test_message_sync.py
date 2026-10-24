@@ -824,6 +824,23 @@ class MessageSyncTests(unittest.TestCase):
         self.project(self.row("100", branch=2), branch=2)
         self.assertEqual(self.messages()[0]["payload"]["customer_branch_id"], 2)
 
+    def test_outgoing_echo_uses_original_sending_branch_after_customer_routing_repair(self):
+        self.add_customer(self.contact, 2, 7)
+        self.project(self.row("1"))
+        local = self.local_reply(self.conversation()["id"])
+        self.db.execute(text("UPDATE messages SET payload=payload||CAST(:p AS jsonb) WHERE workspace_id=:w AND id=:id"),
+                        {"w": self.workspace, "id": local, "p": json.dumps({"crm_branch": 2})})
+        self.db.execute(text("UPDATE send_commands SET state='unknown' WHERE workspace_id=:w"), {"w": self.workspace})
+        self.project(self.row("20", direction="out", branch=1, body="Reply", at=self.at + timedelta(seconds=10)))
+        self.assertEqual(self.db.execute(text("SELECT state FROM send_commands WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), "unknown")
+        self.project(self.row("21", direction="out", branch=2, body="Reply", at=self.at + timedelta(seconds=10)), branch=2)
+        self.assertEqual(len(self.messages()), 3)
+        self.assertEqual(self.db.execute(text("SELECT message_id FROM source_records WHERE workspace_id=:w "
+                                             "AND external_record_id='out:2:21'"), {"w": self.workspace}).scalar(), local)
+        self.assertEqual(self.db.execute(text("SELECT state FROM send_commands WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar(), "accepted")
+
     def test_client_repair_checkpoint_resumes_and_does_not_create_empty_dialogs(self):
         self.project(self.row("100"))
         for index in range(1, 22):

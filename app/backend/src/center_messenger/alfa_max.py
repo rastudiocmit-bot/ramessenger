@@ -806,7 +806,9 @@ class AlfaMaxConnections:
                                 "w": workspace,
                                 "conv": conversation_id,
                                 "text": item["text"],
-                                "branch": str(customer["branch_id"]),
+                                # Match the actual sending journal independently
+                                # of the preferred branch for future replies.
+                                "branch": str(branch),
                                 "customer": str(customer["customer_id"]),
                                 "at": item["occurred_at"],
                                 "c": channel,
