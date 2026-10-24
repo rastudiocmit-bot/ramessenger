@@ -655,152 +655,254 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     try { const url = new URL(value); return url.protocol === "https:" && /^[a-z0-9-]+\.s20\.online$/i.test(url.hostname) ? url.href : null; }
     catch (_) { return null; }
   };
-  function familyAge(dob) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dob || "")) return "Дата не указана";
-    const [year, month, day] = dob.split("-").map(Number), now = new Date();
-    const age = now.getFullYear() - year - (now.getMonth() + 1 < month || (now.getMonth() + 1 === month && now.getDate() < day) ? 1 : 0);
-    return age >= 0 && age < 120 ? `${age} лет` : "Дата не указана";
-  }
-  function familyLink(url, title, className = "family-open") {
-    const href = crmUrl(url);
-    if (!href) return node("span", "", className);
-    const link = node("a", "↗", className); link.href = href; link.target = "center-messenger-crm"; link.rel = "noopener noreferrer"; link.title = title; link.setAttribute("aria-label", title);
-    return link;
-  }
-  function familyMetric(label, value, title) {
-    const cell = node("div", undefined, "family-metric");
-    const strong = node("strong", value);
-    if (title) strong.title = title;
-    cell.append(node("span", label), strong); return cell;
-  }
-  const shortBranch = name => name.length > 20 ? name.slice(0, 20).trimEnd() + "…" : name;
+  // Client card. One column that reads top to bottom: who the parent is and how to reach
+  // them, which child we are talking about, what needs attention now, then the detail.
+  const detailsDialog = $("#chat-details-dialog"), detailsPanel = detailsDialog.querySelector(".family-panel");
+  const isAdmin = () => ["owner", "admin"].includes(state.workspace?.role);
+  const plural = (count, one, few, many) => { const a = Math.abs(count) % 100, b = a % 10; return a > 10 && a < 20 ? many : b === 1 ? one : b >= 2 && b <= 4 ? few : many; };
+  const familyToday = () => family?.today || new Date().toISOString().slice(0, 10);
+  const parseDay = value => { if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return null; const [y, m, d] = value.split("-").map(Number); return new Date(y, m - 1, d); };
+  const daysBetween = (from, to) => Math.round((parseDay(to) - parseDay(from)) / 86400000);
   const familyNumber = value => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(Number(value));
-  const familyMoney = value => `${familyNumber(value)} руб`;
+  const familyMoney = value => `${familyNumber(value)} ₽`;
   const familyDate = value => /^\d{4}-\d{2}-\d{2}$/.test(value || "") ? value.split("-").reverse().join(".") : null;
-  const familyLesson = lesson => lesson ? `${familyDate(lesson.date)}${lesson.time ? ` · ${lesson.time}` : ""}` : null;
-  function familyBalance(student) {
-    return student.balance !== null && student.balance !== undefined ? familyMoney(student.balance) : "Баланс требует уточнения";
+  const known = value => value !== null && value !== undefined && value !== "" && !Number.isNaN(Number(value));
+  const subName = item => item.name || `Абонемент №${item.tariff_id}`;
+  const initialsOf = name => (name || "").trim().split(/\s+/).slice(0, 2).map(part => part[0] || "").join("").toLocaleUpperCase("ru");
+  function familyAge(dob) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dob || "")) return "Возраст не указан";
+    const [year, month, day] = dob.split("-").map(Number), now = parseDay(familyToday()) || new Date();
+    const age = now.getFullYear() - year - (now.getMonth() + 1 < month || (now.getMonth() + 1 === month && now.getDate() < day) ? 1 : 0);
+    return age >= 0 && age < 120 ? `${age} ${plural(age, "год", "года", "лет")}` : "Возраст не указан";
   }
-  const activeSubscriptions = cards => cards.flatMap(card => (card.subscriptions || []).filter(item => !item.archived && (!item.begin || item.begin <= (family?.today || new Date().toISOString().slice(0, 10))) && (!item.end || item.end >= (family?.today || new Date().toISOString().slice(0, 10)))).map(item => ({ ...item, branch_name: card.branch_name })));
+  function dayLabel(value, time) {
+    const day = parseDay(value); if (!day) return null;
+    const diff = daysBetween(familyToday(), value);
+    let text = diff === 0 ? "Сегодня" : diff === 1 ? "Завтра" : diff === -1 ? "Вчера"
+      : new Intl.DateTimeFormat("ru-RU", { weekday: "short", day: "numeric", month: "short" }).format(day).replace(/\.$/, "");
+    text = text.charAt(0).toLocaleUpperCase("ru") + text.slice(1);
+    return time ? `${text}, ${time}` : text;
+  }
+  const activeSubscriptions = cards => cards.flatMap(card => (card.subscriptions || []).filter(item => !item.archived && (!item.begin || item.begin <= familyToday()) && (!item.end || item.end >= familyToday())).map(item => ({ ...item, branch_name: card.branch_name })));
+  function el(tag, className, ...children) {
+    const result = node(tag, undefined, className);
+    for (const child of children) if (child !== null && child !== undefined && child !== false && child !== "") result.append(child);
+    return result;
+  }
+  function glyph(name, className = "family-ic") { const holder = node("span", undefined, className); holder.setAttribute("aria-hidden", "true"); holder.append(icon(name)); return holder; }
+  function familyLink(url, title, label) {
+    const href = crmUrl(url); if (!href) return null;
+    const link = node("a", undefined, label ? "family-crm" : "family-crm icon-only");
+    link.href = href; link.target = "center-messenger-crm"; link.rel = "noopener noreferrer"; link.title = title; link.setAttribute("aria-label", title);
+    if (label) link.append(node("span", label));
+    link.append(icon("out")); return link;
+  }
+  const chip = (text, tone) => node("span", text, `family-chip ${tone || ""}`.trim());
+  function contactRow(kind, value) {
+    const link = node("a", value); link.href = kind === "phone" ? `tel:${value.replace(/[^\d+]/g, "")}` : `mailto:${value}`;
+    const copy = button("", "family-copy", async () => {
+      try { await navigator.clipboard.writeText(value); toast(kind === "phone" ? "Телефон скопирован." : "Почта скопирована."); }
+      catch (_) { toast("Не удалось скопировать. Выделите текст вручную.", true); }
+    });
+    copy.append(icon("copy")); copy.setAttribute("aria-label", `Скопировать ${value}`); copy.title = "Скопировать";
+    return el("div", "family-contact", glyph(kind === "phone" ? "phone" : "mail"), link, copy);
+  }
+  function note(name, title, text, tone) {
+    return el("div", `family-note ${tone}`, glyph(name), el("div", "family-note-text", node("strong", title), text ? node("span", text) : null));
+  }
+  function stat(label, value, hint, tone) {
+    return el("div", `family-stat${tone ? ` ${tone}` : ""}`, node("span", label), node("strong", value), hint ? node("small", hint) : null);
+  }
+  const part = (title, ...children) => el("section", "family-part", node("h4", title, "family-label"), ...children);
+  function fact(label, ...value) { return el("div", "family-fact", node("dt", label), el("dd", undefined, ...value)); }
+  function familyStatus() {
+    const all = (family.students || []).flatMap(student => (student.cards || []).map(card => card.status));
+    return ["client", "lead", "archive"].filter(status => all.includes(status));
+  }
   function renderFamily() {
     if (!family) return;
+    detailsDialog.classList.remove("is-loading");
     $("#chat-details-name").textContent = family.name;
+    const found = familyStatus(), main = found[0] || currentItem()?.status || "unlinked";
+    const avatar = $("#chat-details-avatar"); avatar.textContent = initialsOf(family.name); avatar.className = `ava family-ava ${statuses[main] ? main : "unlinked"}`;
+    const badges = $("#chat-details-badges"); badges.replaceChildren();
+    for (const status of found) badges.append(chip(statuses[status], status));
+    if (family.max_connected || family.max_bot_connected) badges.append(chip("MAX подключён", "max"));
+    if (family.needs_review) badges.append(chip("Нужна проверка в CRM", "unlinked"));
     const contact = $("#chat-details-contact"); contact.replaceChildren();
-    for (const phone of family.phones || []) contact.append(node("span", `☎ ${phone}`));
-    for (const email of family.emails || []) contact.append(node("span", `✉ ${email}`));
-    if (!contact.childNodes.length) contact.append(node("span", "Контакты не указаны"));
-    const synced = family.snapshot_at ? new Date(family.snapshot_at) : null;
-    const selected = (family.students || []).find(student => student.id === familySelected);
-    const times = (selected?.cards || []).map(card => card.refreshed_at).filter(Boolean).sort();
-    $("#chat-details-sync").textContent = times.length ? `Сведения CRM · ${date(times[0])}` : synced && !Number.isNaN(synced.getTime()) ? `Справочник CRM · ${date(family.snapshot_at)}` : "Справочник CRM";
-    const list = $("#chat-details-children"); list.replaceChildren();
+    for (const phone of family.phones || []) contact.append(contactRow("phone", phone));
+    for (const email of family.emails || []) contact.append(contactRow("email", email));
+    if (!contact.childNodes.length) contact.append(node("p", "Телефон и почта в CRM не указаны.", "family-empty"));
     const students = family.students || [];
-    if (!students.length) { list.append(node("p", "Дети не найдены в CRM.", "muted")); $("#chat-details-student").replaceChildren(); return; }
+    const synced = family.snapshot_at ? new Date(family.snapshot_at) : null;
+    const selected = students.find(student => student.id === familySelected) || students[0];
+    const times = (selected?.cards || []).map(card => card.refreshed_at).filter(Boolean).sort();
+    $("#chat-details-sync").textContent = times.length ? `Сведения из CRM обновлены ${date(times[0])}` : synced && !Number.isNaN(synced.getTime()) ? `Справочник CRM от ${date(family.snapshot_at)}` : "Справочник CRM";
+    $("#chat-details-count").textContent = students.length > 1 ? String(students.length) : "";
+    const list = $("#chat-details-children"), detail = $("#chat-details-student"); list.replaceChildren(); detail.replaceChildren();
+    detailsDialog.querySelector(".family-kids-block").hidden = students.length < 2;
+    if (!students.length) { detail.append(part("Дети", node("p", "В CRM у этого контакта нет детей.", "family-empty"))); return; }
     if (!students.some(student => student.id === familySelected)) familySelected = students[0].id;
     for (const student of students) {
-      const row = node("div", undefined, `family-child${student.id === familySelected ? " selected" : ""}`);
-      const select = button("", "family-child-select", () => { familySelected = student.id; renderFamily(); refreshSelected(false).catch(error => fail(error)); });
-      select.setAttribute("aria-pressed", String(student.id === familySelected));
-      const courses = [...new Set((student.groups || []).map(group => group.name))].join(", ") || "Группа не определена";
-      const info = node("span", undefined, "family-child-info"); info.append(node("strong", student.name), node("small", `${familyAge(student.dob)} · ${courses}`));
-      select.append(info); row.append(select, familyLink(student.cards?.[0]?.url, `Открыть ${student.name} в АльфаCRM`)); list.append(row);
+      const chosen = student.id === familySelected, status = (student.cards || [])[0]?.status;
+      const kid = button("", "family-kid", () => { if (familySelected === student.id) return; familySelected = student.id; renderFamily(); refreshSelected(false).catch(error => fail(error)); });
+      kid.setAttribute("aria-pressed", String(chosen));
+      const ava = node("span", initialsOf(student.name), `ava ${statuses[status] ? status : "me"}`); ava.setAttribute("aria-hidden", "true");
+      kid.append(ava, el("span", "family-kid-text", node("strong", student.name), node("small", familyAge(student.dob))));
+      list.append(kid);
     }
-    const student = students.find(person => person.id === familySelected), detail = $("#chat-details-student"); detail.replaceChildren();
-    detail.append(node("h3", student.name));
-    const branches = [...new Set((student.cards || []).map(card => card.branch_name))];
-    const subs = activeSubscriptions(student.cards || []);
-    const subscriptions = node("div", undefined, "family-subscriptions");
-    subscriptions.hidden = true;
-    for (const item of subs) subscriptions.append(node("div", `${item.name || `Абонемент №${item.tariff_id}`} · ${item.branch_name} · ${item.balance === null ? "остаток не указан" : familyMoney(item.balance)}${item.end ? ` · до ${familyDate(item.end)}` : ""}`));
-    let subscriptionsTile;
+    const student = students.find(person => person.id === familySelected), cards = student.cards || [];
+    const today = familyToday(), subs = activeSubscriptions(cards), groups = student.groups || [];
+    const born = familyDate(student.dob);
+    detail.append(el("div", "family-kid-head",
+      el("div", "family-kid-name", node("h3", student.name), node("p", [familyAge(student.dob), born && `род. ${born}`].filter(Boolean).join(" · "), "family-sub")),
+      familyLink(cards[0]?.url, `Открыть ${student.name} в АльфаCRM`, "Открыть в CRM")));
+
+    const notes = el("div", "family-notes");
+    const upcoming = groups.filter(group => group.next_lesson?.date).sort((a, b) => `${a.next_lesson.date}${a.next_lesson.time || ""}`.localeCompare(`${b.next_lesson.date}${b.next_lesson.time || ""}`))[0];
+    if (upcoming) notes.append(note("cal", `Ближайшее занятие · ${dayLabel(upcoming.next_lesson.date, upcoming.next_lesson.time)}`, upcoming.name, "next"));
+    for (const item of subs) {
+      if (!item.end) continue;
+      const left = daysBetween(today, item.end);
+      if (left >= 0 && left <= 7) notes.append(note("warn", left === 0 ? "Абонемент заканчивается сегодня" : `Абонемент заканчивается через ${left} ${plural(left, "день", "дня", "дней")}`, `${subName(item)} · до ${familyDate(item.end)}`, "warn"));
+    }
+    if (known(student.balance) && Number(student.balance) < 0) notes.append(note("wallet", `Задолженность ${familyMoney(Math.abs(Number(student.balance)))}`, "Баланс по абонементам отрицательный", "danger"));
+    if (notes.childNodes.length) detail.append(notes);
+
+    const paid = cards.filter(card => known(card.paid_lesson_count)), paidTotal = paid.reduce((sum, card) => sum + Number(card.paid_lesson_count), 0);
+    const negative = known(student.balance) && Number(student.balance) < 0;
+    detail.append(el("div", "family-stats",
+      stat("Баланс", known(student.balance) ? familyMoney(student.balance) : "—", known(student.balance) ? "по абонементам" : "требует уточнения", negative ? "danger" : ""),
+      stat("Оплачено", paid.length ? `${paidTotal} ${plural(paidTotal, "занятие", "занятия", "занятий")}` : "—", paid.length ? "к посещению" : "нет данных"),
+      stat("Абонементы", String(subs.length), subs.length ? plural(subs.length, "активный", "активных", "активных") : "нет активных")));
+
     if (subs.length) {
-      subscriptionsTile = familyMetric("Абонементы", String(subs.length));
-      subscriptionsTile.classList.add("family-metric-button");
-      subscriptionsTile.setAttribute("role", "button");
-      subscriptionsTile.setAttribute("tabindex", "0");
-      subscriptionsTile.setAttribute("aria-pressed", "false");
-      const toggleSubscriptions = () => {
-        const opening = subscriptions.hidden;
-        subscriptions.hidden = !opening;
-        subscriptionsTile.classList.toggle("open", opening);
-        subscriptionsTile.setAttribute("aria-pressed", String(opening));
-      };
-      subscriptionsTile.addEventListener("click", toggleSubscriptions);
-      subscriptionsTile.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleSubscriptions(); } });
-    } else {
-      subscriptionsTile = familyMetric("Абонементы", "0");
+      const rows = el("div", "family-list");
+      for (const item of subs) {
+        const left = item.end ? daysBetween(today, item.end) : null, soon = left !== null && left <= 7;
+        const until = item.end ? `до ${familyDate(item.end)}` : "срок не указан";
+        rows.append(el("div", `family-item${soon ? " soon" : ""}`, glyph("wallet"),
+          el("div", "family-item-main", node("strong", subName(item)), node("small", `${item.branch_name} · ${until}`)),
+          node("span", item.balance === null || item.balance === undefined ? "—" : familyMoney(item.balance), "family-item-value")));
+      }
+      detail.append(part("Абонементы", rows));
     }
-    const metrics = node("div", undefined, "family-metrics");
-    metrics.append(familyMetric("Возраст", familyAge(student.dob)), subscriptionsTile, familyMetric("Общий баланс", familyBalance(student)), familyMetric("Филиалы", branches.map(shortBranch).join(", ") || "Филиал не указан", branches.join(", ")));
-    detail.append(metrics);
-    const paid = (student.cards || []).filter(card => card.paid_lesson_count !== null && card.paid_lesson_count !== undefined);
-    if (paid.length) detail.append(node("p", `Остаток занятий: ${paid.map(card => `${card.branch_name} — ${card.paid_lesson_count}`).join(" · ")}`, "family-summary"));
-    if (subs.length) detail.append(subscriptions);
-    detail.append(node("h4", "Группы и абонементы"));
-    const groups = student.groups || [];
-    if (!groups.length) { detail.append(node("span", "ГРУППА НЕ ОПРЕДЕЛЕНА", "family-unknown")); return; }
+
+    const groupCards = el("div", "family-groups");
     for (const group of groups) {
-      const block = node("article", undefined, "family-group");
-      const title = node("div", undefined, "family-group-heading");
-      const name = node("span"); name.append(node("strong", group.name), node("small", group.branch_name || "Филиал не указан"));
-      title.append(familyLink(group.url, `Открыть группу ${group.name} в АльфаCRM`), name); block.append(title);
-      const facts = node("div", undefined, "family-group-facts");
-      const today = family.today || new Date().toISOString().slice(0, 10);
       const linked = (group.subscriptions || []).filter(item => !item.archived && (!item.begin || item.begin <= today) && (!item.end || item.end >= today)), previous = group.previous_lesson;
-      const attend = previous ? `${familyLesson(previous)} · ${previous.attended === true ? "был" : previous.attended === false ? "не был" : "посещение не отмечено"}` : "За год занятий нет";
-      const remaining = linked.length ? linked.map(item => item.balance === null ? "Остаток не указан" : familyMoney(item.balance)).join("\n") : "Нет связи с абонементом";
-      const until = linked.length ? linked.map(item => familyDate(item.end) || "Срок не указан").join("\n") : "Срок не указан";
-      const balanceMetric = familyMetric("Остаток на балансе", remaining), untilMetric = familyMetric("Оплачено до", until);
-      const subscriptionHint = linked.map(item => `${item.name || `Абонемент №${item.tariff_id}`}: ${item.balance === null ? "остаток не указан" : familyMoney(item.balance)}${item.end ? ` · до ${familyDate(item.end)}` : ""}`).join("\n");
-      balanceMetric.title = subscriptionHint; untilMetric.title = subscriptionHint;
-      facts.append(familyMetric("На прошлом занятии", attend), familyMetric("Ближайшее занятие", familyLesson(group.next_lesson) || "На 90 дней не запланировано"), balanceMetric, untilMetric);
-      block.append(facts); detail.append(block);
+      const mark = !previous ? null : previous.attended === true ? node("span", "Был", "family-mark ok") : previous.attended === false ? node("span", "Не был", "family-mark miss") : node("span", "Не отмечено", "family-mark");
+      const pay = linked.length ? linked.map(item => `${item.balance === null || item.balance === undefined ? "Остаток не указан" : familyMoney(item.balance)} · ${item.end ? `до ${familyDate(item.end)}` : "срок не указан"}`).join("\n") : "Не привязана к абонементу";
+      const facts = el("dl", "family-facts",
+        fact("Прошлое", previous ? node("span", dayLabel(previous.date, previous.time)) : node("span", "За год занятий не было", "family-muted"), mark),
+        fact("Следующее", group.next_lesson ? node("span", dayLabel(group.next_lesson.date, group.next_lesson.time)) : node("span", "Не запланировано на 90 дней", "family-muted")),
+        fact("Оплата", node("span", pay, linked.length ? "" : "family-muted")));
+      if (linked.length) facts.lastChild.title = linked.map(item => `${subName(item)}: ${item.balance === null || item.balance === undefined ? "остаток не указан" : familyMoney(item.balance)}${item.end ? ` · до ${familyDate(item.end)}` : ""}`).join("\n");
+      groupCards.append(el("article", "family-group",
+        el("div", "family-group-head", el("div", "family-group-title", node("strong", group.name), node("small", group.branch_name || "Филиал не указан")), familyLink(group.url, `Открыть группу ${group.name} в АльфаCRM`)),
+        facts));
+    }
+    if (!groups.length) groupCards.append(node("p", "Ребёнок пока не записан ни в одну группу.", "family-empty"));
+    detail.append(part("Группы", groupCards));
+
+    if (cards.length) {
+      const rows = el("div", "family-list");
+      for (const card of cards) {
+        const lessons = known(card.paid_lesson_count) ? ` · оплачено ${card.paid_lesson_count} ${plural(Number(card.paid_lesson_count), "занятие", "занятия", "занятий")}` : "";
+        rows.append(el("div", "family-item", glyph("building"),
+          el("div", "family-item-main", node("strong", card.branch_name || "Филиал не указан"), node("small", `${statuses[card.status] || "Статус не указан"}${lessons}`)),
+          familyLink(card.url, `Открыть карточку в филиале ${card.branch_name} в АльфаCRM`)));
+      }
+      detail.append(part(cards.length > 1 ? "Филиалы" : "Филиал", rows));
     }
   }
   async function refreshSelected(force) {
-    if (!["owner", "admin"].includes(state.workspace?.role)) return;
+    if (!isAdmin()) return;
     if (familyBusy || !family || !familySelected) return;
     const student = family.students.find(item => item.id === familySelected);
     if (!student) return;
     const target = student.cards.filter(card => force || card.needs_refresh).filter(card => !familyAttempted.has(`${student.id}:${card.branch_id}:${card.id}`) || force);
     if (!target.length) return;
     const epoch = state.epoch, gen = generation, seq = detailsSeq, conversation = selected;
-    familyBusy = true; $("#chat-details-refresh").disabled = true;
+    familyBusy = true; $("#chat-details-refresh").disabled = true; detailsDialog.classList.add("is-refreshing");
     try {
       for (const card of target) {
-        if (!valid(epoch, gen) || seq !== detailsSeq || !$("#chat-details-dialog").open || conversation !== selected) return;
+        if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
         familyAttempted.add(`${student.id}:${card.branch_id}:${card.id}`);
         $("#chat-details-sync").textContent = `Обновляем сведения · ${card.branch_name}`;
         const updated = await api(`${base()}/directory/contacts/${family.id}/students/${student.id}/cards/${card.branch_id}/${card.id}/refresh`, { method: "POST" });
-        if (!valid(epoch, gen) || seq !== detailsSeq || !$("#chat-details-dialog").open || conversation !== selected) return;
+        if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
         family = updated; renderFamily();
       }
     } catch (error) {
-      if (valid(epoch, gen) && seq === detailsSeq && $("#chat-details-dialog").open) { renderFamily(); toast(error.message, true); }
+      if (valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) { renderFamily(); toast(error.message, true); }
     } finally {
-      familyBusy = false; $("#chat-details-refresh").disabled = !["owner", "admin"].includes(state.workspace?.role);
-      if (familySelected !== student.id && valid(epoch, gen) && seq === detailsSeq && $("#chat-details-dialog").open) refreshSelected(false).catch(error => fail(error));
+      familyBusy = false; $("#chat-details-refresh").disabled = !isAdmin(); detailsDialog.classList.remove("is-refreshing");
+      if (familySelected !== student.id && valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) refreshSelected(false).catch(error => fail(error));
     }
+  }
+  function familySkeleton() {
+    $("#chat-details-avatar").textContent = ""; $("#chat-details-avatar").className = "ava family-ava me";
+    $("#chat-details-badges").replaceChildren(); $("#chat-details-sync").textContent = ""; $("#chat-details-count").textContent = "";
+    $("#chat-details-children").replaceChildren(); detailsDialog.querySelector(".family-kids-block").hidden = true;
+    $("#chat-details-contact").replaceChildren(node("div", undefined, "family-skel"), node("div", undefined, "family-skel"));
+    $("#chat-details-student").replaceChildren(node("div", undefined, "family-skel tall"), node("div", undefined, "family-skel"), node("div", undefined, "family-skel tall"));
   }
   async function openDetails() {
     const data = cache.get(selected), contactId = data?.meta?.contact_id;
     if (!data?.meta) return;
     if (!contactId) { openLink(selected); return; }
     const epoch = state.epoch, gen = generation, seq = ++detailsSeq, conversation = selected;
-    $("#chat-details-refresh").disabled = !["owner", "admin"].includes(state.workspace?.role);
-    const dialog = $("#chat-details-dialog"); family = null; familySelected = null; familyAttempted.clear();
+    const refresh = $("#chat-details-refresh"); refresh.hidden = !isAdmin(); refresh.disabled = !isAdmin();
+    family = null; familySelected = null; familyAttempted.clear();
     $("#chat-details-name").textContent = "Загружаем сведения…";
-    $("#chat-details-contact").replaceChildren(); $("#chat-details-sync").textContent = "";
-    $("#chat-details-children").replaceChildren(); $("#chat-details-student").replaceChildren();
-    if (!dialog.open) dialog.showModal();
+    detailsDialog.classList.add("is-loading"); detailsDialog.classList.remove("is-closing", "is-refreshing"); familySkeleton();
+    if (!detailsDialog.open) detailsDialog.showModal();
     try {
       const result = await api(`${chatPath(conversation)}/family`);
-      if (!valid(epoch, gen) || seq !== detailsSeq || !dialog.open || conversation !== selected) return;
+      if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
       family = result; renderFamily(); refreshSelected(false).catch(error => fail(error));
-    } catch (error) { if (valid(epoch, gen) && seq === detailsSeq && dialog.open) $("#chat-details-name").textContent = error.message; }
+    } catch (error) {
+      if (valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) {
+        detailsDialog.classList.remove("is-loading");
+        $("#chat-details-name").textContent = error.message;
+        $("#chat-details-contact").replaceChildren(); $("#chat-details-student").replaceChildren(node("p", "Сведения не загрузились. Попробуйте открыть карточку ещё раз.", "family-empty"));
+      }
+    }
   }
+  // Opening and closing slide the panel; Esc, the backdrop and the close button all
+  // share one animated close. On a phone the sheet can also be pulled down by its handle.
+  let closingTimer = null, sheetDrag = null;
+  const sheetMode = () => matchMedia("(max-width: 719px)").matches;
+  function closeDetails() {
+    if (!detailsDialog.open || detailsDialog.classList.contains("is-closing")) return;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) { detailsDialog.close(); return; }
+    detailsDialog.classList.add("is-closing");
+    closingTimer = setTimeout(() => { if (detailsDialog.open) detailsDialog.close(); }, 200);
+  }
+  detailsDialog.addEventListener("click", event => {
+    if (event.target === detailsDialog || event.target.closest("[data-close]")) { event.stopPropagation(); closeDetails(); }
+  }, true);
+  detailsDialog.addEventListener("cancel", event => { event.preventDefault(); closeDetails(); });
+  detailsPanel.addEventListener("pointerdown", event => {
+    if (!sheetMode() || event.pointerType === "mouse" || !event.target.closest(".family-grab, .family-head") || event.target.closest("button, a")) return;
+    sheetDrag = { id: event.pointerId, y: event.clientY, dy: 0 }; try { detailsPanel.setPointerCapture(event.pointerId); } catch (_) { /* Capture is optional. */ } detailsPanel.classList.add("dragging");
+  });
+  detailsPanel.addEventListener("pointermove", event => {
+    if (!sheetDrag || event.pointerId !== sheetDrag.id) return;
+    sheetDrag.dy = Math.max(0, event.clientY - sheetDrag.y); detailsPanel.style.setProperty("--sheetDrag", `${sheetDrag.dy}px`);
+  });
+  const endSheetDrag = event => {
+    if (!sheetDrag || event.pointerId !== sheetDrag.id) return;
+    const pulled = sheetDrag.dy; sheetDrag = null; detailsPanel.classList.remove("dragging");
+    if (pulled > 110) closeDetails(); else detailsPanel.style.removeProperty("--sheetDrag");
+  };
+  detailsPanel.addEventListener("pointerup", endSheetDrag); detailsPanel.addEventListener("pointercancel", endSheetDrag);
   $("#chat-details-refresh").addEventListener("click", () => refreshSelected(true).catch(error => fail(error)));
-  $("#chat-details-dialog").addEventListener("close", () => { detailsSeq += 1; family = null; });
+  detailsDialog.addEventListener("close", () => {
+    clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing", "is-refreshing"); detailsPanel.style.removeProperty("--drag");
+    detailsSeq += 1; family = null;
+  });
   async function openCards(item) {
     if (!item.contact_id) return openLink(item.id);
     await select(item.id, false); await openDetails();
