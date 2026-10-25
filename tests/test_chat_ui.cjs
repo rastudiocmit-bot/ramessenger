@@ -649,6 +649,39 @@ test("negative family debt uses the total including base money, even with positi
   assert.doesNotMatch(ui.$('.family-note.debt').textContent,/Баланс по абонементам/);
 });
 
+test("family uses unique server subscription and paid totals while retaining both branches", async t=>{
+  const subscription={id:40,name:'Художественная школа',balance:'8062.50',begin:'2026-10-01',end:'2027-07-04',branch_name:'Центральный · Северный'};
+  const cards=['Центральный','Северный'].map((name,i)=>({id:'7',branch_id:String(i+1),branch_name:name,status:'client',needs_refresh:false,paid_lesson_count:9,subscriptions:[subscription],lessons:[]}));
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(90)}});
+    if(url.pathname.endsWith('/family'))return {id:identifier(90),name:'Родитель',phones:[],emails:[],today:'2026-10-24',students:[{id:identifier(91),name:'Ребёнок',balance:'8062.50',paid_lesson_count:9,subscriptions:[subscription],groups:[],cards}]};
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.equal(ui.$('.family-stats').children[1].querySelector('strong').textContent,'9 занятий');
+  assert.equal(ui.$('.family-stats').children[2].querySelector('strong').textContent,'1');
+  assert.equal(ui.$('#chat-details-student').querySelectorAll('.family-item-value').length,1);
+  assert.match(ui.$('.family-item-main small').textContent,/Центральный · Северный/);
+  assert.match(ui.$('#chat-details-student').textContent,/Филиалы/);
+  assert.doesNotMatch(ui.$('#chat-details-student').textContent,/оплачено 9/);
+});
+
+test("conflicting branch observations show unknown totals without endless preparation", async t=>{
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(90)}});
+    if(url.pathname.endsWith('/family'))return {id:identifier(90),name:'Родитель',phones:[],emails:[],today:'2026-10-24',students:[{id:identifier(91),name:'Ребёнок',balance:'8062.50',paid_lesson_count:null,
+      subscriptions:[{id:40,name:'Школа',needs_review:true,balance:null,branch_name:'Два филиала'}],groups:[],cards:[{id:'7',branch_id:'1',subscriptions:[],lessons:[],paid_lesson_count:9}]}]};
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.equal(ui.$('.family-stats').children[1].querySelector('strong').textContent,'—');
+  assert.equal(ui.$('.family-stats').children[2].querySelector('strong').textContent,'—');
+  assert.match(ui.$('#chat-details-student').textContent,/Уточните сведения/);
+  assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Готовим подробную карточку/);
+});
+
 test('window patches retain unchanged nodes and apply new ordering without duplicates', async t=>{
   let lists=0;
   const rows=[conversation(1),conversation(2),conversation(3)];

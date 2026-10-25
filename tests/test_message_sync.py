@@ -1438,7 +1438,7 @@ class MessageSyncTests(unittest.TestCase):
 
     @staticmethod
     def live_family_facts():
-        return {'balance':'4123.75','paid_lesson_count':5,'subscriptions':[{'id':40,'balance':'2725.00'}],'lessons':[]}
+        return {'balance':'4123.75','paid_lesson_count':5,'subscriptions':[{'id':40,'balance':'2725.00','subject_ids':[],'lesson_type_ids':[]}],'lessons':[]}
 
     def test_family_cache_worker_prepares_pending_cards_without_any_operator_session(self):
         reader, worker, student = self.family_worker_fixture()
@@ -1648,6 +1648,40 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(result['students'][0]['id'],str(student))
         self.assertEqual(result['students'][0]['balance'],'3962.50')
         self.assertNotIn('subscriptions',result['students'][0]['cards'][0])
+
+    def test_family_response_combines_shared_subscription_from_existing_branch_caches(self):
+        reader,student=self.family_balance_fixture()
+        self.add_customer(self.contact,2,7)
+        self.db.execute(text("UPDATE alfa_customers SET student_id=:student WHERE workspace_id=:w"),{'w':self.workspace,'student':student})
+        subscription={'id':40,'tariff_id':9,'name':'Art school','balance':'8062.50','begin':'2026-10-01','end':'2027-07-04','archived':False,'subject_ids':[11],'lesson_type_ids':[1]}
+        lesson={'id':10,'branch_id':2,'subject_id':11,'lesson_type_id':1,'customer_id':7,'customer_verified':True,'subscription_id':40,'group_ids':[],'date':'2026-10-25','time':'15:00','status':1}
+        for branch in (1,2):
+            self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,paid_lesson_count,subscriptions,lessons,refreshed_at) "
+                "VALUES (:w,:c,:b,7,1,8062.50,9,CAST(:subs AS jsonb),CAST(:lessons AS jsonb),:at)"),
+                {'w':self.workspace,'c':self.crm,'b':branch,'subs':json.dumps([subscription]),'lessons':json.dumps([lesson]),'at':self.at+timedelta(hours=2)})
+        person=reader.detail(None,self.workspace,self.contact)['students'][0]
+        self.assertEqual(len(person['cards']),2)
+        self.assertEqual(len(person['subscriptions']),1)
+        self.assertEqual(person['subscriptions'][0]['branches'][0]['id'],'2')
+        self.assertEqual(len(person['subscriptions'][0]['branches']),1)
+        self.assertEqual(len(person['subscriptions'][0]['observed_branches']),2)
+        self.assertEqual(person['paid_lesson_count'],9)
+        self.assertEqual(person['balance'],'8062.50')
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_family_details WHERE workspace_id=:w'),{'w':self.workspace}).scalar(),2)
+
+    def test_fresh_legacy_family_cache_gets_one_mapping_upgrade_without_waiting_thirty_minutes(self):
+        reader,worker,student=self.family_worker_fixture()
+        self.project(self.row())
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,subscriptions,refreshed_at) "
+            "VALUES (:w,:c,1,7,1,100,CAST(:subs AS jsonb),now())"),{'w':self.workspace,'c':self.crm,'subs':json.dumps([{'id':40,'balance':'100'}])})
+        worker.schedule(self.workspace)
+        job=worker.claim(self.workspace)
+        self.assertIsNotNone(job)
+        with patch('center_messenger.family_cache.fetch_family_card',return_value=self.live_family_facts()):
+            worker.process(self.workspace,job)
+        worker.schedule(self.workspace)
+        self.assertIsNone(worker.claim(self.workspace))
+        self.assertFalse(reader.detail(None,self.workspace,self.contact)['students'][0]['cards'][0]['needs_mapping_refresh'])
 
     def test_family_balance_and_paid_count_use_newer_live_customer_details(self):
         reader,student=self.family_balance_fixture()

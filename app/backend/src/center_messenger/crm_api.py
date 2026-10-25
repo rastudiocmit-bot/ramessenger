@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from center_messenger.accounts_api import identity, service
 from center_messenger.alfa_client import AlfaError
-from center_messenger.alfa_family import fetch_family_card, group_facts, customer_balance
+from center_messenger.alfa_family import fetch_family_card, group_facts, customer_balance, customer_paid_lessons, customer_subscriptions, mapping_pending
 from center_messenger.alfa_sync import SyncOptions
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_directory import normalized_name, phone_number
@@ -392,7 +392,8 @@ class DirectoryReader:
                             lessons=source["lessons"],
                             refreshed_at=source["refreshed_at"].isoformat(),
                         )
-                    card["needs_refresh"] = source is None or source["refreshed_at"] < datetime.now(
+                    card["needs_mapping_refresh"] = mapping_pending(card)
+                    card["needs_refresh"] = card["needs_mapping_refresh"] or source is None or source["refreshed_at"] < datetime.now(
                         UTC
                     ) - timedelta(minutes=30)
             for row in members:
@@ -423,7 +424,9 @@ class DirectoryReader:
                         existing["customer_ids"].append(str(row["customer_id"]))
             for person in people.values():
                 person["balance"] = customer_balance(person["cards"])
-                group_facts(person["groups"], person["cards"], today=snapshot["today"])
+                person["paid_lesson_count"] = customer_paid_lessons(person["cards"])
+                person["subscriptions"] = customer_subscriptions(person["cards"], groups=person["groups"])
+                group_facts(person["groups"], person["cards"], today=snapshot["today"], subscriptions=person["subscriptions"])
             return {
                 "id": str(contact_id),
                 "name": contact["display_name"],

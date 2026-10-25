@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app/backend/src'))
 from center_messenger.alfa_client import AlfaError
-from center_messenger.alfa_family import customer_balance, fetch_family_card
+from center_messenger.alfa_family import customer_balance, fetch_family_card, customer_paid_lessons, customer_subscriptions, group_facts, _lesson, mapping_pending
 
 
 class FamilyBalanceTests(unittest.TestCase):
@@ -43,6 +43,147 @@ class FamilyBalanceTests(unittest.TestCase):
         self.assertEqual(customer_balance([older,newer]),'200')
         self.assertIsNone(customer_balance([older,{**older,'balance':'200'}]))
         self.assertEqual(customer_balance([older,{**older,'balance':None}]),'100')
+
+    def subscription_cards(self):
+        return [{'id':'7','branch_id':str(branch),'branch_name':f'Филиал {branch}',
+            'balance':'8062.50','paid_lesson_count':9,'refreshed_at':'2026-10-25T00:00:00+00:00',
+            'subscriptions':[{'id':40,'tariff_id':9,'name':'Художественная школа','balance':'8062.50',
+                'begin':'2026-10-01','end':'2027-07-04','archived':False}]} for branch in (1,2)]
+
+    def lesson(self, *, branch=2, subject=11, subscription=40):
+        return {'id':10,'date':'2026-10-25','time':'15:00','status':1,'branch_id':branch,
+            'subject_id':subject,'lesson_type_id':1,'customer_id':7,'customer_verified':True,
+            'group_ids':[5],'subscription_id':subscription}
+
+    def test_shared_subscription_and_paid_lessons_are_not_multiplied_by_branches(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+            card['lessons']=[self.lesson()]
+        subscriptions=customer_subscriptions(cards)
+        self.assertEqual(len(subscriptions),1)
+        self.assertEqual(subscriptions[0]['id'],40)
+        self.assertEqual(subscriptions[0]['balance'],'8062.50')
+        self.assertEqual(subscriptions[0]['branches'],[{'id':'2','name':'Филиал 2'}])
+        self.assertEqual(len(subscriptions[0]['observed_branches']),2)
+        self.assertEqual(len(subscriptions[0]['usage']),1)
+        self.assertEqual(customer_paid_lessons(cards),9)
+        self.assertEqual(customer_balance(cards),'8062.50')
+        self.assertEqual([len(c['subscriptions']) for c in cards],[1,1],'raw branch cache is retained')
+        self.assertNotIn('branches',cards[0]['subscriptions'][0])
+
+    def test_identical_names_or_tariffs_do_not_merge_distinct_customer_tariff_ids(self):
+        cards=self.subscription_cards();cards[1]['subscriptions'][0]['id']=41
+        self.assertEqual([s['id'] for s in customer_subscriptions(cards)],[40,41])
+        cards=self.subscription_cards();cards[1]['id']='8'
+        self.assertEqual(len(customer_subscriptions(cards)),2)
+        self.assertEqual(customer_paid_lessons(cards),18)
+
+    def test_fresh_subscription_and_paid_count_supersede_older_branch_observation(self):
+        cards=self.subscription_cards();cards[1].update(refreshed_at='2026-10-25T01:00:00+00:00',
+            balance_updated_at='2026-10-25T01:00:00+00:00',paid_lesson_count=8)
+        cards[1]['subscriptions'][0].update(balance='7000.00',archived=True)
+        subscriptions=customer_subscriptions(cards)
+        self.assertEqual(subscriptions[0]['balance'],'7000.00')
+        self.assertTrue(subscriptions[0]['archived'])
+        self.assertEqual(customer_paid_lessons(cards),8)
+
+    def test_conflicting_or_missing_counts_remain_unknown_instead_of_being_added(self):
+        cards=self.subscription_cards();cards[1]['paid_lesson_count']=8
+        self.assertIsNone(customer_paid_lessons(cards))
+        cards[1]['subscriptions'][0]['balance']='7000.00'
+        subscriptions=customer_subscriptions(cards)
+        self.assertEqual(len(subscriptions),1)
+        self.assertTrue(subscriptions[0]['needs_review'])
+        self.assertIsNone(subscriptions[0]['balance'])
+        cards[1].update(id='8',paid_lesson_count=None)
+        self.assertIsNone(customer_paid_lessons(cards))
+
+    def test_branch_group_links_to_shared_subscription_are_preserved(self):
+        cards=self.subscription_cards()
+        groups=[]
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+            card['lessons']=[self.lesson(branch=int(card['branch_id']))]
+            groups.append({'id':'5','branch_id':card['branch_id'],'customer_ids':['7']})
+        group_facts(groups,cards,today=date(2026,10,25))
+        self.assertEqual([g['subscriptions'][0]['id'] for g in groups],[40,40])
+        self.assertEqual(len(customer_subscriptions(cards)),1)
+
+    def test_subject_fallback_requires_one_purchase_and_respects_type_and_dates(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+            card['lessons']=[self.lesson(subscription=None)]
+        self.assertEqual(customer_subscriptions(cards)[0]['usage'][0]['method'],'subject')
+        cards[0]['subscriptions'].append({**cards[0]['subscriptions'][0],'id':41})
+        self.assertTrue(all(not item['usage'] for item in customer_subscriptions(cards)))
+        cards[0]['subscriptions'].pop()
+        for change in ({'subject_id':12},{'lesson_type_id':2},{'date':'2028-01-01'}):
+            for card in cards:card['lessons']=[{**self.lesson(subscription=None),**change}]
+            self.assertEqual(customer_subscriptions(cards)[0]['branches'],[])
+
+    def test_explicit_purchase_on_another_subject_or_with_wrong_customer_is_not_laundered(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+            card['lessons']=[self.lesson(subject=12)]
+        self.assertEqual(customer_subscriptions(cards)[0]['branches'],[])
+        for card in cards:card['lessons']=[{**self.lesson(),'customer_id':8}]
+        self.assertEqual(customer_subscriptions(cards)[0]['branches'],[])
+        for card in cards:card['lessons']=[self.lesson(subscription=999)]
+        self.assertEqual(customer_subscriptions(cards)[0]['branches'],[])
+
+    def test_legacy_lesson_without_actual_branch_never_inherits_request_branch(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['lessons']=[{'id':10,'status':1,'date':'2026-10-25','group_ids':[5],'subscription_id':40}]
+        result=customer_subscriptions(cards)
+        self.assertEqual(result[0]['branches'],[])
+        self.assertEqual(result[0]['relation_status'],'pending')
+        self.assertTrue(mapping_pending(cards[0]))
+
+    def test_allowed_branches_alone_and_conflicting_facts_cannot_prove_lesson_usage(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1],tariff_branch_ids=[1,2])
+            card['lessons']=[]
+        result=customer_subscriptions(cards)
+        self.assertEqual(result[0]['branches'],[])
+        self.assertEqual(result[0]['relation_status'],'unconfirmed')
+        for card in cards:card['lessons']=[self.lesson()]
+        cards[1]['subscriptions'][0]['balance']='100'
+        self.assertTrue(customer_subscriptions(cards)[0]['needs_review'])
+        self.assertEqual(customer_subscriptions(cards)[0]['branches'],[])
+
+    def test_group_subject_fallback_requires_membership_of_this_customer_and_branch(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+            card['lessons']=[{**self.lesson(subscription=None),'customer_verified':False}]
+        self.assertEqual(customer_subscriptions(cards)[0]['branches'],[])
+        wrong=[{'id':'5','branch_id':'1','customer_ids':['7']}]
+        self.assertEqual(customer_subscriptions(cards,groups=wrong)[0]['branches'],[])
+        right=[{'id':'5','branch_id':'2','customer_ids':['7']}]
+        self.assertEqual(customer_subscriptions(cards,groups=right)[0]['branches'][0]['id'],'2')
+
+    def test_lesson_parser_preserves_actual_branch_subject_type_and_own_purchase(self):
+        lesson=_lesson({'id':10,'branch_id':2,'subject_id':11,'lesson_type_id':1,'date':'2026-10-25',
+            'group_ids':[5],'details':[{'customer_id':8,'ctt_id':99},{'customer_id':7,'ctt_id':40,'is_attend':1}]},7)
+        self.assertEqual((lesson['branch_id'],lesson['subject_id'],lesson['lesson_type_id'],lesson['subscription_id']),(2,11,1,40))
+        self.assertTrue(lesson['customer_verified'])
+
+    def test_group_payment_does_not_follow_identical_group_id_in_wrong_branch(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+            card['lessons']=[self.lesson()]
+        groups=[{'id':'5','branch_id':branch,'customer_ids':['7']} for branch in ('1','2')]
+        group_facts(groups,cards,today=date(2026,10,25))
+        self.assertEqual(groups[0]['subscriptions'],[])
+        self.assertIsNone(groups[0]['next_lesson'])
+        self.assertEqual(groups[1]['subscriptions'][0]['id'],40)
+        self.assertEqual(groups[1]['next_lesson']['branch_id'],2)
 
     def client(self, *, amount='3962.50', paid=3, archived=False, wrong_customer=False):
         calls=[]
@@ -101,6 +242,21 @@ class FamilyBalanceTests(unittest.TestCase):
         client,_=self.client(wrong_customer=True)
         with self.assertRaises(AlfaError):
             fetch_family_card(client,1,7,source_customer={'id':7,'branch_id':1})
+
+    def test_refresh_keeps_subject_restrictions_and_actual_lesson_branch(self):
+        client,_=self.client();original=client.call
+        def call(path,body):
+            data=original(path,body)
+            if '/customer-tariff/' in path and not body['dead']:
+                data['items'][0].update(subject_ids=[11],lesson_type_ids=[1])
+            if path.endswith('/lesson/index') and body['status']==1:
+                data={'items':[{'id':10,'branch_id':2,'subject_id':11,'lesson_type_id':1,'date':'2026-10-25','customer_ids':[7],'details':[{'customer_id':7,'ctt_id':40}]}],'page':0,'total':1}
+            return data
+        client.call=call
+        facts=fetch_family_card(client,1,7,source_customer={'id':7,'branch_id':1},today=date(2026,10,25))
+        self.assertEqual(facts['subscriptions'][0]['subject_ids'],[11])
+        self.assertEqual(facts['subscriptions'][0]['lesson_type_ids'],[1])
+        self.assertEqual(facts['lessons'][0]['branch_id'],2)
 
     def test_live_missing_or_invalid_amount_is_not_replaced_by_a_fake_zero(self):
         client,_=self.client(amount=None,paid=None)

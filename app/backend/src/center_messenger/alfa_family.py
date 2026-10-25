@@ -50,6 +50,10 @@ def _attendance(value):
     raise AlfaError("invalid_response")
 
 
+def _optional_id(value):
+    return None if value in (None, "", 0, "0") else positive_id(value)
+
+
 def _lesson(raw, customer_id):
     day = source_date(raw.get("date"))
     if not day:
@@ -59,10 +63,11 @@ def _lesson(raw, customer_id):
     details = raw.get("details") or []
     if not isinstance(details, list) or len(details) > 500:
         raise AlfaError("invalid_response")
-    attendance, subscription_id = None, None
+    attendance, subscription_id, own_detail = None, None, False
     for detail in details:
         if not isinstance(detail, dict) or str(detail.get("customer_id")) != str(customer_id):
             continue
+        own_detail = True
         attendance = _attendance(detail.get("is_attend"))
         if detail.get("ctt_id") not in (None, "", 0, "0"):
             subscription_id = positive_id(detail["ctt_id"])
@@ -75,6 +80,11 @@ def _lesson(raw, customer_id):
         raise AlfaError("invalid_response")
     return {
         "id": positive_id(raw["id"]),
+        "branch_id": _optional_id(raw.get("branch_id")),
+        "subject_id": _optional_id(raw.get("subject_id")),
+        "lesson_type_id": _optional_id(raw.get("lesson_type_id")),
+        "customer_id": customer_id,
+        "customer_verified": own_detail or customer_id in customers,
         "date": day.isoformat(),
         "time": time.rsplit(" ", 1)[-1][:5] if time and len(time) >= 5 else None,
         "group_ids": groups,
@@ -138,6 +148,8 @@ def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=
             {
                 "id": positive_id(raw["id"]),
                 "tariff_id": tariff_id,
+                "subject_ids": _ids(raw.get("subject_ids")),
+                "lesson_type_ids": _ids(raw.get("lesson_type_ids")),
                 "balance": str(amount) if amount is not None else None,
                 "begin": begin.isoformat() if begin else None,
                 "end": end.isoformat() if end else None,
@@ -149,7 +161,8 @@ def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=
     if subscriptions:
         tariffs = pages(client, f"{root}/tariff/index", {"is_archive": False}, maximum=5000)
         names = {
-            positive_id(item["id"]): {"name": item.get("name"), "type": item.get("type")}
+            positive_id(item["id"]): {"name": item.get("name"), "type": item.get("type"),
+                "tariff_branch_ids": _ids(item.get("branch_ids"))}
             for item in tariffs
         }
     for item in subscriptions:
@@ -184,6 +197,23 @@ def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=
     }
 
 
+def _customer_total(cards, field, parse):
+    customers = {}
+    for card in cards:
+        customers.setdefault(positive_id(card["id"]), []).append(card)
+    total = None
+    for observations in customers.values():
+        latest = max(card.get("balance_updated_at") or "" for card in observations)
+        amounts = {parse(card.get(field)) for card in observations
+                   if (card.get("balance_updated_at") or "") == latest}
+        amounts.discard(None)
+        if len(amounts) != 1:
+            return None
+        amount = amounts.pop()
+        total = amount if total is None else total + amount
+    return total
+
+
 def customer_balance(cards):
     """Sum authoritative totals once per CRM customer, never subscription rows.
 
@@ -192,39 +222,125 @@ def customer_balance(cards):
     not an arbitrary or duplicated amount. Distinct financial cards of the
     selected child are additive; another child's money is not included.
     """
-    customers = {}
-    for card in cards:
-        customers.setdefault(positive_id(card["id"]), []).append(card)
-    total = None
-    for observations in customers.values():
-        latest = max(card.get("balance_updated_at") or "" for card in observations)
-        amounts = {source_balance(card.get("balance")) for card in observations
-                   if (card.get("balance_updated_at") or "") == latest}
-        amounts.discard(None)
-        if len(amounts) != 1:
-            return None
-        amount = amounts.pop()
-        total = amount if total is None else total + amount
+    total = _customer_total(cards, "balance", source_balance)
     return str(total) if total is not None else None
 
 
-def group_facts(groups, cards, *, today=None):
+def customer_paid_lessons(cards):
+    """Customer.paid_lesson_count is shared by its branch observations too."""
+    return _customer_total(cards, "paid_lesson_count", source_lessons)
+
+
+def mapping_pending(card):
+    """Older persistent caches lack the facts needed to prove branch relations."""
+    return ("subscriptions" not in card or "lessons" not in card
+        or any("subject_ids" not in item or "lesson_type_ids" not in item for item in card.get("subscriptions", []))
+        or any(any(field not in item for field in ("branch_id", "subject_id", "lesson_type_id", "customer_id", "customer_verified"))
+               for item in card.get("lessons", [])))
+
+
+def _subscription_usage(subscriptions, cards, groups):
+    """ctt_id proves a purchase; subject/type/date prove an unambiguous fallback.
+
+    A request path and Tariff.branch_ids alone never prove actual lesson usage.
+    """
+    available = {str(card["branch_id"]) for card in cards}
+    lessons = {}
+    for card in cards:
+        for lesson in card.get("lessons", []):
+            branch, customer = str(lesson.get("branch_id")), str(lesson.get("customer_id"))
+            if branch not in available or customer != str(card["id"]) or lesson.get("status") not in (1, 3):
+                continue
+            member = any(str(g["branch_id"]) == branch and int(g["id"]) in lesson.get("group_ids", [])
+                and customer in g.get("customer_ids", []) for g in groups)
+            if not lesson.get("customer_verified") and not member:
+                continue
+            key = (customer, branch, str(lesson["id"]))
+            if key not in lessons or (card.get("refreshed_at") or "") > lessons[key][0]:
+                lessons[key] = (card.get("refreshed_at") or "", lesson)
+    for (_, branch, _), (_, lesson) in sorted(lessons.items()):
+        candidates = []
+        explicit = lesson.get("subscription_id")
+        for item in subscriptions:
+            if item["needs_review"]:
+                continue
+            if str(item["customer_id"]) != str(lesson["customer_id"]):
+                continue
+            if explicit is not None and str(item["id"]) != str(explicit):
+                continue
+            subject = lesson.get("subject_id")
+            subjects, types = item.get("subject_ids", []), item.get("lesson_type_ids", [])
+            if subjects and subject not in subjects:
+                continue
+            if explicit is None and (not subjects or subject not in subjects):
+                continue
+            if types and lesson.get("lesson_type_id") not in types:
+                continue
+            if item.get("tariff_branch_ids") and int(branch) not in item["tariff_branch_ids"]:
+                continue
+            if (item.get("begin") and lesson["date"] < item["begin"]) or (item.get("end") and lesson["date"] > item["end"]):
+                continue
+            candidates.append(item)
+        if len(candidates) == 1:
+            candidates[0]["usage"].append({"branch_id":branch,"lesson_id":str(lesson["id"]),
+                "subject_id":lesson.get("subject_id"),"lesson_type_id":lesson.get("lesson_type_id"),
+                "group_ids":[str(g) for g in lesson.get("group_ids", [])],"date":lesson["date"],
+                "method":"ctt_id" if explicit is not None else "subject"})
+
+
+def customer_subscriptions(cards, *, groups=None):
+    """Present one CustomerTariff ID per Customer within the scoped connection.
+
+    A branch is an observation context, not another purchased subscription.
+    Keep raw branch caches and group links intact; never merge by tariff/name.
+    """
+    observed = {}
+    for card in cards:
+        customer = positive_id(card["id"])
+        for item in card.get("subscriptions", []):
+            key = (customer, positive_id(item["id"]))
+            observed.setdefault(key, []).append((card, item))
+    result = []
+    for (customer, subscription), observations in sorted(observed.items()):
+        latest = max(card.get("refreshed_at") or "" for card, _ in observations)
+        current = [item for card, item in observations if (card.get("refreshed_at") or "") == latest]
+        item = dict(current[0], customer_id=str(customer), id=subscription)
+        # Equally recent contradictory facts are not a second subscription or a
+        # trustworthy amount. Keep the identity visible and ask for a refresh.
+        item["needs_review"] = any(any(other.get(field) != item.get(field)
+            for field in ("tariff_id", "balance", "begin", "end", "archived", "subject_ids", "lesson_type_ids")) for other in current)
+        if item["needs_review"]:
+            item.update(balance=None, begin=None, end=None, archived=all(other.get("archived", False) for other in current))
+        branches = {str(card["branch_id"]): card.get("branch_name") or f"Филиал {card['branch_id']}" for card, _ in observations}
+        item["observed_branches"] = [{"id": branch, "name": branches[branch]} for branch in sorted(branches)]
+        item["usage"] = []
+        result.append(item)
+    _subscription_usage(result, cards, groups or [])
+    names = {str(card["branch_id"]):card.get("branch_name") or f"Филиал {card['branch_id']}" for card in cards}
+    for item in result:
+        branches = sorted({use["branch_id"] for use in item["usage"]})
+        item["branches"] = [{"id":branch,"name":names[branch]} for branch in branches]
+        item["branch_name"] = " · ".join(branch["name"] for branch in item["branches"]) or "Филиал по занятиям не подтверждён"
+        item["relation_status"] = "confirmed" if branches else "pending" if any(mapping_pending(card) for card in cards) else "unconfirmed"
+    return result
+
+
+def group_facts(groups, cards, *, today=None, subscriptions=None):
     """A lesson links to a group by branch and ID; ctt_id is the tariff link."""
     today = today or date.today()
+    subscriptions = customer_subscriptions(cards, groups=groups) if subscriptions is None else subscriptions
     for group in groups:
         matched, linked = [], {}
         for card in cards:
-            if card["branch_id"] != group["branch_id"]:
-                continue
             if group.get("customer_ids") and str(card.get("id")) not in group["customer_ids"]:
                 continue
-            tariffs = {item["id"]: item for item in card.get("subscriptions", [])}
             for lesson in card.get("lessons", []):
-                if int(group["id"]) in lesson["group_ids"]:
+                if str(lesson.get("branch_id")) == str(group["branch_id"]) and int(group["id"]) in lesson["group_ids"]:
                     matched.append(lesson)
-                    if lesson["subscription_id"] in tariffs:
-                        tariff = tariffs[lesson["subscription_id"]]
-                        linked[(str(card.get("id", "")), tariff["id"])] = tariff
+            for item in subscriptions:
+                if str(item["customer_id"]) == str(card["id"]) and any(use["branch_id"] == str(group["branch_id"])
+                    and str(group["id"]) in use["group_ids"] for use in item["usage"]):
+                    linked[(item["customer_id"],item["id"])] = item
         before = [
             item for item in matched if item["status"] == 3 and item["date"] <= today.isoformat()
         ]
