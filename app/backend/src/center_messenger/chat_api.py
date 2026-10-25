@@ -20,6 +20,7 @@ from center_messenger.chat_queue import PROJECTION_VERSION, queue_state_sql, cac
 from center_messenger.crm_api import DirectoryReader, search_query
 from center_messenger.chat_list_window import ListWindows
 from center_messenger import chat_preferences
+from center_messenger import bulk_handled
 from center_messenger.max_client import ERRORS as MAX_ERRORS
 from center_messenger.max_client import MaxChannelInput, MaxSettingsInput
 from center_messenger.max_connections import fingerprint
@@ -49,6 +50,11 @@ class SeenCheckpoint(InputModel):
 
 class HandleInput(InputModel):
     seen_checkpoint: SeenCheckpoint
+
+
+class BulkHandleInput(InputModel):
+    operation_id: UUID
+    confirmed: Literal[True]
 
 
 class SendInput(InputModel):
@@ -803,31 +809,47 @@ class ChatReader:
             checkpoint = self._validate_checkpoint(db, workspace, row, model.seen_checkpoint)
             if checkpoint.latest_inbound_id is None:
                 raise AuthError(409, "Нет просмотренных входящих для обработки.")
-            materialize_legacy_handled(db, workspace, conversation)
-            # Receipts belong to the actual known messages. They survive verified
-            # family merges without granting coverage over another dialog.
-            identifiers = list(db.execute(text(
-                "UPDATE messages m SET payload=m.payload||jsonb_build_object('handled_receipt',"
-                "jsonb_build_object('version',1,'through_seq',CAST(:seen AS bigint),'user_id',CAST(:user AS text))),"
-                "version=m.version+1 WHERE m.workspace_id=:w AND m.conversation_id=:c "
-                "AND m.direction='in' AND m.actor_type='contact' AND " + visible_message() +
-                " AND m.payload->>'handled_receipt' IS NULL AND EXISTS(SELECT 1 FROM message_changes ch "
-                "WHERE ch.workspace_id=m.workspace_id AND ch.message_id=m.id "
-                "AND ch.conversation_id=:c AND ch.seq<=:seen) RETURNING m.id"
-            ), {"w": workspace, "c": conversation, "seen": checkpoint.change_seq, "user": actor.user_id}).scalars())
-            db.execute(text("UPDATE conversations SET handled_inbound_id=:id,handled_at=now(),"
-                "handled_by=:user,answered_seq=greatest(answered_seq,:seen,1),revision=revision+1 "
-                "WHERE workspace_id=:w AND id=:c"), {"w": workspace, "c": conversation,
-                "id": checkpoint.latest_inbound_id, "seen": checkpoint.change_seq, "user": actor.user_id})
-            for identifier in identifiers:
-                changed(db, workspace, conversation, identifier)
-            refresh_unread(db, workspace, conversation)
+            self._apply_handled(db, workspace, row, checkpoint, actor.user_id)
             audit(db, "chat_marked_handled", user_id=actor.user_id, workspace_id=workspace, subject_id=conversation)
             meta = self._meta(self._conversation(db, workspace, conversation))
             # An acknowledgement carries current counters, not newly displayed
             # history. Retrying it must keep the original seen boundary.
             meta["seen_checkpoint"] = checkpoint.model_dump(mode="json")
             return {"conversation": meta}
+
+    @staticmethod
+    def _apply_handled(db, workspace, row, checkpoint, user, *, known_ids=None):
+        conversation = row["id"]
+        materialize_legacy_handled(db, workspace, conversation)
+        # Receipts belong to the actual known messages. They survive verified
+        # family merges without granting coverage over another dialog.
+        identifiers = list(db.execute(text(
+            "UPDATE messages m SET payload=m.payload||jsonb_build_object('handled_receipt',"
+            "jsonb_build_object('version',1,'through_seq',CAST(:seen AS bigint),'user_id',CAST(:user AS text))),"
+            "version=m.version+1 WHERE m.workspace_id=:w AND m.conversation_id=:c "
+            "AND m.direction='in' AND m.actor_type='contact' AND " + visible_message() +
+            " AND m.payload->>'handled_receipt' IS NULL AND (:bounded=false OR m.id=ANY(CAST(:known_ids AS uuid[]))) "
+            "AND EXISTS(SELECT 1 FROM message_changes ch "
+            "WHERE ch.workspace_id=m.workspace_id AND ch.message_id=m.id "
+            "AND ch.conversation_id=:c AND ch.seq<=:seen) RETURNING m.id"
+        ), {"w": workspace, "c": conversation, "seen": checkpoint.change_seq, "user": user,
+            "bounded": known_ids is not None, "known_ids": known_ids or []}).scalars())
+        db.execute(text("UPDATE conversations SET handled_inbound_id=:id,handled_at=now(),"
+            "handled_by=:user,answered_seq=greatest(answered_seq,:seen,1),revision=revision+1 "
+            "WHERE workspace_id=:w AND id=:c"), {"w": workspace, "c": conversation,
+            "id": checkpoint.latest_inbound_id, "seen": checkpoint.change_seq, "user": user})
+        if identifiers:
+            db.execute(text("INSERT INTO message_changes(workspace_id,conversation_id,message_id,new_inbound) "
+                "SELECT :w,:c,changed.id,false FROM unnest(CAST(:ids AS uuid[])) AS changed(id)"),
+                {"w": workspace, "c": conversation, "ids": identifiers})
+        refresh_unread(db, workspace, conversation)
+        return len(identifiers)
+
+    def prepare_bulk_handled(self, actor, workspace):
+        return bulk_handled.prepare(self, actor, workspace)
+
+    def confirm_bulk_handled(self, actor, workspace, model):
+        return bulk_handled.confirm(self, actor, workspace, model)
 
 
 def components(request):
@@ -1037,6 +1059,18 @@ def refresh_chat_family(workspace_id: UUID, conversation_id: UUID, request: Requ
 def send(workspace_id: UUID, conversation_id: UUID, model: SendInput, request: Request):
     _, reader = components(request)
     return reader.send(identity(request, mutation=True), workspace_id, conversation_id, model)
+
+
+@router.post("/chats/handled/prepare")
+def prepare_bulk_handled(workspace_id: UUID, request: Request):
+    _, chats = components(request)
+    return chats.prepare_bulk_handled(identity(request, mutation=True), workspace_id)
+
+
+@router.post("/chats/handled/confirm")
+def confirm_bulk_handled(workspace_id: UUID, request: Request, model: BulkHandleInput):
+    _, chats = components(request)
+    return chats.confirm_bulk_handled(identity(request, mutation=True), workspace_id, model)
 
 
 @router.post("/chats/{conversation_id}/handled")
