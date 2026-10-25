@@ -96,7 +96,7 @@ def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False):
     if not old or old["contact_id"] != contact or old["student_id"] != student:
         # Repair only the newly linked ID, never all historic families.
         db.execute(text("UPDATE conversations c SET contact_id=:contact WHERE c.workspace_id=:w "
-            "AND c.external_chat_id=:external AND EXISTS(SELECT 1 FROM alfa_max_settings m "
+            "AND c.external_chat_id=:external AND NOT c.crm_link_manual AND EXISTS(SELECT 1 FROM alfa_max_settings m "
             "WHERE m.workspace_id=c.workspace_id AND m.connection_id=c.connection_id AND m.crm_connection_id=:crm)"),
             {"w": workspace, "contact": contact, "external": f"alfa:{branch}:{customer}", "crm": settings["connection_id"]})
         db.execute(text("INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) "

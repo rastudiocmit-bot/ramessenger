@@ -11,7 +11,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   const statuses = { client: "Клиент", lead: "Лид", archive: "Архивный", unlinked: "Связать с CRM" };
   const sendLabels = { queued: "В очереди", sending: "Отправляем…", accepted: "Принято MAX", delivered: "Доставлено", read: "Прочитано", failed: "Не отправлено", unknown: "Результат неизвестен", cancelled: "Отменено" };
   let generation = 0, listSeq = 0, selectionSeq = 0, linkSeq = 0, cardSeq = 0, detailsSeq = 0;
-  let family = null, familySelected = null, familyBusy = false;
+  let family = null, familySelected = null, familyBusy = false, familyChildChoice = false;
   let familyTimer = null;
   const familyCache = new Map();
   let listToken = null, listTask = null;
@@ -1146,6 +1146,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     for (const email of family.emails || []) contact.append(contactRow("email", email));
     if (!contact.childNodes.length) contact.append(node("p", "Телефон и почта в CRM не указаны.", "family-empty"));
     const students = orderStudents(family.students || []);
+    if (!familyChildChoice && students.some(student => student.id === family.selection?.student)) familySelected = family.selection.student;
     const synced = family.snapshot_at ? new Date(family.snapshot_at) : null;
     const selected = students.find(student => student.id === familySelected) || students[0];
     const times = (selected?.cards || []).map(card => card.refreshed_at).filter(Boolean).sort();
@@ -1169,7 +1170,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (!students.some(student => student.id === familySelected)) familySelected = students[0].id;
     for (const student of students) {
       const chosen = student.id === familySelected, status = (student.cards || [])[0]?.status;
-      const kid = button("", "family-kid", () => { if (familySelected === student.id) return; familySelected = student.id; renderFamily(); });
+      const kid = button("", "family-kid", () => { familyChildChoice = true; if (familySelected === student.id) return; familySelected = student.id; renderFamily(); });
       kid.setAttribute("aria-pressed", String(chosen));
       kid.title = `${student.name}${statuses[status] ? ` · ${statuses[status]}` : ""}`;
       kid.append(firstName(student.name), node("small", familyAge(student.dob)));
@@ -1267,7 +1268,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   async function refreshSelected(force) {
     if (!force || !isAdmin() || familyBusy || !family) return;
-    const epoch = state.epoch, gen = generation, seq = detailsSeq, conversation = selected, contact = family.id;
+    const epoch = state.epoch, gen = generation, seq = detailsSeq, conversation = selected, contact = family.source_contact_id || family.id;
     familyBusy = true; $("#chat-details-refresh").disabled = true;
     try {
       const updated = await api(`${chatPath(conversation)}/family/refresh`, { method: "POST" });
@@ -1284,7 +1285,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-details-student").replaceChildren(node("div", undefined, "family-skel tall"), node("div", undefined, "family-skel"), node("div", undefined, "family-skel tall"));
   }
   function familyPending(name) {
-    detailsSeq += 1; family = null; familySelected = null; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
+    detailsSeq += 1; family = null; familySelected = null; familyChildChoice = false; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     $("#chat-details-name").textContent = name || "Загружаем сведения…";
     detailsDialog.classList.add("is-loading"); detailsDialog.classList.remove("is-refreshing"); familySkeleton();
   }
@@ -1310,7 +1311,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing"); presentDetails();
     if (!contactId) { familyUnlinked(); return; }
     const saved = familyCache.get(contactId);
-    if (saved) { family = saved.value; renderFamily(); }
+    if (saved && saved.value.selection?.signature === meta.card_selection?.signature) { family = saved.value; renderFamily(); }
     try {
       // An open panel is a request for this client's card, including a pinned
       // panel following a read chat. Background preparation remains server-owned.

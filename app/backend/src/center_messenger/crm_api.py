@@ -17,6 +17,7 @@ from center_messenger.auth_security import AuthError
 from center_messenger.crm_directory import normalized_name, phone_number
 from center_messenger.family_cache import enqueue, cache_status
 from center_messenger.group_links import TOPIC as GROUPS_TOPIC
+from center_messenger import card_preference
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}/directory")
 STATUS = {3: "client", 2: "lead", 1: "archive"}
@@ -254,6 +255,7 @@ class DirectoryReader:
             return result
 
     def detail(self, actor, workspace, contact_id, *, branch=None, conversation=None):
+        source_contact = contact_id
         transaction = self.connections.chat_transaction if conversation else self.connections._transaction
         with transaction(actor, workspace, snapshot=True) as db:
             if conversation and not db.execute(text(
@@ -265,6 +267,9 @@ class DirectoryReader:
             snapshot = self._published(db, workspace)
             if snapshot is None:
                 raise AuthError(404, "Контакт недоступен.")
+            selection = card_preference.selected(db, workspace, snapshot, conversation, source_contact)
+            contact_id = UUID(selection["contact"]) if selection else contact_id
+            family_contacts = [UUID(value) for value in selection["contacts"]] if selection else [contact_id]
             params = {
                 "w": workspace,
                 "r": snapshot["run"],
@@ -272,6 +277,7 @@ class DirectoryReader:
                 "conn": snapshot["connection_id"],
                 "branch": branch,
                 "today": snapshot["today"],
+                "family_contacts": family_contacts,
             }
             contact = (
                 db.execute(
@@ -291,9 +297,12 @@ class DirectoryReader:
             if contact is None:
                 raise AuthError(404, "Контакт недоступен.")
             scope = (
-                "c.workspace_id=:w AND c.run_id=:r AND c.contact_id=:id AND b.available "
+                "c.workspace_id=:w AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[])) AND b.available "
                 "AND b.connection_id=:conn" + self._filter(branch, None)
             )
+            if selection and selection.get("hidden_customers"):
+                scope += " AND NOT(c.external_id=ANY(CAST(:hidden_customers AS bigint[])))"
+                params["hidden_customers"] = list(map(int, selection["hidden_customers"]))
             cards = list(
                 db.execute(
                     text(
@@ -374,7 +383,7 @@ class DirectoryReader:
                         "c.workspace_id=f.workspace_id AND c.branch_id=f.branch_id "
                         "AND c.external_id=f.customer_id WHERE f.workspace_id=:w "
                         "AND f.connection_id=:conn AND f.settings_version=:version "
-                        "AND c.run_id=:r AND c.contact_id=:id"
+                        "AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[]))"
                     ),
                     {**params, "version": snapshot["version"]},
                 ).mappings()
@@ -382,7 +391,7 @@ class DirectoryReader:
             group_states = {(row["branch_id"], row["external_id"]): row["payload"] for row in db.execute(text(
                 "SELECT c.branch_id,c.external_id,e.payload FROM alfa_customers c JOIN outbox_events e "
                 "ON e.workspace_id=c.workspace_id AND e.topic=:topic AND e.event_key=concat(CAST(:conn AS text),':',c.branch_id,':',c.external_id) "
-                "WHERE c.workspace_id=:w AND c.run_id=:r AND c.contact_id=:id AND e.payload->>'version'=CAST(:version AS text) "
+                "WHERE c.workspace_id=:w AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[])) AND e.payload->>'version'=CAST(:version AS text) "
                 "AND e.payload->>'student'=c.student_id::text AND e.payload->>'contact'=c.contact_id::text "
                 "AND e.payload->>'checked_run'=CAST(:r AS text)"),
                 {**params, "topic": GROUPS_TOPIC, "version": snapshot["version"]}).mappings()}
@@ -451,14 +460,17 @@ class DirectoryReader:
                 group_facts(person["groups"], person["cards"], today=snapshot["today"], subscriptions=person["subscriptions"])
             return {
                 "id": str(contact_id),
-                "name": contact["display_name"],
+                "source_contact_id": str(source_contact),
+                "selection": card_preference.public(selection),
+                "name": selection["name"] if selection else contact["display_name"],
                 "phones": contact["phones"],
                 "emails": contact["emails"],
-                "needs_review": contact["needs_review"],
-                "max_connected": bool(contact["max_connected"]),
+                "needs_review": bool(contact["needs_review"] or (selection and selection.get("ambiguous"))),
+                "max_connected": bool(contact["max_connected"] or selection),
                 "max_bot_connected": bool(contact["max_bot_connected"]),
                 "students": list(people.values()),
-                "cache": cache_status(db, workspace, snapshot["connection_id"], list(people.values()), contact_id, snapshot["version"]),
+                "cache": cache_status(db, workspace, snapshot["connection_id"], list(people.values()), contact_id, snapshot["version"],
+                                      contacts=family_contacts, snapshot=snapshot),
                 "snapshot_at": snapshot["finished_at"].isoformat()
                 if snapshot["finished_at"]
                 else None,
@@ -484,7 +496,10 @@ class DirectoryReader:
             if snapshot is None:
                 raise AuthError(404, "Контакт недоступен.")
             if not cached_only:
-                enqueue(db, workspace, snapshot, contact=contact_id, force=force)
+                card_preference.refresh(db, workspace, snapshot, [contact_id])
+                selection = card_preference.selected(db, workspace, snapshot, conversation, contact_id)
+                for target in selection["contacts"] if selection else [contact_id]:
+                    enqueue(db, workspace, snapshot, contact=target, force=force)
         return self.detail(actor, workspace, contact_id, conversation=conversation)
 
     def refresh_card(self, actor, workspace, contact_id, student_id, branch_id, customer_id):

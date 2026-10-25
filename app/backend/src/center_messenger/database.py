@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0015_family_refresh_tiers"
+SCHEMA_REVISION = "0016_crm_card_preference"
 
 
 def log_database_error(logger, error, *, operation):

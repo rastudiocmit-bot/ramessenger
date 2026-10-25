@@ -18,6 +18,7 @@ from center_messenger.auth_security import AuthError, InputModel
 from center_messenger.chat_store import changed, refresh_unread
 from center_messenger.chat_queue import PROJECTION_VERSION, queue_state_sql, cached_state_sql, preview as queue_preview, materialize_legacy_handled
 from center_messenger.crm_api import DirectoryReader, search_query
+from center_messenger import card_preference
 from center_messenger.chat_list_window import ListWindows
 from center_messenger import chat_preferences
 from center_messenger import bulk_handled
@@ -127,7 +128,7 @@ class ChatReader:
             if after is None:
                 return {"next_seq": end, "updates": [], "has_more": False}
             snapshot = DirectoryReader._published(db, workspace)
-            update_params = {"w": workspace, "after": min(after, end)}
+            update_params = {"w": workspace, "after": min(after, end), **card_preference.params(snapshot)}
             eligible_channel = "cn.kind='max_bot'"
             if snapshot:
                 update_params.update(run=snapshot["run"], crm=snapshot["connection_id"])
@@ -142,7 +143,8 @@ class ChatReader:
                 db.execute(
                     text(
                         "SELECT ch.seq,c.id,c.inbound_seq,c.contact_id,"
-                        "coalesce(p.display_name,c.peer_name) AS name,m.direction,ch.new_inbound,"
+                        "c.crm_link_manual,cp.payload AS card_selection," + card_preference.contact_sql() + " AS family_contact_id,"
+                        "coalesce(cp.payload->>'name',p.display_name,c.peer_name) AS name,m.direction,ch.new_inbound,"
                         "CASE WHEN m.payload->>'deleted'='true' THEN NULL ELSE m.text END AS preview,"
                         + EFFECTIVE_UNREAD
                         + " AS effective_unread,q.unanswered_count,q.last_unanswered_at "
@@ -154,8 +156,9 @@ class ChatReader:
                         "LEFT JOIN max_settings s ON s.workspace_id=c.workspace_id "
                         "AND s.connection_id=c.connection_id LEFT JOIN alfa_max_settings am ON "
                         "am.workspace_id=c.workspace_id AND am.connection_id=c.connection_id "
+                        + card_preference.join_sql(snapshot) +
                         "LEFT JOIN contacts p ON "
-                        "p.workspace_id=c.workspace_id AND p.id=c.contact_id "
+                        "p.workspace_id=c.workspace_id AND p.id=" + card_preference.contact_sql() + " "
                         "CROSS JOIN LATERAL (" + queue_state_sql() + ") q "
                         "WHERE ch.workspace_id=:w AND ch.seq>:after AND ("
                         + eligible_channel
@@ -175,7 +178,7 @@ class ChatReader:
                     new_inbounds.add(row["id"])
                     inbound_previews[row["id"]] = (row["preview"] or "")[:180]
             weights = {}
-            contacts = list({r["contact_id"] for r in latest.values() if r["contact_id"]})
+            contacts = list({r["family_contact_id"] for r in latest.values() if r["family_contact_id"]})
             if snapshot and contacts:
                 weights = dict(
                     db.execute(
@@ -203,6 +206,8 @@ class ChatReader:
                     {
                         "id": str(r["id"]),
                         "name": r["name"],
+                        "family_contact_id": str(r["family_contact_id"]) if r["family_contact_id"] else None,
+                        "card_selection": card_preference.public(r["card_selection"], manual=r["crm_link_manual"]),
                         "inbound_seq": r["inbound_seq"],
                         "unread": r["effective_unread"],
                         "unanswered_count": r["unanswered_count"],
@@ -211,7 +216,7 @@ class ChatReader:
                         "new_inbound": r["id"] in new_inbounds,
                         "preview": inbound_previews.get(r["id"]),
                         "status": {3: "client", 2: "lead", 1: "archive"}.get(
-                            weights.get(r["contact_id"]), "unlinked"
+                            weights.get(r["family_contact_id"]), "unlinked"
                         ),
                     }
                     for r in latest.values()
@@ -220,10 +225,13 @@ class ChatReader:
 
     @staticmethod
     def _conversation(db, workspace, conversation, *, lock=None):
+        snapshot = DirectoryReader._published(db, workspace)
         row = (
             db.execute(
                 text(
                     "SELECT c.*,cn.name AS channel_name,cn.kind AS channel_kind,"
+                    "cp.payload AS card_selection," + card_preference.contact_sql() + " AS family_contact_id,"
+                    "coalesce(cp.payload->>'name',p.display_name,c.peer_name) AS display_name,"
                     "am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
                     "am.last_error_code AS crm_history_error,"
                     "CASE WHEN cn.kind='alfa_max_browser' THEN "
@@ -244,20 +252,22 @@ class ChatReader:
                     "LEFT JOIN max_settings s ON s.workspace_id=c.workspace_id "
                     "AND s.connection_id=c.connection_id LEFT JOIN alfa_max_settings am ON "
                     "am.workspace_id=c.workspace_id AND am.connection_id=c.connection_id "
+                    + card_preference.join_sql(snapshot) +
+                    "LEFT JOIN contacts p ON p.workspace_id=c.workspace_id AND p.id=" + card_preference.contact_sql() + " "
                     "CROSS JOIN LATERAL (" + queue_state_sql() + ") q "
                     "WHERE c.workspace_id=:w AND c.id=:id AND c.kind='direct' AND "
                     "((cn.kind='max_bot' AND s.connection_id IS NOT NULL) OR "
                     "(cn.kind='alfa_max_browser' AND am.connection_id IS NOT NULL)) "
                     + (f"FOR {lock} OF c" if lock else "")
                 ),
-                {"w": workspace, "id": conversation},
+                {"w": workspace, "id": conversation, **card_preference.params(snapshot)},
             )
             .mappings()
             .one_or_none()
         )
         if row is None:
             raise AuthError(404, "Диалог недоступен.")
-        if row["channel_kind"] == "alfa_max_browser" and row["contact_id"]:
+        if row["channel_kind"] == "alfa_max_browser" and row["contact_id"] and not row["crm_link_manual"]:
             external = f"alfa-contact:{row['contact_id']}"
             if row["external_chat_id"] != external:
                 canonical = db.execute(
@@ -298,6 +308,9 @@ class ChatReader:
             "id": str(row["id"]),
             "connection_id": str(row["connection_id"]),
             "contact_id": str(row["contact_id"]) if row["contact_id"] else None,
+            "family_contact_id": str(row.get("family_contact_id") or row["contact_id"]) if row["contact_id"] else None,
+            "card_selection": card_preference.public(row.get("card_selection"), manual=row.get("crm_link_manual", False)),
+            "name": row.get("display_name") or row["peer_name"],
             "peer_name": row["peer_name"],
             "channel_name": row["channel_name"],
             "unread": row["effective_unread"],
@@ -388,6 +401,7 @@ class ChatReader:
                 + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 + "%",
             }
+            params.update(card_preference.params(snapshot))
             previous, window_scope, fingerprint = None, None, None
             if window is not None:
                 params.update(offset=0, limit=window)
@@ -427,7 +441,7 @@ class ChatReader:
             if snapshot:
                 params.update(run=snapshot["run"], crm=snapshot["connection_id"])
                 scope = (
-                    "a.workspace_id=c.workspace_id AND a.run_id=:run AND a.contact_id=c.contact_id "
+                    "a.workspace_id=c.workspace_id AND a.run_id=:run AND a.contact_id=ANY(" + card_preference.family_sql() + ") "
                     "AND EXISTS (SELECT 1 FROM alfa_branches b WHERE b.workspace_id=a.workspace_id "
                     "AND b.connection_id=:crm AND b.external_id=a.branch_id AND b.available)"
                 )
@@ -447,7 +461,7 @@ class ChatReader:
                     where += (
                         " OR EXISTS(SELECT 1 FROM alfa_directory d WHERE "
                         "d.workspace_id=c.workspace_id "
-                        "AND d.run_id=:run AND d.contact_id=c.contact_id "
+                        "AND d.run_id=:run AND d.contact_id=ANY(" + card_preference.family_sql() + ") "
                         "AND d.search_vector @@ to_tsquery('simple',:query))"
                     )
                 where += ")"
@@ -456,8 +470,8 @@ class ChatReader:
                 "AND cn.id=c.connection_id LEFT JOIN max_settings s ON "
                 "s.workspace_id=c.workspace_id AND s.connection_id=c.connection_id "
                 "LEFT JOIN alfa_max_settings am ON am.workspace_id=c.workspace_id "
-                "AND am.connection_id=c.connection_id LEFT JOIN contacts p ON "
-                "p.workspace_id=c.workspace_id AND p.id=c.contact_id "
+                "AND am.connection_id=c.connection_id " + card_preference.join_sql(snapshot) + " LEFT JOIN contacts p ON "
+                "p.workspace_id=c.workspace_id AND p.id=" + card_preference.contact_sql() + " "
             )
             live_repair = db.execute(text("SELECT EXISTS(SELECT 1 FROM connections cn WHERE "
                 "cn.workspace_id=:w AND cn.kind IN ('max_bot','alfa_max_browser') AND NOT coalesce("
@@ -496,7 +510,8 @@ class ChatReader:
                 + " ORDER BY effective_unread DESC,priority_at DESC NULLS LAST,c.id LIMIT :limit OFFSET :offset")
             rows = list(db.execute(text(
                 "WITH selected AS MATERIALIZED (" + selected_sql + ") SELECT c.*,cn.name AS channel_name,"
-                "coalesce(p.display_name,c.peer_name) AS display_name,cn.kind AS channel_kind,"
+                "coalesce(cp.payload->>'name',p.display_name,c.peer_name) AS display_name,cn.kind AS channel_kind,"
+                "cp.payload AS card_selection," + card_preference.contact_sql() + " AS family_contact_id,"
                 "am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
                 "am.last_error_code AS crm_history_error,"
                 "CASE WHEN cn.kind='alfa_max_browser' THEN (am.state='active' "
@@ -512,7 +527,8 @@ class ChatReader:
                 "ORDER BY selected.effective_unread DESC,selected.priority_at DESC NULLS LAST,c.id"
             ), params).mappings())
             families = {}
-            contacts = list({row["contact_id"] for row in rows if row["contact_id"]})
+            contacts = list({UUID(value) for row in rows if row["contact_id"] for value in
+                (row["card_selection"]["contacts"] if row["card_selection"] else [str(row["contact_id"])])})
             if snapshot and contacts:
                 params["ids"] = contacts
                 families = {
@@ -539,7 +555,14 @@ class ChatReader:
                 }
             result = []
             for row in rows:
-                family = families.get(row["contact_id"], {})
+                choice = row["card_selection"]
+                targets = choice["contacts"] if choice else [str(row["contact_id"])] if row["contact_id"] else []
+                parts = [families.get(UUID(value), {}) for value in targets]
+                hidden = set(choice.get("hidden_customers", [])) if choice else set()
+                children = {child["id"]: child for part in parts for child in part.get("children", []) if child.get("crm_id") not in hidden}
+                family = {"names": sorted({child["name"] for child in children.values()}), "children": list(children.values()),
+                          "has_parent": any(part.get("has_parent") for part in parts),
+                          "weight": max((part.get("weight", 0) for part in parts), default=0)}
                 result.append(
                     self._meta(row)
                     | {
@@ -773,7 +796,7 @@ class ChatReader:
                     raise AuthError(404, "Контакт недоступен в текущем справочнике CRM.")
             db.execute(
                 text(
-                    "UPDATE conversations SET contact_id=:id,revision=revision+1 WHERE "
+                    "UPDATE conversations SET contact_id=:id,crm_link_manual=true,revision=revision+1 WHERE "
                     "workspace_id=:w AND id=:c"
                 ),
                 {"w": workspace, "c": conversation, "id": model.contact_id},
