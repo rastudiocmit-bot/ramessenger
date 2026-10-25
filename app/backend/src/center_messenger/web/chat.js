@@ -1126,6 +1126,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const all = (family.students || []).flatMap(student => (student.cards || []).map(card => card.status));
     return ["client", "lead", "archive"].filter(status => all.includes(status));
   }
+  function familySync(text, details = text) {
+    const sync = $("#chat-details-sync");
+    sync.textContent = text; sync.title = details;
+    sync.setAttribute("aria-label", details);
+  }
   function renderFamily() {
     if (!family) return;
     detailsDialog.classList.remove("is-loading");
@@ -1144,7 +1149,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const synced = family.snapshot_at ? new Date(family.snapshot_at) : null;
     const selected = students.find(student => student.id === familySelected) || students[0];
     const times = (selected?.cards || []).map(card => card.refreshed_at).filter(Boolean).sort();
-    $("#chat-details-sync").textContent = times.length ? `Сведения из CRM обновлены ${date(times[0])}` : synced && !Number.isNaN(synced.getTime()) ? `Справочник CRM от ${date(family.snapshot_at)}` : "Справочник CRM";
+    familySync(times.length ? `Обновлено ${date(times[0])}` : synced && !Number.isNaN(synced.getTime()) ? `Справочник от ${date(family.snapshot_at)}` : "Справочник CRM");
     if (family.cache) {
       const info = family.cache;
       const updated = info.updated_at ? `Баланс и абонементы: ${date(info.updated_at)}` : `Готовим карточку · ${info.cached_sources} из ${info.sources}`;
@@ -1152,7 +1157,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const history = "lessons_history_updated_at" in info ? info.lessons_history_updated_at ? `Год занятий проверен ${date(info.lessons_history_updated_at)}` : "Год занятий: ожидает проверки" : "";
       const groups = "groups_updated_at" in info ? info.groups_updated_at ? `Группы: ${date(info.groups_updated_at)}` : info.groups_refreshing ? "Группы: проверяем на сервере" : "Группы: из справочника CRM" : "";
       const status = info.refreshing ? "Обновляем на сервере" : info.overdue ? "Ожидает обновления" : info.auto_refresh ? "Обновляем каждые 30 минут" : "Обновляем при открытии карточки";
-      $("#chat-details-sync").textContent = [updated, lessons, history, groups, status, info.error].filter(Boolean).join(" · ");
+      const brief = info.error ? "есть ошибка обновления" : info.refreshing ? "обновляем" : info.overdue ? "ждёт обновления" : info.auto_refresh ? "каждые 30 мин" : "при открытии";
+      familySync(`${info.updated_at ? `Обновлено ${date(info.updated_at)}` : "Загружаем карточку"} · ${brief}`,
+        [updated, lessons, history, groups, status, info.error].filter(Boolean).join(" · "));
       detailsDialog.classList.toggle("is-refreshing", Boolean(info.refreshing));
     }
     $("#chat-details-count").textContent = students.length > 1 ? String(students.length) : "";
@@ -1269,21 +1276,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     } catch (error) { if (valid(epoch, gen) && seq === detailsSeq) toast(error.message, true); }
     finally { if (valid(epoch, gen) && seq === detailsSeq) { familyBusy = false; $("#chat-details-refresh").disabled = !isAdmin(); } }
   }
-  function familyDeferred() {
-    family = null; clearTimeout(familyTimer); familyTimer = null;
-    detailsDialog.classList.remove("is-loading", "is-refreshing");
-    $("#chat-details-name").textContent = currentItem()?.name || "Карточка клиента";
-    $("#chat-details-avatar").textContent = initialsOf(currentItem()?.name || "");
-    $("#chat-details-sync").textContent = "Карточка загружается по вашему запросу";
-    $("#chat-details-badges").replaceChildren(); $("#chat-details-contact").replaceChildren();
-    $("#chat-details-children").replaceChildren(); $("#chat-details-count").textContent = "";
-    detailsDialog.querySelector(".family-kids-block").hidden = true;
-    $("#chat-details-refresh").hidden = true;
-    $("#chat-details-student").replaceChildren(button("Открыть карточку клиента", "family-link-btn", () => openDetails().catch(error => fail(error))));
-  }
   function familySkeleton() {
     $("#chat-details-avatar").textContent = ""; $("#chat-details-avatar").className = "ava family-ava me";
-    $("#chat-details-badges").replaceChildren(); $("#chat-details-sync").textContent = ""; $("#chat-details-count").textContent = "";
+    $("#chat-details-badges").replaceChildren(); familySync(""); $("#chat-details-count").textContent = "";
     $("#chat-details-children").replaceChildren(); detailsDialog.querySelector(".family-kids-block").hidden = true;
     $("#chat-details-contact").replaceChildren(node("div", undefined, "family-skel"), node("div", undefined, "family-skel"));
     $("#chat-details-student").replaceChildren(node("div", undefined, "family-skel tall"), node("div", undefined, "family-skel"), node("div", undefined, "family-skel tall"));
@@ -1300,7 +1295,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const avatar = $("#chat-details-avatar"); avatar.textContent = initialsOf(name); avatar.className = "ava family-ava unlinked";
     $("#chat-details-badges").replaceChildren(chip("Не связан с CRM", "unlinked"));
     $("#chat-details-contact").replaceChildren(node("p", "Диалог пока не связан с карточкой родителя в АльфаCRM, поэтому сведений о семье нет.", "family-empty"));
-    $("#chat-details-sync").textContent = "Нет данных CRM"; $("#chat-details-count").textContent = "";
+    familySync("Нет данных CRM"); $("#chat-details-count").textContent = "";
     $("#chat-details-children").replaceChildren(); detailsDialog.querySelector(".family-kids-block").hidden = true;
     const detail = $("#chat-details-student"); detail.replaceChildren();
     if (isAdmin()) { const link = button("Связать с CRM", "family-link-btn", () => openLink(selected)); detail.append(link); }
@@ -1314,19 +1309,19 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     familyPending(meta.name); const seq = detailsSeq;
     clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing"); presentDetails();
     if (!contactId) { familyUnlinked(); return; }
-    if (options.auto && !meta.unread) { familyDeferred(); return; }
     const saved = familyCache.get(contactId);
     if (saved) { family = saved.value; renderFamily(); }
     try {
-      const result = await api(`${chatPath(conversation)}/family${options.auto ? "?auto=true" : ""}`);
+      // An open panel is a request for this client's card, including a pinned
+      // panel following a read chat. Background preparation remains server-owned.
+      const result = await api(`${chatPath(conversation)}/family`);
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
-      if (result.deferred) { familyDeferred(); return; }
       family = result; rememberFamily(contactId, result); renderFamily();
       watchFamily(conversation, contactId, epoch, gen, seq);
     } catch (error) {
       if (valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) {
         detailsDialog.classList.remove("is-loading");
-        if (family) { $("#chat-details-sync").textContent = "Сохранённая карточка · обновление временно недоступно"; return; }
+        if (family) { familySync("Сохранённая карточка · обновление недоступно", error.message); return; }
         $("#chat-details-name").textContent = error.message;
         $("#chat-details-contact").replaceChildren(); $("#chat-details-student").replaceChildren(node("p", "Сведения не загрузились. Попробуйте открыть карточку ещё раз.", "family-empty"));
       }

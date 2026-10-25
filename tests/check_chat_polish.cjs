@@ -53,6 +53,13 @@ const {fixture}=require('./browser_fixture.cjs');
       await page.waitForSelector('.chat-bubble.system.sys');
       const glass=await page.locator('.chat-bubble.system.sys').first().evaluate(e=>({background:getComputedStyle(e).backgroundColor,blur:getComputedStyle(e).backdropFilter}));
       assert.equal(glass.background,'rgba(255, 255, 255, 0.1)');assert.equal(glass.blur,'blur(10px)');
+      await page.locator('.chat-bubble.system.sys .system-toggle').first().click();
+      await page.locator('.chat-bubble.system.sys .system-body').first().waitFor({state:'visible'});
+      const expanded=await page.locator('.chat-bubble.system.sys').first().evaluate(e=>({
+        background:getComputedStyle(e).backgroundColor,blur:getComputedStyle(e).backdropFilter,
+        textFilter:getComputedStyle(e.querySelector('.system-body')).filter,opacity:getComputedStyle(e).opacity}));
+      assert.deepEqual(expanded,{...glass,textFilter:'none',opacity:'1'});
+      await screenshot('system-glass');
       await page.locator('#chat-person-open').click();await page.waitForSelector('.family-stats');
       const sub=page.locator('.family-part').filter({has:page.locator('.family-label',{hasText:/^Абонементы$/})});
       assert.doesNotMatch(await sub.textContent(),/Пушкина|Центральный/);

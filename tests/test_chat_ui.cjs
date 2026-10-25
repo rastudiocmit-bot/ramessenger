@@ -859,7 +859,7 @@ test('a queued native close event cannot erase a newly opened bulk confirmation'
   assert.equal(confirms,1);assert.equal(dialog.open,false);
 });
 
-test('pinned read client defers full card until explicit open and clears the previous family', async t=>{
+test('pinned read client opens its full card without a second click, with no hidden-card preloading', async t=>{
   const rows=[{...conversation(1),contact_id:identifier(91)}, {...conversation(2),unread:false,unread_count:0,contact_id:identifier(92)}];
   const ui=setup(t,url=>{
     if(url.pathname.endsWith('/messages')){
@@ -872,12 +872,13 @@ test('pinned read client defers full card until explicit open and clears the pre
   assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length,0);
   ui.$('#chat-details').click();await flush();ui.$('#chat-details-pin').click();
   ui.$(`.chat-row[data-id="${identifier(2)}"] .chat-select`).click();await flush();
-  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length,1);
-  assert.doesNotMatch(ui.$('#chat-details-dialog').textContent,/Child 1/);
-  const open=ui.$('#chat-details-student button');assert.equal(open.textContent,'Открыть карточку клиента');
-  open.click();await flush();
   assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length,2);
+  assert.doesNotMatch(ui.$('#chat-details-dialog').textContent,/Child 1/);
+  assert.doesNotMatch(ui.$('#chat-details-dialog').textContent,/Открыть карточку клиента/);
   assert.match(ui.$('#chat-details-student').textContent,/Child 2/);
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).at(-1).searchParams.has('auto'),false);
+  assert.equal([...ui.timers.values()].some(timer=>[3000,30000,60000].includes(timer.delay)),false,
+    'a prepared read client does not start periodic card loading');
 });
 
 test('pinned pending client reads ready card in parallel with a slow timeline', async t=>{
@@ -893,7 +894,7 @@ test('pinned pending client reads ready card in parallel with a slow timeline', 
   dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();ui.$('#chat-details-pin').click();
   ui.$(`.chat-row[data-id="${identifier(2)}"] .chat-select`).click();await flush();
   assert.ok(release);assert.match(ui.$('#chat-details-student').textContent,/Child 2/);
-  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).at(-1).searchParams.get('auto'),'true');
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).at(-1).searchParams.has('auto'),false);
   release();await flush();
 });
 
@@ -907,10 +908,10 @@ test('opening family for staff uses prepared GET data without per-source CRM mut
   ui.$('#chat-details-dialog').close=function(){this.open=false;};
   await ui.app.enter();ui.$('#chat-details').click();await flush();
   assert.match(ui.$('#chat-details-student').textContent,/Child 1/);
-  assert.match(ui.$('#chat-details-sync').textContent,/Обновляем на сервере/);
+  assert.match(ui.$('#chat-details-sync').textContent,/ · обновляем$/);
 });
 
-test('financial freshness and a failed daily lesson check remain visible together', async t=>{
+test('card footer stays brief while the tooltip retains separate freshness dates and errors', async t=>{
   const family=preparedFamily(1);
   family.cache={...family.cache,refreshing:true,lessons_updated_at:'2026-10-24T00:10:00Z',
     lessons_history_updated_at:'2026-10-23T00:00:00Z',
@@ -923,11 +924,25 @@ test('financial freshness and a failed daily lesson check remain visible togethe
   ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
   ui.$('#chat-details-dialog').close=function(){this.open=false;};
   await ui.app.enter();ui.$('#chat-details').click();await flush();
-  const text=ui.$('#chat-details-sync').textContent;
+  const sync=ui.$('#chat-details-sync'),text=sync.title;
+  assert.equal(sync.textContent,'Обновлено 2026-10-24T00:00:00Z · есть ошибка обновления');
+  assert.equal(sync.getAttribute('aria-label'),text);
   assert.match(text,/Баланс и абонементы:.*2026-10-24/);
   assert.match(text,/Занятия:.*00:10/);
   assert.match(text,/Год занятий проверен.*2026-10-23/);
   assert.match(text,/Группы:.*00:05/);
   assert.match(text,/Не удалось обновить занятия/);
   assert.match(ui.$('.family-stats').textContent,/100/);
+});
+
+test('ready card footer shows one update time and its refresh interval', async t=>{
+  const family=preparedFamily(1);family.cache.auto_refresh=true;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return family;
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.equal(ui.$('#chat-details-sync').textContent,'Обновлено 2026-10-24T00:00:00Z · каждые 30 мин');
 });
