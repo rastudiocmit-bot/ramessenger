@@ -260,9 +260,9 @@ input,textarea{font:inherit;color:inherit}
 /* Automation messages collapse to one line with a +/− toggle, as in the cabinet. */
 .sys{align-self:flex-end;max-width:min(88%,520px);margin-top:6px;cursor:pointer;
   background:var(--sys-bg);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);border-radius:11px;
-  box-shadow:0 2px 8px rgba(25,37,45,.06), inset 0 0 0 1px var(--sys-line);
+  filter:var(--bub-shadow);box-shadow:inset 0 0 0 1px var(--sys-line);
   padding:4px 5px 4px 10px;animation:in .14s ease-out;transition:box-shadow .15s}
-.sys:hover{box-shadow:0 3px 14px rgba(25,37,45,.18), inset 0 0 0 1px var(--sys-btn-line)}
+.sys:hover{box-shadow:inset 0 0 0 1px var(--sys-btn-line)}
 .sys-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .sys-label{flex:1;min-width:0;display:flex;align-items:center;gap:6px;font-size:10.5px;
   font-weight:650;color:var(--sys-ink);line-height:1.3;white-space:nowrap;overflow:hidden;
@@ -614,7 +614,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .chat-bubble.msg{max-width:min(80%,480px);min-width:0;padding:0;border:0;border-radius:0;background:none;filter:none;animation:none;overflow-wrap:anywhere;align-self:flex-start}
 .chat-bubble.msg.out{align-self:flex-end}
 .chat-bubble.msg .bub p{margin:0;font-size:inherit;line-height:inherit;white-space:pre-wrap}
-.chat-bubble.system.sys{padding:6px 6px 6px 11px;background:var(--sys-bg);border:0;border-radius:11px;align-self:flex-end;max-width:min(88%,520px);min-width:0;filter:none;animation:none}
+.chat-bubble.system.sys{padding:6px 6px 6px 11px;background:var(--sys-bg);border:0;border-radius:11px;align-self:flex-end;max-width:min(88%,520px);min-width:0;filter:var(--bub-shadow);animation:none}
 .sys .system-body{font-size:13px;font-weight:450;line-height:1.5;white-space:pre-wrap;color:var(--sys-ink)}
 .sys .system-label{color:var(--sys-ink);font-size:10.5px}
 .sys .system-time{font-size:10px;color:var(--sys-ink)}
@@ -1306,8 +1306,8 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 /* The card panel takes focus on opening; it needs no ring. */
 .family-panel:focus{outline:none}
-/* System notices: frosted glass — more see-through, blurred and tinted by the
-   wallpaper behind, no bright edge or drop shadow, so they do not glare. */
+/* System notices keep the frosted glass and soft edge; their outer shadow
+   follows the same --bub-shadow as incoming and outgoing messages. */
 .sys,.chat-bubble.system.sys{box-shadow:inset 0 0 0 .5px rgba(255,255,255,.28)}
 .sys:hover{box-shadow:inset 0 0 0 1px rgba(255,255,255,.38)}
 :root[data-theme="dark"] .sys,:root[data-theme="dark"] .chat-bubble.system.sys{box-shadow:inset 0 0 0 .5px rgba(255,255,255,.08)}
