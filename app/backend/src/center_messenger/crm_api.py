@@ -391,6 +391,8 @@ class DirectoryReader:
                             subscriptions=source["subscriptions"],
                             lessons=source["lessons"],
                             refreshed_at=source["refreshed_at"].isoformat(),
+                            lessons_refreshed_at=source["lessons_refreshed_at"].isoformat() if source["lessons_refreshed_at"] else None,
+                            lessons_full_refreshed_at=source["lessons_full_refreshed_at"].isoformat() if source["lessons_full_refreshed_at"] else None,
                         )
                     card["needs_mapping_refresh"] = mapping_pending(card)
                     card["needs_refresh"] = card["needs_mapping_refresh"] or source is None or source["refreshed_at"] < datetime.now(
@@ -540,14 +542,14 @@ class DirectoryReader:
                         text(
                             "INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,"
                             "customer_id,settings_version,balance,paid_lesson_count,"
-                            "subscriptions,lessons) VALUES "
+                            "subscriptions,lessons,lessons_refreshed_at,lessons_full_refreshed_at) VALUES "
                             "(:w,:conn,:b,:id,:version,:balance,:paid,CAST(:subs AS jsonb),"
-                            "CAST(:lessons AS jsonb)) ON CONFLICT "
+                            "CAST(:lessons AS jsonb),now(),now()) ON CONFLICT "
                             "(workspace_id,connection_id,branch_id,customer_id) DO UPDATE SET "
                             "settings_version=EXCLUDED.settings_version,balance=EXCLUDED.balance,"
                             "paid_lesson_count=EXCLUDED.paid_lesson_count,"
                             "subscriptions=EXCLUDED.subscriptions,lessons=EXCLUDED.lessons,"
-                            "refreshed_at=now()"
+                            "refreshed_at=now(),lessons_refreshed_at=now(),lessons_full_refreshed_at=now()"
                         ),
                         {
                             "w": workspace,

@@ -1,5 +1,5 @@
 """Customer totals, component separation and live read contracts for AlfaCRM."""
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 import sys
@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app/backend/src'))
 from center_messenger.alfa_client import AlfaError
-from center_messenger.alfa_family import customer_balance, fetch_family_card, customer_paid_lessons, customer_subscriptions, group_facts, _lesson, mapping_pending
+from center_messenger.alfa_family import customer_balance, fetch_family_card, fetch_family_finance, fetch_family_lessons, merge_family_lessons, customer_paid_lessons, customer_subscriptions, group_facts, _lesson, mapping_pending
 
 
 class FamilyBalanceTests(unittest.TestCase):
@@ -267,6 +267,73 @@ class FamilyBalanceTests(unittest.TestCase):
             client,_=self.client(amount=value)
             with self.subTest(value=value), self.assertRaises(AlfaError):
                 fetch_family_card(client,1,7,source_customer={'id':7,'branch_id':1})
+
+    def test_financial_refresh_never_requests_lessons(self):
+        client, calls = self.client()
+        facts = fetch_family_finance(client, 1, 7, source_customer={'id':7,'branch_id':1})
+        self.assertEqual(facts['balance'], Decimal('3962.50'))
+        self.assertEqual(facts['subscriptions'][0]['id'], 40)
+        self.assertFalse(any(path.endswith('/lesson/index') for path, _ in calls))
+
+    def test_recent_lesson_window_reduces_payload_and_page_requests(self):
+        today, calls = date(2026,10,25), []
+        # 600 completed rows in a year, 20 of them in the last 30 days.
+        rows = [dict(id=i+1, date=(today-timedelta(days=31+i%330)).isoformat(),status=3,customer_ids=[7]) for i in range(580)]
+        rows += [dict(id=600+i, date=(today-timedelta(days=i)).isoformat(),status=3,customer_ids=[7]) for i in range(20)]
+        rows += [dict(id=700+i, date=(today+timedelta(days=i)).isoformat(),status=1,customer_ids=[7]) for i in range(20)]
+        def call(path, body):
+            calls.append(dict(body))
+            selected = [row for row in rows if row['status']==body['status'] and body['date_from']<=row['date']<=body['date_to']]
+            first = body['page']*body['pageSize']
+            return {'items':selected[first:first+body['pageSize']], 'page':body['page'], 'total':len(selected)}
+        client = type('Client', (), {'call':staticmethod(call)})()
+        full = fetch_family_lessons(client,1,7,today=today,full=True)
+        self.assertEqual((len(full),len(calls)),(620,3))
+        calls.clear()
+        recent = fetch_family_lessons(client,1,7,today=today)
+        self.assertEqual((len(recent),len(calls)),(40,2))
+        self.assertEqual(calls[0]['date_from'],'2026-09-25')
+        self.assertEqual(calls[1]['date_to'],'2027-01-23')
+
+    def test_short_window_replaces_cancellations_and_preserves_older_branch_proof(self):
+        old = {**self.lesson(), 'id':1, 'date':'2026-03-01', 'status':3}
+        deleted = {**self.lesson(), 'id':2, 'date':'2026-10-20', 'status':3}
+        cancelled = {**self.lesson(), 'id':3, 'date':'2026-11-01'}
+        expired = {**self.lesson(), 'id':4, 'date':'2025-01-01', 'status':3}
+        moved = {**self.lesson(), 'id':5, 'date':'2026-04-01', 'status':3}
+        changed = {**self.lesson(), 'id':5, 'date':'2026-10-25', 'status':3, 'branch_id':1}
+        result = merge_family_lessons([old,deleted,cancelled,expired,moved],[changed],today=date(2026,10,25))
+        self.assertEqual(result,[old,changed])
+        self.assertEqual(result[0]['subscription_id'],40)
+        self.assertEqual(result[0]['branch_id'],2)
+        self.assertEqual(merge_family_lessons(result,[],today=date(2026,10,25),full=True),[])
+
+    def test_a_partial_or_out_of_window_response_cannot_erase_lesson_cache(self):
+        def call(path,body):
+            return {'items':[{'id':1,'date':'2020-01-01','customer_ids':[7]}],'total':1,'page':0}
+        client=type('Client',(),{'call':staticmethod(call)})()
+        with self.assertRaises(AlfaError):
+            fetch_family_lessons(client,1,7,today=date(2026,10,25))
+
+    def test_lesson_freshness_is_independent_of_a_newer_balance(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+        cards[0].update(refreshed_at='2026-10-25T12:00:00+00:00',lessons_refreshed_at='2026-10-25T09:00:00+00:00',lessons=[self.lesson()])
+        cards[1].update(refreshed_at='2026-10-25T11:00:00+00:00',lessons_refreshed_at='2026-10-25T10:00:00+00:00',lessons=[self.lesson(subject=12)])
+        self.assertEqual(customer_subscriptions(cards)[0]['usage'],[])
+
+    def test_recent_lesson_check_does_not_promote_retained_old_branch_evidence(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+        cards[0].update(lessons_refreshed_at='2026-10-25T12:00:00+00:00',
+            lessons_full_refreshed_at='2026-10-25T09:00:00+00:00',lessons=[self.lesson()])
+        cards[1].update(lessons_refreshed_at='2026-10-25T11:00:00+00:00',
+            lessons_full_refreshed_at='2026-10-25T10:00:00+00:00',lessons=[self.lesson(subject=12)])
+        self.assertEqual(customer_subscriptions(cards)[0]['usage'],[])
+        cards[0]['lessons'][0]['observed_at']='2026-10-25T12:00:00+00:00'
+        self.assertEqual(len(customer_subscriptions(cards)[0]['usage']),1)
 
 
 if __name__=='__main__':

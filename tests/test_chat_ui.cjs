@@ -782,5 +782,25 @@ test('opening family for staff uses prepared GET data without per-source CRM mut
   ui.$('#chat-details-dialog').close=function(){this.open=false;};
   await ui.app.enter();ui.$('#chat-details').click();await flush();
   assert.match(ui.$('#chat-details-student').textContent,/Child 1/);
-  assert.match(ui.$('#chat-details-sync').textContent,/обновляем на сервере/);
+  assert.match(ui.$('#chat-details-sync').textContent,/Обновляем на сервере/);
+});
+
+test('financial freshness and a failed daily lesson check remain visible together', async t=>{
+  const family=preparedFamily(1);
+  family.cache={...family.cache,refreshing:true,lessons_updated_at:'2026-10-24T00:10:00Z',
+    lessons_history_updated_at:'2026-10-23T00:00:00Z',
+    error:'Не удалось обновить занятия. Баланс и абонементы обновляются отдельно.'};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return family;
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  const text=ui.$('#chat-details-sync').textContent;
+  assert.match(text,/Баланс и абонементы:.*2026-10-24/);
+  assert.match(text,/Занятия:.*00:10/);
+  assert.match(text,/Год занятий проверен.*2026-10-23/);
+  assert.match(text,/Не удалось обновить занятия/);
+  assert.match(ui.$('.family-stats').textContent,/100/);
 });

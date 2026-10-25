@@ -201,7 +201,10 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
     }
     $("#alfa-loader-cards-fill").style.width = cards?.total ? Math.max(0, Math.min(100, cards.ready / cards.total * 100)) + "%" : "0%";
     const current = $("#alfa-loader-cards-current"); current.replaceChildren();
-    if (worker) current.append(document.createTextNode(worker.manual ? "По запросу оператора: " : "Сейчас: "), node("strong", worker.name || "Клиент"), document.createTextNode(" · ID " + worker.customer_id + " · филиал " + worker.branch_id));
+    if (worker) {
+      const operation = {reading_finance:"баланс и абонементы",reading_recent_lessons:"недавние и будущие занятия",reading_lesson_history:"годовая история занятий"}[worker.operation];
+      current.append(document.createTextNode(worker.manual ? "По запросу оператора: " : "Сейчас: "), node("strong", worker.name || "Клиент"), document.createTextNode(" · ID " + worker.customer_id + " · филиал " + worker.branch_id + (operation ? " · " + operation : "")));
+    }
     else if (cards?.as_of) current.append(document.createTextNode("Состояние кэша на " + clock(cards.as_of)));
     const error = $("#alfa-loader-cards-error");
     error.textContent = cards?.errors ? "Не удалось обновить клиентов: " + number(cards.errors) + ". " + (cards.next_retry_at ? isFuture(cards.next_retry_at, payload) ? "Повтор после " + date(cards.next_retry_at) + ". " : "Повтор ожидает выполнения. " : "") + "Последние сохранённые сведения остаются доступны." : "";
