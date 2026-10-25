@@ -16,7 +16,7 @@
   --amber:#3d8dc4; --amber-deep:#3480b4; --amber-ink:#235f88; --amber-tint:#e8f2fa;
   --danger:#235f88; --ok:#2574ad;
   /* Operator's messages: a soft light green; the parent's stay white. */
-  --bubble-in:#ffffff; --bubble-out:#ddf5d4; --bubble-ink:#163047;
+  --bubble-in:#ffffff; --bubble-out:#eaf6e4; --bubble-ink:#163047;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(16,27,35,.16));
   --glass:rgba(255,255,255,.72); --glass-line:rgba(255,255,255,.6);
   /* System plates: clearly translucent, with blue-grey ink over the wallpaper. */
@@ -50,7 +50,7 @@
   --sel:#4e9ad1;
   --amber:#4e9ad1; --amber-deep:#4089c0; --amber-ink:#8fc3e8; --amber-tint:#15283a;
   --danger:#8fc3e8; --ok:#66b4e7;
-  --bubble-in:#1a2a31; --bubble-out:#21432f; --bubble-ink:#e2f2e6;
+  --bubble-in:#1a2a31; --bubble-out:#24382c; --bubble-ink:#e2f0e5;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(0,0,0,.4));
   --glass:rgba(19,31,36,.74); --glass-line:rgba(255,255,255,.07);
   --sys-bg:rgba(10,20,26,.3); --sys-line:rgba(255,255,255,.1); --sys-ink:#c6d1d9;
