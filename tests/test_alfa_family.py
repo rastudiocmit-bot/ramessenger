@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app/backend/src'))
 from center_messenger.alfa_client import AlfaError
-from center_messenger.alfa_family import customer_balance, fetch_family_card, fetch_family_finance, fetch_family_lessons, merge_family_lessons, customer_paid_lessons, customer_subscriptions, group_facts, _lesson, mapping_pending
+from center_messenger.alfa_family import customer_balance, fetch_family_card, fetch_family_finance, fetch_family_lessons, merge_family_lessons, customer_paid_lessons, customer_subscriptions, current_lessons, group_facts, _lesson, mapping_pending
 
 
 class FamilyBalanceTests(unittest.TestCase):
@@ -334,6 +334,76 @@ class FamilyBalanceTests(unittest.TestCase):
         self.assertEqual(customer_subscriptions(cards)[0]['usage'],[])
         cards[0]['lessons'][0]['observed_at']='2026-10-25T12:00:00+00:00'
         self.assertEqual(len(customer_subscriptions(cards)[0]['usage']),1)
+
+    def test_latest_complete_subscription_inventory_can_remove_an_old_purchase(self):
+        cards=self.subscription_cards()
+        cards[1].update(refreshed_at='2026-10-25T01:00:00+00:00',subscriptions=[])
+        self.assertEqual(customer_subscriptions(cards),[])
+        cards[1]['subscriptions']=[{**cards[0]['subscriptions'][0],'id':41}]
+        self.assertEqual([s['id'] for s in customer_subscriptions(cards)],[41])
+
+    def test_conflicting_equal_time_inventories_cannot_prove_a_branch_or_balance(self):
+        cards=self.subscription_cards()
+        cards[0]['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+        cards[0]['lessons']=[self.lesson()]
+        cards[1]['subscriptions']=[]
+        result=customer_subscriptions(cards)
+        self.assertEqual(len(result),1)
+        self.assertTrue(result[0]['needs_review'])
+        self.assertIsNone(result[0]['balance'])
+        self.assertEqual(result[0]['branches'],[])
+
+    def test_a_moved_lesson_uses_its_latest_date_for_the_group(self):
+        cards=self.subscription_cards()
+        cards[0].update(lessons_refreshed_at='2026-10-25T10:00:00+00:00',
+            lessons=[{**self.lesson(),'date':'2026-11-01'}])
+        cards[1].update(lessons_refreshed_at='2026-10-25T11:00:00+00:00',
+            lessons=[{**self.lesson(),'date':'2026-11-02'}])
+        groups=[{'id':'5','branch_id':'2','customer_ids':['7']}]
+        group_facts(groups,cards,today=date(2026,10,25))
+        self.assertEqual(groups[0]['next_lesson']['date'],'2026-11-02')
+
+    def test_a_fresh_empty_actual_branch_window_removes_a_stale_mirrored_lesson(self):
+        cards=self.subscription_cards()
+        cards[0].update(lessons_refreshed_at='2026-10-25T10:00:00+00:00',lessons=[self.lesson()])
+        cards[1].update(lessons_refreshed_at='2026-10-25T11:00:00+00:00',lessons=[])
+        self.assertEqual(current_lessons(cards),[])
+        groups=[{'id':'5','branch_id':'2','customer_ids':['7']}]
+        group_facts(groups,cards,today=date(2026,10,25))
+        self.assertIsNone(groups[0]['next_lesson'])
+        self.assertEqual(customer_subscriptions(cards)[0]['branches'],[])
+
+    def test_current_group_membership_does_not_prove_a_lesson_before_enrollment(self):
+        cards=self.subscription_cards()
+        for card in cards:
+            card['subscriptions'][0].update(subject_ids=[11],lesson_type_ids=[1])
+            card['lessons']=[{**self.lesson(subscription=None),'date':'2026-10-10','status':3,'customer_verified':False}]
+        groups=[{'id':'5','branch_id':'2','customer_ids':['7'],
+            'memberships':[{'customer_id':'7','begin':'2026-10-20','end':None}]}]
+        self.assertEqual(customer_subscriptions(cards,groups=groups)[0]['branches'],[])
+        group_facts(groups,cards,today=date(2026,10,25))
+        self.assertIsNone(groups[0]['previous_lesson'])
+
+    def test_foreign_customer_lesson_and_equal_time_conflicts_do_not_set_group_dates(self):
+        cards=self.subscription_cards()
+        cards[0]['lessons']=[{**self.lesson(),'customer_id':8}]
+        cards[1]['lessons']=[]
+        groups=[{'id':'5','branch_id':'2','customer_ids':['7']}]
+        group_facts(groups,cards,today=date(2026,10,25))
+        self.assertIsNone(groups[0]['next_lesson'])
+        cards[0]['lessons']=[self.lesson()]
+        cards[1]['lessons']=[{**self.lesson(),'time':'16:00'}]
+        self.assertEqual(current_lessons(cards),[])
+
+    def test_absence_coverage_uses_the_workspace_calendar_day(self):
+        cards=self.subscription_cards()
+        old={**self.lesson(),'date':'2026-09-24','status':3}
+        cards[0].update(lessons_full_refreshed_at='2026-10-20T12:00:00+00:00',lessons=[old])
+        cards[1].update(lessons_full_refreshed_at='2026-09-01T12:00:00+00:00',lessons_refreshed_at='2026-10-24T21:30:00+00:00',
+            lessons_recent_day='2026-10-25',lessons=[])
+        self.assertEqual(current_lessons(cards),[old])
+        cards[0]['lessons'][0]['date']='2026-09-25'
+        self.assertEqual(current_lessons(cards),[])
 
 
 if __name__=='__main__':

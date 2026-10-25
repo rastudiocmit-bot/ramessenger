@@ -149,12 +149,43 @@ def page_rows(data, page):
     return items, total
 
 
+def student_bindings(connection, customer_ids, previous=()):
+    """A CRM Customer ID is identity; names and birthdays are editable facts.
+
+    Keep existing unambiguous local IDs. Split historical cross-ID aliases,
+    retaining the old local ID for one deterministic owner and its manual links.
+    """
+    connection = UUID(str(connection))
+    known, owners = defaultdict(set), defaultdict(set)
+    for row in previous:
+        if row["student_id"]:
+            customer, student = int(row["external_id"]), UUID(str(row["student_id"]))
+            known[customer].add(student)
+            owners[student].add(customer)
+    owner = {student: min(ids, key=lambda key: (uuid5(connection, f"student:{key}") != student, key))
+             for student, ids in owners.items()}
+    review = {key for key, values in known.items() if len(values) > 1 or any(len(owners[s]) > 1 for s in values)}
+    result = {}
+    occupied = dict(owner)
+    for customer in sorted(set(customer_ids)):
+        existing = sorted((s for s in known[customer] if owner[s] == customer),
+                          key=lambda s: (s != uuid5(connection, f"student:{customer}"), str(s)))
+        student = existing[0] if existing else uuid5(connection, f"student:{customer}")
+        suffix = 0
+        while student in occupied and occupied[student] != customer:
+            suffix += 1
+            student = uuid5(connection, f"source-student:{customer}:{suffix}")
+        occupied[student] = customer
+        result[customer] = student
+    return result, review
+
+
 def project_directory(connection: UUID, rows, previous=()):
     """One source customer across branches; separate children sharing a representative.
 
     Only a primary communication address is used, never chains of secondary numbers.
     Conflicting payer names sharing an address remain separate and require review.
-    Cross-ID student matches require the same contact, full name AND valid birthday.
+    Different Customer IDs always remain separate children, including namesakes.
     """
     sources, address_names = defaultdict(list), defaultdict(set)
     for row in rows:
@@ -181,16 +212,7 @@ def project_directory(connection: UUID, rows, previous=()):
             address + (("|payer:" + name) if name else f"|card:{key}") if conflict else address
         )
         groups[identity].append(key)
-    previous_ids = {r["external_id"]: r["student_id"] for r in previous if r["student_id"]}
-    previous_shapes = defaultdict(set)
-    previous_owners = {}
-    for key, row in sorted(representatives.items()):
-        if key in previous_ids:
-            old = previous_ids[key]
-            shape = (normalized_name(row["name"]), row["dob"])
-            previous_shapes[old].add(shape)
-            previous_owners.setdefault(old, shape)
-    changed_aliases = {old for old, shapes in previous_shapes.items() if len(shapes) > 1}
+    identities, changed_aliases = student_bindings(connection, representatives, previous)
     contacts, students, bindings = [], {}, []
     for identity, keys in sorted(groups.items()):
         contact = uuid5(connection, "contact:" + identity)
@@ -201,9 +223,10 @@ def project_directory(connection: UUID, rows, previous=()):
         phones = sorted({p for r in cards for p in r["phones"]})
         emails = sorted({p for r in cards for p in r["emails"]})
         review = any(
-            len(address_names[addresses[key]]) > 1 or previous_ids.get(key) in changed_aliases
+            len(address_names[addresses[key]]) > 1 or key in changed_aliases
             for key in keys
         )
+        review = review or any(len({(normalized_name(r["name"]), r["dob"]) for r in sources[key]}) > 1 for key in keys)
         label = (
             legal_names[0]
             if legal_names
@@ -213,49 +236,13 @@ def project_directory(connection: UUID, rows, previous=()):
             if emails
             else representatives[keys[0]]["name"]
         )
-        children = defaultdict(list)
         for key in keys:
-            values, row = sources[key], representatives[key]
-            signatures = {(normalized_name(r["name"]), r["dob"]) for r in values}
-            if len(signatures) != 1:
-                review = True
-            signature = (
-                (normalized_name(row["name"]), row["dob"])
-                if row["dob"] and len(signatures) == 1
-                else ("card", key)
-            )
-            children[signature].append(key)
-        for child_keys in children.values():
-            row = representatives[min(child_keys)]
-            shape = (normalized_name(row["name"]), row["dob"])
-            known = sorted(
-                {
-                    previous_ids[k]
-                    for k in child_keys
-                    if k in previous_ids and previous_owners[previous_ids[k]] == shape
-                },
-                key=str,
-            )
-            student = UUID(
-                str(known[0] if known else uuid5(connection, "student:" + str(min(child_keys))))
-            )
-            if not known and student in previous_owners and previous_owners[student] != shape:
-                student = uuid5(
-                    connection,
-                    f"student:{min(child_keys)}:identity:{shape[0]}:dob:{shape[1]}",
-                )
+            row = representatives[key]
+            student = identities[key]
             students[student] = {"id": student, "name": row["name"]}
-            for key in child_keys:
-                for source in sources[key]:
-                    bindings.append(
-                        {
-                            "branch_id": source["branch_id"],
-                            "external_id": key,
-                            "contact_id": contact,
-                            "student_id": student,
-                            "needs_review": review,
-                        }
-                    )
+            for source in sources[key]:
+                bindings.append({"branch_id": source["branch_id"], "external_id": key,
+                    "contact_id": contact, "student_id": student, "needs_review": review})
         search = normalized_name(
             " ".join(
                 [

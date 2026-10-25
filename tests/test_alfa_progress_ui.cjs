@@ -284,7 +284,18 @@ test("card work names the exact financial or lesson operation", async t=>{
   assert.match(ui.$('#alfa-loader-cards-current').textContent,/недавние и будущие занятия/);
   operation='reading_lesson_history';await ui.poll();
   assert.match(ui.$('#alfa-loader-cards-current').textContent,/годовая история занятий/);
+  operation='reading_customer_groups';await ui.poll();
+  assert.match(ui.$('#alfa-loader-cards-current').textContent,/действующие группы клиента/);
   assert.match(ui.$('#alfa-loader-cards-current').textContent,/9007199254740997/);
+});
+test("active group progress is separate from awaiting-answer card totals and is cleared on reset", async t=>{
+  const payload=loaderReport();payload.cards.groups={total:117,ready:111,queued:6,errors:1,unlinked:0};
+  const ui=setup(t,()=>payload);await ui.app.start();
+  assert.match(ui.$('#alfa-loader-groups-status').textContent,/111 из 117.*в очереди: 6.*повтора: 1/);
+  assert.match(ui.$('#alfa-loader-cards-value').textContent,/47 из 52/);
+  ui.app.reset();
+  assert.equal(ui.$('#alfa-loader-groups-status').textContent,'');
+  assert.equal(ui.$('#alfa-loader-groups-status').hidden,true);
 });
 test("archive pause is a server mutation and retains all completed journals and live checks", async t=>{
   let paused=false;const posts=[];

@@ -45,8 +45,8 @@ const cases=[[1440,"light"],[390,"light"],[320,"dark"]];
             history_loaded:false,history_complete:false,backfill_pending:!paused,archive_paused:paused,streams,
             messages:43280,stored_messages:44000,conversations:2400,last_sync_at:at,counters_as_of:at,
             last_live_cycle:{checked:8,journals:8,failed:0,added_records:7,completed_at:at},
-            cards:{configured:true,total:52,ready:47,cached:50,queued:5,errors:0,as_of:at},
-            card_worker:{name:"Карточка-пример",customer_id:"1306",branch_id:"2",manual:false},
+            cards:{configured:true,total:52,ready:47,cached:50,queued:5,errors:0,as_of:at,groups:{total:117,ready:111,queued:6,errors:1,unlinked:0}},
+            card_worker:{name:"Карточка-пример",student_name:"Ребёнок-пример",customer_id:"1306",branch_id:"2",manual:false,operation:"reading_customer_groups"},
             active_review:{state:"complete",processed:820,last_success_at:at,next_at:new Date(Date.now()+21600000).toISOString()}};
         }else if(name.endsWith("/integrations/alfa-max"))value={configured:true,state:"active",vault_ready:true,crm_configured:true,branches:[{id:"2",name:"Test"}]};
         else if(name.endsWith("/integrations/alfa"))value={configured:true,status:"active",vault_ready:true,branches:[{id:"2",name:"Test"}]};

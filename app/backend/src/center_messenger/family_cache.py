@@ -15,11 +15,13 @@ from sqlalchemy import text
 from center_messenger.alfa_client import AlfaError
 from center_messenger.alfa_family import fetch_family_finance, fetch_family_lessons, merge_family_lessons
 from center_messenger.auth_security import AuthError
+from center_messenger import group_links
 
 TOPIC = "crm.card.refresh"
 LESSONS = "crm.card.lessons"
 HISTORY = "crm.card.lesson-history"
-TOPICS = (TOPIC, LESSONS, HISTORY)
+GROUPS = group_links.TOPIC
+TOPICS = (TOPIC, LESSONS, HISTORY, GROUPS)
 INTERVAL = timedelta(minutes=30)
 HISTORY_INTERVAL = timedelta(days=1)
 LEASE = timedelta(seconds=90)
@@ -47,6 +49,8 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS
             continue
         count += _enqueue(db, workspace, snapshot, contact=contact, force=force,
                          topic=topic, column=column, interval=interval, stale=stale)
+    if GROUPS in topics:
+        count += group_links.enqueue(db, workspace, snapshot, contact=contact, force=force)
     return count
 
 
@@ -94,9 +98,9 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
 def cache_status(db, workspace, connection, cards, contact, version):
     sources = [card for student in cards for card in student["cards"]]
     times = [datetime.fromisoformat(card["refreshed_at"]) for card in sources if card.get("refreshed_at")]
-    jobs = list(db.execute(text("SELECT payload||jsonb_build_object('topic',topic) FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history) "
+    jobs = list(db.execute(text("SELECT payload||jsonb_build_object('topic',topic) FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) "
         "AND state='pending' AND payload->>'connection'=:conn AND payload->>'version'=:v AND payload->>'contact'=:contact"),
-        {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY,
+        {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
          "conn": str(connection), "v": str(version), "contact": str(contact)}).scalars())
     keys = {(card["branch_id"], card["id"]) for card in sources}
     jobs = [job for job in jobs if (job["branch"], job["customer"]) in keys]
@@ -107,6 +111,7 @@ def cache_status(db, workspace, connection, cards, contact, version):
         values = [datetime.fromisoformat(card[field]) for card in sources if card.get(field)]
         return min(values) if len(values) == len(sources) and values else None
     lessons_at, history_at = oldest("lessons_refreshed_at"), oldest("lessons_full_refreshed_at")
+    groups_at = oldest("groups_refreshed_at")
     automatic = db.execute(text("SELECT EXISTS(SELECT 1 FROM conversations WHERE workspace_id=:w "
         "AND contact_id=:c AND needs_reply AND kind='direct')"), {"w": workspace, "c": contact}).scalar_one()
     return {"auto_refresh": bool(automatic), "ready": ready, "refreshing": bool(jobs), "updated_at": updated.isoformat() if updated else None,
@@ -116,6 +121,9 @@ def cache_status(db, workspace, connection, cards, contact, version):
             "lessons_updated_at": lessons_at.isoformat() if lessons_at else None,
             "lessons_history_updated_at": history_at.isoformat() if history_at else None,
             "lessons_history_interval_hours": 24,
+            "groups_updated_at": groups_at.isoformat() if groups_at else None,
+            "groups_interval_hours": 6,
+            "groups_refreshing": any(job["topic"] == GROUPS for job in jobs),
             "lessons_refreshing": any(job["topic"] == LESSONS for job in jobs),
             "lessons_history_refreshing": any(job["topic"] == HISTORY for job in jobs),
             "overdue": not ready or mapping_pending or updated + INTERVAL <= datetime.now(UTC)
@@ -124,6 +132,8 @@ def cache_status(db, workspace, connection, cards, contact, version):
             "error": "Не удалось обновить баланс и абонементы. Сохранены последние полученные сведения."
                      if any(job.get("error") and job["topic"] == TOPIC for job in jobs) else
                      "Не удалось обновить занятия. Баланс и абонементы обновляются отдельно."
+                     if any(job.get("error") and job["topic"] != GROUPS for job in jobs) else
+                     "Не удалось обновить группы. Сохранены последние подтверждённые связи."
                      if any(job.get("error") for job in jobs) else None}
 
 
@@ -140,11 +150,11 @@ def current(db, workspace, connection):
       JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND b.connection_id=s.connection_id
         AND b.external_id=c.branch_id AND b.available
       LEFT JOIN alfa_directory d ON d.workspace_id=c.workspace_id AND d.run_id=c.run_id AND d.contact_id=c.contact_id
-      WHERE e.workspace_id=:w AND e.topic IN (:finance,:lessons,:history) AND e.state='pending'
+      WHERE e.workspace_id=:w AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending'
         AND e.payload->>'connection'=CAST(:conn AS text) AND e.payload->>'version'=s.version::text
         AND e.payload->>'lease_owner' IS NOT NULL AND (e.payload->>'lease_until')::timestamptz>now()
       ORDER BY e.created_at,e.id LIMIT 1
-    """), {"w": workspace, "conn": connection, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY}).mappings().one_or_none()
+    """), {"w": workspace, "conn": connection, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS}).mappings().one_or_none()
     if not row:
         return None
     job = row["payload"]
@@ -152,7 +162,7 @@ def current(db, workspace, connection):
             "customer_id": job["customer"], "branch_id": job["branch"],
             "started_at": job.get("started_at"), "lease_until": job["lease_until"],
             "manual": bool(job.get("manual")), "operation": {
-                TOPIC: "reading_finance", LESSONS: "reading_recent_lessons", HISTORY: "reading_lesson_history"
+                TOPIC: "reading_finance", LESSONS: "reading_recent_lessons", HISTORY: "reading_lesson_history", GROUPS: "reading_customer_groups"
             }[row["topic"]]}
 
 
@@ -183,7 +193,7 @@ def progress(db, workspace, connection, snapshot):
       ), jobs AS (
         SELECT e.payload FROM outbox_events e JOIN alfa_settings s ON s.workspace_id=e.workspace_id
           AND s.connection_id=:conn AND s.secret_ciphertext IS NOT NULL
-        WHERE e.workspace_id=:w AND e.topic IN (:finance,:lessons,:history) AND e.state='pending'
+        WHERE e.workspace_id=:w AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending'
           AND e.payload->>'connection'=CAST(:conn AS text) AND e.payload->>'version'=s.version::text
           AND EXISTS(SELECT 1 FROM families f WHERE f.contact_id::text=e.payload->>'contact')
       )
@@ -194,17 +204,17 @@ def progress(db, workspace, connection, snapshot):
         (SELECT count(DISTINCT payload->>'contact') FROM jobs WHERE payload ? 'error') AS errors,
         (SELECT min((payload->>'available_at')::timestamptz) FROM jobs WHERE payload ? 'error') AS next_retry_at
     """), {"w": workspace, "conn": connection, "run": snapshot["run"],
-             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY}).mappings().one()
-    return empty | dict(row)
+             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS}).mappings().one()
+    return empty | dict(row) | {"groups": group_links.progress(db, workspace, snapshot)}
 
 
 class _TariffCache:
-    """Only branch tariff metadata is shared; client money is always read live."""
+    """Only group/tariff metadata is shared; client money and CGI are read live."""
     def __init__(self, client, cache, scope):
         self.client, self.cache, self.scope = client, cache, scope
 
     def call(self, path, body):
-        if not path.endswith('/tariff/index'):
+        if not path.endswith(('/tariff/index', '/group/index')):
             return self.client.call(path, body)
         key = (self.scope, path, json.dumps(body, sort_keys=True))
         saved = self.cache.get(key)
@@ -229,16 +239,18 @@ class FamilyCacheWorker:
         with self.accounts.transaction(workspace_id=workspace) as db:
             snapshot = DirectoryReader._published(db, workspace)
             if snapshot:
+                from center_messenger.family_identity import repair
+                repair(db, workspace, snapshot)
                 enqueue(db, workspace, snapshot)
 
     def claim(self, workspace):
         with self.accounts.transaction(workspace_id=workspace) as db:
-            row = db.execute(text("SELECT id,topic,payload FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history) "
+            row = db.execute(text("SELECT id,topic,payload FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) "
                 "AND state='pending' AND (payload->>'available_at')::timestamptz<=now() "
                 "AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now() "
-                "ORDER BY (payload->>'manual')::boolean DESC,CASE topic WHEN :finance THEN 0 WHEN :lessons THEN 1 ELSE 2 END,"
+                "ORDER BY (payload->>'manual')::boolean DESC,CASE topic WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :history THEN 2 ELSE 3 END,"
                 "(payload->>'due_at')::timestamptz,id LIMIT 1 FOR UPDATE SKIP LOCKED"),
-                {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY}).mappings().one_or_none()
+                {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS}).mappings().one_or_none()
             if not row:
                 return None
             job = dict(row["payload"])
@@ -259,6 +271,8 @@ class FamilyCacheWorker:
              "customer": int(job["customer"]), "contact": job["contact"], "student": job["student"]}).mappings().one_or_none()
 
     def process(self, workspace, job):
+        if job["topic"] == GROUPS:
+            return group_links.process(self, workspace, job)
         # Short transactions before/after IO. Workspace/settings changes fence
         # publication, and a stale worker can never publish through a stolen lease.
         try:

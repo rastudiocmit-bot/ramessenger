@@ -88,7 +88,8 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
     generation += 1; clearTimer(); pending = null; failures = 0; lastDetail = ""; lastPayload = null;
     lastFullAt = 0; selectedEvent = null; feedKey = ""; mutationError = ""; mutationKeys.clear();
     for (const id of ["alfa-max-progress-streams", "alfa-max-progress-stats", "alfa-loader-history-alerts", "alfa-max-progress-track"]) $("#" + id).replaceChildren();
-    for (const id of ["alfa-loader-live-note", "alfa-loader-cards-current", "alfa-loader-cards-error", "alfa-loader-review-detail", "alfa-max-progress-warning", "alfa-max-progress-detail", "alfa-max-progress-activity"]) $("#" + id).textContent = "";
+    for (const id of ["alfa-loader-live-note", "alfa-loader-cards-current", "alfa-loader-cards-error", "alfa-loader-groups-status", "alfa-loader-review-detail", "alfa-max-progress-warning", "alfa-max-progress-detail", "alfa-max-progress-activity"]) $("#" + id).textContent = "";
+    show($("#alfa-loader-groups-status"), false);
     $("#alfa-loader-live-count").textContent = "—"; $("#alfa-loader-cards-value").textContent = "—";
     $("#alfa-max-progress-value").textContent = "—"; $("#alfa-loader-cards-queue").textContent = "";
     $("#alfa-loader-cards-fill").style.width = "0%"; show($("#alfa-loader-cards-track"), false);
@@ -202,10 +203,16 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
     $("#alfa-loader-cards-fill").style.width = cards?.total ? Math.max(0, Math.min(100, cards.ready / cards.total * 100)) + "%" : "0%";
     const current = $("#alfa-loader-cards-current"); current.replaceChildren();
     if (worker) {
-      const operation = {reading_finance:"баланс и абонементы",reading_recent_lessons:"недавние и будущие занятия",reading_lesson_history:"годовая история занятий"}[worker.operation];
+      const operation = {reading_finance:"баланс и абонементы",reading_recent_lessons:"недавние и будущие занятия",reading_lesson_history:"годовая история занятий",reading_customer_groups:"действующие группы клиента"}[worker.operation];
       current.append(document.createTextNode(worker.manual ? "По запросу оператора: " : "Сейчас: "), node("strong", worker.name || "Клиент"), document.createTextNode(" · ID " + worker.customer_id + " · филиал " + worker.branch_id + (operation ? " · " + operation : "")));
+      if (worker.student_name && worker.student_name !== worker.name) current.append(document.createTextNode(" · " + worker.student_name));
     }
     else if (cards?.as_of) current.append(document.createTextNode("Состояние кэша на " + clock(cards.as_of)));
+    const groups = $("#alfa-loader-groups-status"), counts = cards?.groups;
+    groups.textContent = counts ? "Группы действующих клиентов: " + number(counts.ready) + " из " + number(counts.total) + " проверены" +
+      (counts.queued ? " · в очереди: " + number(counts.queued) : "") + (counts.errors ? " · ожидают повтора: " + number(counts.errors) : "") +
+      (counts.unlinked ? " · не связаны с карточкой: " + number(counts.unlinked) : "") : "";
+    show(groups, Boolean(counts));
     const error = $("#alfa-loader-cards-error");
     error.textContent = cards?.errors ? "Не удалось обновить клиентов: " + number(cards.errors) + ". " + (cards.next_retry_at ? isFuture(cards.next_retry_at, payload) ? "Повтор после " + date(cards.next_retry_at) + ". " : "Повтор ожидает выполнения. " : "") + "Последние сохранённые сведения остаются доступны." : "";
     show(error, Boolean(cards?.errors));

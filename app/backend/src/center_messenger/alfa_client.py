@@ -115,7 +115,8 @@ def secure_post(origin, path, body, token, *, deadline):
         r"[1-9][0-9]*/(?:customer|group|study-status|lead-status)/index|"
         r"[1-9][0-9]*/(?:lesson|tariff)/index|"
         r"[1-9][0-9]*/customer-tariff/index\?customer_id=[1-9][0-9]*|"
-        r"[1-9][0-9]*/cgi/index\?group_id=[1-9][0-9]*)",
+        r"[1-9][0-9]*/cgi/index\?group_id=[1-9][0-9]*|"
+        r"[1-9][0-9]*/cgi/customer\?customer_id=[1-9][0-9]*)",
         path,
     ):
         raise AlfaError("invalid_response")
