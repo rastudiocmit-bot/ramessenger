@@ -66,7 +66,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     show($("#chat-empty")); show($("#chat-more"), false); show($("#chat-retry"), false); show($("#chat-handled"), false); show($("#chat-details"), false); show($("#chat-unread-count"), false);
     $("#chat-visible-count").textContent = ""; $("#chat-sync-state").textContent = "История на сервере";
     show($("#chat-history-more"), false); show($("#chat-history-status"), false); $("#chat-history-note").textContent = "";
-    show($("#chat-blank")); show($("#chat-stream"), false); show($("#chat-compose"), false);
+    show($("#chat-stream"), false); show($("#chat-compose"), false);
     $("#chat-person").replaceChildren(node("strong", "Выберите диалог"), node("small", "Новые сообщения и ваши ответы"));
     for (const id of ["max-token-dialog", "chat-link-dialog", "chat-settings-dialog", "chat-details-dialog"]) if ($(`#${id}`).open) $(`#${id}`).close();
   }
@@ -626,7 +626,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
       history.append(bubble);
     }
-    show($("#chat-blank"), false); show(stream); show($("#chat-compose"));
+    show(stream); show($("#chat-compose"));
     resizeCompose();
     restoreScroll(position, { bottom, older, follow: true });
     renderHeader();
@@ -715,7 +715,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     renderList(); notice("", $("#chat-error"));
     if (data.loaded) renderMessages(id, { bottom: true });
     else {
-      show($("#chat-blank"), false); show($("#chat-stream")); show($("#chat-compose"), false);
+      show($("#chat-stream")); show($("#chat-compose"), false);
       $("#chat-history").replaceChildren(node("p", "Открываем переписку…", "empty"));
       $("#chat-person").replaceChildren(node("strong", currentItem()?.name || "MAX"));
     }
@@ -878,7 +878,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     updateListLoader();
     listSeq += 1; selectionSeq += 1; clearTimeout(searchTimer); notice("", $("#chat-error"));
     $("#chat-layout").classList.remove("has-selection"); $("#chat-input").value = "";
-    $("#chat-history").replaceChildren(); show($("#chat-stream"), false); show($("#chat-compose"), false); show($("#chat-blank"));
+    $("#chat-history").replaceChildren(); show($("#chat-stream"), false); show($("#chat-compose"), false);
     $("#chat-person").replaceChildren(node("strong", "Выберите диалог"));
     if (detailsDialog.open) detailsDialog.close();
     loadList().catch(error => fail(error));
@@ -962,7 +962,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   $("#chat-details").addEventListener("click", () => {
     if (detailsDialog.open && detailsDialog.dataset.mode === "docked") closeDetails(); else openDetails().catch(error => fail(error));
   });
-  $("#chat-go-connections").addEventListener("click", () => renderPane("connections").catch(error => fail(error)));
   $("#chat-detach").addEventListener("click", () => { window.open("/?view=messages", "center-messenger-chat", "popup=yes,width=1280,height=860,resizable=yes,scrollbars=yes"); });
   $("#chat-list-toggle").addEventListener("click", () => { const layout = $("#chat-layout"); if (matchMedia("(max-width: 719px)").matches) layout.classList.remove("has-selection"); else { layout.classList.toggle("list-collapsed"); syncDetailsMode(); } });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && active()) schedule(150); });
