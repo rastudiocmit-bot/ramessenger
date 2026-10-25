@@ -945,7 +945,9 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-note-text strong{font-weight:650}
 .family-note-text span{color:var(--muted);overflow-wrap:anywhere}
 .family-note-text span::before{content:" · "}
-.family-note.next{background:var(--primary-tint);color:var(--primary-ink)}
+/* «Ближайшее»: the same pale green as the operator's messages. */
+.family-note.next{background:var(--bubble-out);color:#2f6b3c}
+:root[data-theme="dark"] .family-note.next{color:#9fd3ab}
 .family-note.warn{background:var(--st-unlinked-bg);color:var(--st-unlinked-ink)}
 .family-note.debt{background:color-mix(in srgb,var(--danger) 10%,var(--surface));color:var(--danger)}
 
@@ -1035,13 +1037,19 @@ body:has(#cabinet[hidden]){overflow:auto}
   .family-tool.iconbtn{width:40px;height:40px}
   .family-contact{min-height:36px}
 }
-/* Every child stays in view: the switcher wraps onto more lines instead of scrolling
-   sideways, where a mouse could not reach the hidden names. */
-.family-kids-block:not([hidden]){display:flex;align-items:flex-start;gap:10px}
-.family-kids-block .family-label{margin:0;flex:none;height:35px}
-.family-kids-block .family-kids{flex:1;min-width:0;flex-wrap:wrap;overflow:visible;margin:0;padding:0}
-.family-kid{max-width:100%;overflow:hidden;text-overflow:ellipsis}
-@media (pointer:coarse){.family-kids-block .family-label{height:36px}}
+/* «Дети»: the title is a tinted label like «Абонементы» and «Группы»; the children sit
+   under it in one row. Chips share the width and shorten with an ellipsis rather
+   than wrapping or scrolling, so every child stays in view and reachable. */
+.family-kids-block:not([hidden]){display:flex;flex-direction:column;align-items:flex-start;gap:7px}
+.family-kids-block .family-label{display:inline-flex;align-items:center;height:24px;margin:0;padding:0 10px;border-radius:7px;
+  background:var(--primary-tint);color:var(--primary-ink);font-size:11.5px;font-weight:750;letter-spacing:.06em}
+.family-kids-block .family-count{background:var(--surface);color:var(--primary-ink)}
+.family-kids-block .family-kids{width:100%;min-width:0;flex-wrap:nowrap;overflow:hidden;margin:0;padding:0 0 2px}
+.family-kids-block .family-kids{gap:5px}
+.family-kids-block .family-kid{flex:0 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;padding:0 11px;font-size:14px}
+.family-kids-block .family-kid small{font-size:12px;margin-left:4px}
+/* Three or more children: names only (the age is in the child's header below). */
+.family-kids-block .family-kids:has(.family-kid:nth-child(3)) .family-kid:not([aria-pressed="true"]) small{display:none}
 
 /* Search: the wrapper draws the one focus ring; the field itself stays flat. */
 #chat-search-wrap input,#chat-search-wrap input:focus{border:0;outline:none;box-shadow:none;background:none;border-radius:0}
