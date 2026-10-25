@@ -43,13 +43,13 @@ class HistoryCursorTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime(2026, 10, 24, tzinfo=UTC)
 
-    def test_completed_journals_are_rechecked_for_late_old_rows(self):
+    def test_completed_journals_are_not_rewound_after_six_hours(self):
         original = {"projection_version": PROJECTION_VERSION, "1:receive": 0,
                     "complete:1:receive": True, "finished:1:receive": self.now.isoformat()}
         cursor, requests = plan_history(original, [1], self.now + RECHECK_INTERVAL)
-        self.assertFalse(cursor["complete:1:receive"])
+        self.assertTrue(cursor["complete:1:receive"])
         advance_history(cursor, requests, [{"messages": [], "has_more": True} for _ in requests], self.now)
-        self.assertEqual(cursor["1:receive"], 1)
+        self.assertEqual(cursor["1:receive"], 0)
 
     def test_a_new_branch_is_incomplete_until_both_journals_are_read(self):
         cursor, requests = plan_history({}, [1], self.now)
@@ -57,6 +57,13 @@ class HistoryCursorTests(unittest.TestCase):
         self.assertFalse(history_pending(cursor))
         cursor, _ = plan_history(cursor, [1, 2], self.now)
         self.assertTrue(history_pending(cursor))
+
+    def test_retry_cannot_erase_known_missing_ids_from_a_finished_journal(self):
+        original={"complete:1:receive":True,"finished:1:receive":self.now.isoformat(),
+                  "missing_ids:1:receive":["7"],"streams":["1:receive","1:sent"]}
+        cursor, requests=plan_history(retry_history(original,["1:receive"]),[1],self.now)
+        advance_history(cursor,requests,[{"messages":[],"has_more":False} for _ in requests],self.now)
+        self.assertEqual(cursor["missing_ids:1:receive"],["7"])
 
     def test_catchup_has_its_own_durable_boundary_and_finishes_at_overlap(self):
         original = {"projection_version": PROJECTION_VERSION, "1:receive": 9,
@@ -482,11 +489,19 @@ class MessageSyncTests(unittest.TestCase):
         requests = self.service.browser.read_histories.call_args.args[2]
         self.assertNotIn((1, "receive", 1), requests)
 
-    def test_legacy_history_replays_once_to_repair_existing_aliases(self):
+    def test_legacy_unfinished_history_keeps_its_checkpoint(self):
         cursor = self.run_worker({"1:receive": 9})
         self.assertEqual(cursor["projection_version"], PROJECTION_VERSION)
-        self.assertEqual(cursor["1:receive"], 1)
-        self.assertNotIn((1, "receive", 9), self.service.browser.read_histories.call_args.args[2])
+        self.assertEqual(cursor["1:receive"], 10)
+        self.assertIn((1, "receive", 9), self.service.browser.read_histories.call_args.args[2])
+
+    def test_initial_identity_repair_preserves_earlier_completed_history(self):
+        cursor=self.run_worker({"1:receive":100,"complete:1:receive":False,
+            "finished:1:receive":self.at.isoformat(),"error:1:receive":"history_gap"})
+        self.assertTrue(cursor["complete:1:receive"])
+        self.assertEqual(cursor["proof:1:receive"]["status"],"legacy")
+        self.assertEqual(cursor["1:receive"],0)
+        self.assertNotIn((1,"receive",100),self.service.browser.read_histories.call_args.args[2])
 
     def test_new_message_burst_reopens_backfill_near_the_head(self):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 0,
@@ -595,10 +610,13 @@ class MessageSyncTests(unittest.TestCase):
         late = self.row("999", at=datetime(1999, 1, 1, tzinfo=UTC), body="Late old import")
         journals[(1, "receive")].append(late)
         cursor["finished:1:receive"] = (datetime.now(UTC) - RECHECK_INTERVAL).isoformat()
-        for _ in range(30):
-            cursor = self.run_worker(cursor, page_result=page)
-            if not history_pending(cursor):
-                break
+        cursor = self.run_worker(cursor, page_result=page)
+        self.assertEqual(len(self.messages()), len(expected))
+        self.assertTrue(all(r[2] == 0 for r in self.service.browser.read_histories.call_args.args[2]))
+        # A new source ID with an old timestamp is still imported when it appears in the feed.
+        journals[(1, "receive")].pop()
+        journals[(1, "receive")].insert(0, late)
+        cursor = self.run_worker(cursor, page_result=page)
         self.assertEqual(len(self.messages()), len(expected) + 1)
         self.assertEqual(min(m["occurred_at"] for m in self.messages()).year, 1999)
 
@@ -608,48 +626,35 @@ class MessageSyncTests(unittest.TestCase):
         self.project(self.row("2", branch=2, customer=9))
         self.assertEqual(len({m["conversation_id"] for m in self.messages()}), 2)
 
-    def test_reported_source_count_mismatch_reopens_the_archive(self):
+    def test_raw_count_difference_is_not_a_missing_id_or_reimport(self):
         def page(request):
-            if request == (1, "receive", 0):
-                return {"messages": [self.row("1")], "has_more": False, "total": 2}
-            return {"messages": [], "has_more": False, "total": 0}
+            return {"messages": [self.row("1")] if request == (1,"receive",0) else [], "has_more":False,
+                    "total":2 if request[:2] == (1,"receive") else 0}
         cursor = self.run_worker({}, page_result=page)
-        self.assertFalse(cursor["complete:1:receive"])
-        self.assertEqual(cursor["error:1:receive"], "history_incomplete")
-        report = history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2])
-        self.assertEqual(report["streams"][0]["missing_rows"], 1)
-        self.assertFalse(report["history_complete"])
-
-    def test_persistent_gap_stops_replays_but_keeps_new_messages_and_other_archives(self):
-        def page(request):
-            if request == (1, "receive", 0):
-                return {"messages": [self.row("1")], "has_more": False, "total": 2}
-            return {"messages": [], "has_more": False, "total": 0}
-        cursor = self.run_worker({}, page_result=page)
-        self.assertEqual(cursor["retries:1:receive"], 1)
-        cursor = self.run_worker(cursor, page_result=page)
-        self.assertIn("paused:1:receive", cursor)
-        self.assertEqual(cursor["error:1:receive"], "history_gap")
+        self.assertTrue(cursor["complete:1:receive"])
+        report = history_coverage(self.db,self.workspace,self.channel,cursor,[1,2])
+        self.assertEqual(report["streams"][0]["missing_rows"],0)
+        self.assertEqual(report["streams"][0]["row_difference"],1)
+        self.assertTrue(report["history_loaded"])
+        self.assertFalse(report["totals_verified"])
         self.assertFalse(history_pending(cursor))
         for _ in range(3):
             cursor = self.run_worker(cursor, page_result=page)
-            self.assertEqual(cursor["error:1:receive"], "history_gap")
-            self.assertEqual(cursor["scan_pages:1:receive"], 1)
-        report = history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2])
-        self.assertTrue(report["history_paused"])
-        self.assertFalse(report["history_complete"])
-        self.assertFalse(report["totals_verified"])
-        self.assertFalse(report["backfill_pending"])
-        def new_page(request):
-            if request == (1, "receive", 0):
-                return {"messages": [self.row("3", body="New live message")], "has_more": False, "total": 3}
-            return page(request)
-        cursor = self.run_worker(cursor, page_result=new_page)
-        self.assertEqual({m["payload"]["crm_record_id"] for m in self.messages()}, {"1", "3"})
-        self.assertIn("paused:1:receive", cursor)
-        cursor, _ = plan_history(cursor, [1, 2], datetime.now(UTC) + RECHECK_INTERVAL + timedelta(seconds=1))
-        self.assertNotIn("paused:1:receive", cursor)
-        self.assertNotIn("retries:1:receive", cursor)
+            self.assertTrue(all(r[2] == 0 for r in self.service.browser.read_histories.call_args.args[2]))
+            self.assertNotIn("paused:1:receive",cursor)
+        self.assertEqual(len(self.messages()),1)
+
+    def test_source_ambiguity_does_not_block_new_messages(self):
+        def page(request):
+            return {"messages":[self.row("1")] if request == (1,"receive",0) else [], "has_more":False,
+                    "total":2 if request[:2] == (1,"receive") else 0}
+        cursor=self.run_worker({},page_result=page)
+        def fresh(request):
+            return {"messages":[self.row("3",body="New live message")],"has_more":False,"total":3} if request==(1,"receive",0) else page(request)
+        cursor=self.run_worker(cursor,page_result=fresh)
+        self.assertEqual({m["payload"]["crm_record_id"] for m in self.messages()},{"1","3"})
+        self.assertFalse(history_pending(cursor))
+        self.assertTrue(history_coverage(self.db,self.workspace,self.channel,cursor,[1,2])["history_loaded"])
 
     def test_manual_retry_resumes_only_paused_archives_and_repairs_the_gap(self):
         original = {"projection_version": PROJECTION_VERSION, "streams": ["1:receive", "1:sent"],
@@ -663,7 +668,7 @@ class MessageSyncTests(unittest.TestCase):
             "messages": [self.row("1"), self.row("2")] if request == (1, "receive", 0) else [],
             "has_more": False, "total": 2 if request[:2] == (1, "receive") else 0})
         report = history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2])
-        self.assertTrue(report["history_complete"])
+        self.assertTrue(report["history_loaded"])
         self.assertEqual(len(self.messages()), 2)
 
     def test_projection_failure_cannot_advance_past_missing_source_ids(self):
@@ -694,8 +699,8 @@ class MessageSyncTests(unittest.TestCase):
             cursor[f"complete:1:{direction}"] = True
             cursor[f"total:1:{direction}"] = int(direction == "sent")
         report = history_coverage(self.db, self.workspace, self.channel, cursor, [1])
-        self.assertTrue(report["history_complete"])
-        self.assertTrue(report["totals_verified"])
+        self.assertTrue(report["history_loaded"])
+        self.assertFalse(report["totals_verified"])
         self.assertEqual(report["streams"][1]["source_rows"], 1)
         self.assertEqual(len(self.messages()), 2)
 
@@ -852,7 +857,7 @@ class MessageSyncTests(unittest.TestCase):
     def test_chat_context_is_safe_metadata_for_message_members(self):
         self.membership["role"] = "operator"
         self.membership["sections"] = ["messages"]
-        result = self.reader.context(None, self.workspace)
+        result = self.reader.context(SimpleNamespace(user_id=self.user), self.workspace)
         self.assertEqual(len(result["channels"]), 1)
         self.assertEqual(result["channels"][0]["kind"], "alfa_max_browser")
         self.assertEqual(len(result["branches"]), 2)
@@ -954,7 +959,8 @@ class MessageSyncTests(unittest.TestCase):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION}, browser_effect=changed_settings)
         self.assertTrue(cursor.pop("client_repair")["complete"])
         cursor.pop("activity", None)
-        self.assertEqual(cursor, {"projection_version": PROJECTION_VERSION})
+        self.assertEqual(cursor, {"projection_version": PROJECTION_VERSION, "sync_policy": 1,
+            "streams":["1:receive","1:sent","2:receive","2:sent"]})
         self.assertEqual(self.messages(), [])
 
     def test_journal_context_does_not_create_an_unlinked_copy_of_a_known_customer(self):
@@ -981,7 +987,7 @@ class MessageSyncTests(unittest.TestCase):
                 cursor[f"complete:{key}"] = True
                 cursor[f"total:{key}"] = int(direction == "receive")
         report = history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2, 3, 4])
-        self.assertTrue(report["history_complete"])
+        self.assertTrue(report["history_loaded"])
         for branch in (1, 2, 3, 4):
             result = {"messages": [self.row(str(100 + branch), branch=branch)], "has_more": False}
             verify_saved_pages(self.db, self.workspace, self.channel, [(branch, "receive", 0)], [result])
@@ -1178,7 +1184,7 @@ class MessageSyncTests(unittest.TestCase):
                                          {"w": self.workspace}).scalar(), 32)
         self.assertEqual(self.db.execute(text("SELECT count(*) FROM source_records WHERE workspace_id=:w"),
                                          {"w": self.workspace}).scalar(), 24)
-        self.assertTrue(history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2, 3, 4])["history_complete"])
+        self.assertTrue(history_coverage(self.db, self.workspace, self.channel, cursor, [1, 2, 3, 4])["history_loaded"])
         for branch, rows in source.items():
             result = {"messages": rows, "has_more": False}
             verify_saved_pages(self.db, self.workspace, self.channel, [(branch, "receive", 0)], [result])
@@ -1803,15 +1809,16 @@ class MessageSyncTests(unittest.TestCase):
         refresh_unread(self.db, self.workspace, conversation)
         self.assertFalse(self.reader.history(None, self.workspace, conversation)['conversation']['needs_reply'])
 
-    def test_queue_reclassification_recomputes_and_preserves_history(self):
+    def test_imported_message_actor_and_body_are_immutable(self):
         self.project(self.row('1'), self.row('2', direction='out', actor='automation', at=self.at+timedelta(minutes=2)))
         conversation = self.conversation()['id']
         self.assertTrue(self.reader.history(None, self.workspace, conversation)['conversation']['needs_reply'])
         original = self.messages()[-1]
         self.project(self.row('2', direction='out', actor='human', at=original['occurred_at']))
         meta = self.reader.history(None, self.workspace, conversation)['conversation']
-        self.assertFalse(meta['needs_reply'])
-        self.assertEqual(meta['priority_at'], original['occurred_at'])
+        self.assertTrue(meta['needs_reply'])
+        self.assertEqual(meta['priority_at'], self.at)
+        self.assertEqual(self.messages()[-1]['actor_type'], 'automation')
         self.assertEqual(self.messages()[-1]['id'], original['id'])
         self.assertEqual(len(self.messages()), 2)
 
@@ -1925,6 +1932,172 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(meta['unanswered_count'], 1)
         self.assertEqual(meta['preview'], 'Concurrent incoming')
         self.assertEqual(meta['waiting_since'], self.at+timedelta(seconds=1))
+
+    def test_personal_name_preferences_are_isolated_and_default_to_parent(self):
+        from center_messenger import chat_preferences
+        from center_messenger.chat_api import ChatPreferencesInput
+        from pydantic import ValidationError
+        other = uuid4()
+        self.assertEqual(chat_preferences.read(self.db,self.workspace,self.user)['name_order'],'parent_first')
+        chat_preferences.save(self.db,self.workspace,self.user,'child_first')
+        self.assertEqual(chat_preferences.read(self.db,self.workspace,self.user)['name_order'],'child_first')
+        self.assertEqual(chat_preferences.read(self.db,self.workspace,other)['name_order'],'parent_first')
+        with self.assertRaises(ValidationError):
+            ChatPreferencesInput(name_order='execute-code')
+        self.assertEqual(self.reader.context(SimpleNamespace(user_id=self.user),self.workspace)['preferences']['name_order'],'child_first')
+
+    def test_existing_source_text_time_attachments_and_version_stay_immutable(self):
+        self.project(self.row('1',body='Original'))
+        before = dict(self.messages()[0])
+        changed_row = self.row('1',body='Edited in CRM',at=self.at+timedelta(days=1))
+        changed_row['attachments'] = [{'name':'new file'}]
+        self.project(changed_row)
+        after = dict(self.messages()[0])
+        self.assertEqual(after['text'],before['text'])
+        self.assertEqual(after['occurred_at'],before['occurred_at'])
+        self.assertEqual(after['payload'],before['payload'])
+        self.assertEqual(after['version'],before['version'])
+
+    def test_receipts_verify_static_initial_import_and_keep_duplicate_source_ambiguous(self):
+        def page(request):
+            return {'messages':[self.row('1')] if request==(1,'receive',0) else [],'has_more':False,'total':1 if request==(1,'receive',0) else 0}
+        cursor=self.run_worker({},page_result=page)
+        report=history_coverage(self.db,self.workspace,self.channel,cursor,[1,2])
+        self.assertTrue(report['history_complete'])
+        self.assertTrue(report['totals_verified'])
+        self.assertEqual(cursor['proof:1:receive']['distinct_ids'],1)
+        from center_messenger.history_receipts import new_records
+        self.assertEqual(new_records(self.db,self.workspace,self.channel,1,[self.row('1')]),[])
+        self.assertEqual(len(new_records(self.db,self.workspace,self.channel,1,[self.row('2')])),1)
+
+    def test_repeated_source_rows_are_retained_without_false_missing_messages(self):
+        def page(request):
+            if request[:2] == (1,'receive'):
+                return {'messages':[self.row('1')],'has_more':request[2]==0,'total':2,'row_count':1}
+            return {'messages':[],'has_more':False,'total':0,'row_count':0}
+        cursor=self.run_worker({},page_result=page)
+        cursor=self.run_worker(cursor,page_result=page)
+        report=history_coverage(self.db,self.workspace,self.channel,cursor,[1,2])
+        self.assertTrue(report['history_loaded'])
+        self.assertFalse(report['history_complete'])
+        self.assertEqual(cursor['proof:1:receive']['status'],'source_repeats')
+        self.assertEqual(cursor['proof:1:receive']['duplicate_rows'],1)
+        self.assertEqual(report['streams'][0]['missing_rows'],0)
+        self.assertEqual(len(self.messages()),1)
+
+    def test_new_message_feed_includes_archived_clients_and_native_crm_replies(self):
+        self.db.execute(text("UPDATE alfa_customers SET status='archive' WHERE workspace_id=:w"),{'w':self.workspace})
+        self.project(self.row('1'))
+        conversation=self.conversation()['id']
+        self.assertTrue(self.reader.history(None,self.workspace,conversation)['conversation']['needs_reply'])
+        self.project(self.row('2',direction='out',at=self.at+timedelta(seconds=10)))
+        self.assertFalse(self.reader.history(None,self.workspace,conversation)['conversation']['needs_reply'])
+        self.assertEqual(len(self.messages()),2)
+
+    def test_counter_cache_avoids_recount_until_new_committed_data(self):
+        self.project(self.row('1'))
+        self.service.progress(None,self.workspace)
+        with patch.object(self.db,'execute',wraps=self.db.execute) as execute:
+            self.service.progress(None,self.workspace)
+        expensive=[str(c.args[0]) for c in execute.call_args_list if 'count(DISTINCT' in str(c.args[0])]
+        self.assertEqual(expensive,[])
+
+    def active_review_worker(self, handler):
+        from contextlib import nullcontext
+        from center_messenger.active_review import ActiveReviewWorker
+        client=SimpleNamespace(call=Mock(side_effect=handler))
+        vault=Mock();vault.open.return_value={};vault.seal.return_value='test'
+        connections=SimpleNamespace(accounts=self.accounts,vault=vault,
+            _row=lambda db,w:db.execute(text('SELECT * FROM alfa_settings WHERE workspace_id=:w'),{'w':w}).mappings().one(),
+            _host_gate=lambda origin:nullcontext(None),client_factory=lambda *args:client)
+        return ActiveReviewWorker(connections),client
+
+    def test_active_review_does_not_visit_archived_cards_and_waits_six_hours(self):
+        from center_messenger import active_review
+        self.add_customer(uuid4(),1,8)
+        self.db.execute(text("UPDATE alfa_customers SET status='archive' WHERE workspace_id=:w AND external_id=8"),{'w':self.workspace})
+        def handler(path,body):
+            self.assertEqual(body['is_study'],1);self.assertEqual(body['removed'],0)
+            rows=[{'id':7,'name':'Child updated','legal_name':'Parent','is_study':1,'phone':['79000000000']}] if '/1/' in path else []
+            return {'items':rows,'total':len(rows),'page':body['page']}
+        worker,client=self.active_review_worker(handler)
+        for _ in range(4):self.assertTrue(worker.step(self.workspace))
+        result=active_review.status(self.db,self.workspace,self.crm)
+        self.assertEqual(result['state'],'complete')
+        self.assertEqual(result['processed'],1)
+        self.assertEqual(client.call.call_count,2)
+        self.assertFalse(worker.step(self.workspace))
+        self.assertEqual(client.call.call_count,2)
+        self.assertEqual(self.db.execute(text('SELECT name FROM alfa_customers WHERE workspace_id=:w AND external_id=7'),{'w':self.workspace}).scalar(),'Child updated')
+        self.assertEqual(len(self.messages()),0)
+
+    def test_active_review_handles_small_source_pages_without_skipping_clients(self):
+        from center_messenger import active_review
+        def handler(path,body):
+            rows=[{'id':i,'name':f'Child {i}','legal_name':'Parent','is_study':1} for i in ([7,9] if body['page']==0 else [10])] if '/1/' in path else []
+            return {'items':rows,'total':3 if '/1/' in path else 0,'page':body['page']}
+        worker,client=self.active_review_worker(handler)
+        for _ in range(5):self.assertTrue(worker.step(self.workspace))
+        result=active_review.status(self.db,self.workspace,self.crm)
+        self.assertEqual(result['state'],'complete');self.assertEqual(result['processed'],3)
+        self.assertEqual(len([c for c in client.call.call_args_list if '/1/' in c.args[0]]),2)
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_customers WHERE workspace_id=:w AND branch_id=1'),{'w':self.workspace}).scalar(),3)
+
+    def test_only_newly_archived_transition_is_checked_once(self):
+        from center_messenger import active_review
+        def handler(path,body):
+            rows=[{'id':7,'name':'Child','is_study':1}] if body.get('id')==7 and body['removed']==2 else []
+            return {'items':rows,'total':len(rows),'page':body['page']}
+        worker,client=self.active_review_worker(handler)
+        for _ in range(5):worker.step(self.workspace)
+        result=active_review.status(self.db,self.workspace,self.crm)
+        self.assertEqual(result['state'],'complete')
+        self.assertEqual(self.db.execute(text('SELECT status FROM alfa_customers WHERE workspace_id=:w AND external_id=7'),{'w':self.workspace}).scalar(),'archive')
+        active_review.request(self.db,self.workspace,self.crm)
+        client.call.reset_mock()
+        for _ in range(4):worker.step(self.workspace)
+        self.assertTrue(all('id' not in call.args[1] for call in client.call.call_args_list))
+
+    def test_active_review_rejects_wrong_customer_type_without_publishing(self):
+        from center_messenger import active_review
+        worker,client=self.active_review_worker(lambda p,b:{'items':[{'id':99,'name':'Wrong','is_study':0}],'total':1})
+        self.assertFalse(worker.step(self.workspace))
+        self.assertEqual(active_review.status(self.db,self.workspace,self.crm)['state'],'error')
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_customers WHERE workspace_id=:w AND external_id=99'),{'w':self.workspace}).scalar(),0)
+
+    def test_missing_active_id_stays_visible_without_repeated_archive_probes(self):
+        from center_messenger import active_review
+        worker,client=self.active_review_worker(lambda p,b:{'items':[],'total':0})
+        for _ in range(5):worker.step(self.workspace)
+        self.assertEqual(active_review.status(self.db,self.workspace,self.crm)['unresolved'],1)
+        active_review.request(self.db,self.workspace,self.crm);client.call.reset_mock()
+        for _ in range(4):worker.step(self.workspace)
+        self.assertEqual(active_review.status(self.db,self.workspace,self.crm)['unresolved'],1)
+        self.assertTrue(all('id' not in call.args[1] for call in client.call.call_args_list))
+
+    def test_completed_identity_repair_is_not_restarted_by_a_new_active_id(self):
+        self.project(self.row('1'))
+        cursor={}
+        repair_batch(self.service,self.db,self.workspace,self.channel,cursor)
+        cursor['sync_policy']=1
+        previous=dict(cursor['client_repair'])
+        self.add_customer(uuid4(),1,99)
+        self.assertFalse(repair_batch(self.service,self.db,self.workspace,self.channel,cursor))
+        self.assertEqual(cursor['client_repair'],previous)
+
+    def test_incremental_policy_stops_automatic_archive_directory_import_but_allows_explicit_run(self):
+        from contextlib import nullcontext
+        from center_messenger.alfa_sync import AlfaSync, WorkCancelled
+        connections=SimpleNamespace(accounts=self.accounts,_row=Mock(return_value={}))
+        sync=AlfaSync(connections)
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:p AS jsonb) WHERE workspace_id=:w"),{'w':self.workspace,'p':json.dumps({'sync_policy':1})})
+        control={'running_id':None,'published_id':self.snapshot['run'],'connection_id':self.crm}
+        with patch.object(sync,'_work_transaction',side_effect=lambda *a:nullcontext((self.db,control))), patch.object(sync,'_job',side_effect=WorkCancelled) as full_job:
+            sync._step(self.workspace,uuid4())
+            full_job.assert_not_called()
+            control['running_id']=uuid4()
+            with self.assertRaises(WorkCancelled):sync._step(self.workspace,uuid4())
+            full_job.assert_called_once()
 
 
 if __name__ == "__main__":

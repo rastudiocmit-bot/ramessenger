@@ -2,6 +2,7 @@
 
 import re
 from uuid import UUID
+from typing import Literal
 
 from fastapi import APIRouter, Request
 from pydantic import EmailStr, Field, SecretStr, field_validator
@@ -61,10 +62,21 @@ def verify(workspace_id: UUID, model: OTPInput, request: Request):
     )
 
 
+class SyncInput(InputModel):
+    branch_id: int | None = Field(default=None, gt=0, le=2147483647)
+    direction: Literal["receive", "sent"] | None = None
+    review_active: bool = False
+
+
 @router.post("/sync", status_code=202)
-def sync(workspace_id: UUID, request: Request):
+def sync(workspace_id: UUID, request: Request, model: SyncInput | None = None):
     service(request)
-    return request.app.state.alfa_max.sync(identity(request, mutation=True), workspace_id)
+    model = model or SyncInput()
+    if (model.branch_id is None) != (model.direction is None) or (model.review_active and model.branch_id is not None):
+        from center_messenger.auth_security import AuthError
+        raise AuthError(422, "Укажите один журнал или проверку действующих.")
+    return request.app.state.alfa_max.sync(identity(request, mutation=True), workspace_id,
+        branch=model.branch_id, direction=model.direction, review_active=model.review_active)
 
 
 @router.get("/sync-progress")

@@ -1221,3 +1221,19 @@ body:has(#cabinet[hidden]){overflow:auto}
 .field-clear:hover{color:var(--ink);background:var(--surface-2)}
 .field-clear svg{width:12px;height:12px;stroke-width:2.6}
 .field-clear[hidden]{display:none}
+
+/* Independent sync processes and personal name presentation. */
+.sync-service-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:18px}
+.sync-service-card{padding:13px;border:1px solid var(--line);border-radius:12px;min-width:0;background:var(--surface)}
+.sync-service-card>span,.sync-service-card>strong,.sync-service-card>small{display:block;overflow-wrap:anywhere}
+.sync-service-card>span{font-size:11px;color:var(--muted);margin-bottom:7px}
+.sync-service-card>strong{font-size:13px;line-height:1.45;color:var(--ink)}
+.sync-service-card>small{font-size:10px;margin-top:6px;color:var(--muted)}
+.sync-warning>p{margin:0}.sync-warning>p+p{margin-top:9px;padding-top:9px;border-top:1px solid var(--line)}
+.sync-streams .btn{margin-top:8px;min-height:36px;height:auto;font-size:11px;padding:7px 11px}
+.chat-name-example{display:block;padding:9px 11px;margin-top:8px;background:var(--surface-2);border:1px solid var(--line);border-radius:9px}
+.chat-name-example>strong{color:var(--ink);font-weight:650}.chat-name-example>small{color:var(--primary-ink)}
+@media(max-width:1000px){.sync-service-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:420px){.sync-service-grid{grid-template-columns:1fr}.sync-service-card{padding:11px}.sync-service-card>span{margin-bottom:4px}}
+
+.chat-name-example,#chat-name-save-status{grid-column:1/-1}

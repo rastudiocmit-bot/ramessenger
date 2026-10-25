@@ -152,11 +152,13 @@ def reconcile_messages(service, db, workspace, channel, conversation):
             "hidden_duplicates": len(hidden), "mirrors_updated": mirrors_updated}
 
 
-def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None):
+def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None, only_contacts=None):
     snapshot = DirectoryReader._published(db, workspace)
     if not snapshot:
         return False
-    previous = cursor.get("client_repair", {})
+    previous = cursor.get("client_repair", {}) if only_contacts is None else {}
+    if only_contacts is None and cursor.get("sync_policy") == 1 and previous.get("version") == REPAIR_VERSION and previous.get("complete"):
+        return False
     run = str(snapshot["run"])
     # A refreshed CRM snapshot gets a new run UUID even when all identities
     # are unchanged. Resume by identity evidence so refreshes cannot starve
@@ -191,9 +193,10 @@ def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None):
             return True
     contacts = db.execute(text(
         "SELECT DISTINCT contact_id FROM alfa_customers WHERE workspace_id=:w AND run_id=:r "
-        "AND contact_id IS NOT NULL AND (CAST(:after AS uuid) IS NULL OR contact_id>CAST(:after AS uuid)) "
+        "AND contact_id IS NOT NULL " + ("AND contact_id=ANY(CAST(:only AS uuid[])) " if only_contacts is not None else "") +
+        "AND (CAST(:after AS uuid) IS NULL OR contact_id>CAST(:after AS uuid)) "
         "ORDER BY contact_id LIMIT :limit"
-    ), {"w": workspace, "r": snapshot["run"], "after": after, "limit": REPAIR_BATCH + 1}).scalars().all()
+    ), {"w": workspace, "r": snapshot["run"], "after": after, "limit": REPAIR_BATCH + 1, "only": only_contacts}).scalars().all()
     more = len(contacts) > REPAIR_BATCH
     contacts = contacts[:REPAIR_BATCH]
     if contacts:
@@ -236,7 +239,7 @@ def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None):
                           {"customer_id": str(c["external_id"]), "name": c["name"],
                            "branch_id": str(c["branch_id"]), "branch_name": c["branch_name"]} for c in cards]}
             detail = {"phase": "repair", "client": client, "position": processed + index + 1,
-                      "position_total": mapping["total"], "record_id": None, "operation": "check_client"}
+                      "position_total": len(contacts) if only_contacts is not None else mapping["total"], "record_id": None, "operation": "check_client"}
             if on_progress:
                 on_progress(detail)
             if contact not in active_contacts:

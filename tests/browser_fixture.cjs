@@ -4,6 +4,7 @@ const path = require('node:path');
 const web = path.join(__dirname, '../app/backend/src/center_messenger/web');
 async function fixture(context, role = 'owner', sections = ['overview', 'messages', 'security'], options = {}) {
   const calls = [], mutations = [], errors = [], unexpected = [];
+  const preferences = { name_order: "parent_first" };
   // Voice input and AI agents (Connections → service settings). Off in the chat unless asked.
   const ai = { settings: { configured: Boolean(options.voice), folder_id: options.voice ? 'b1gexamplefolder0000' : '', key_hint: options.voice ? 'k3y9' : '',
       voice_enabled: Boolean(options.voice), monthly_limit_rub: null, status: options.voice ? 'active' : 'not_configured', error: null, verified_at: null,
@@ -59,8 +60,9 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       workspaces: [{ id: 'test', name: 'Развивайся', role, timezone: 'Europe/Moscow', sections }] };
     else if (p === '/api/auth/sessions') payload = { sessions: [{ id: 'session', current: true, device_label: 'Chrome · Linux', last_seen_at: '2026-10-24T11:00:00Z' }] };
     else if (p === '/api/auth/logout') payload = {};
-    else if (p.endsWith('/chats/context')) payload = { channels, branches, can_write: role !== 'observer', send_attachments: false,
+    else if (p.endsWith('/chats/context')) payload = { preferences, channels, branches, can_write: role !== 'observer', send_attachments: false,
       voice_input: Boolean(options.voice) && role !== 'observer' };
+    else if (p.endsWith('/chats/preferences')) { Object.assign(preferences, entry.body); payload=preferences; }
     else if (p.endsWith('/ai/settings')) {
       if (method === 'PUT') Object.assign(ai.settings, { folder_id: entry.body.folder_id, voice_enabled: entry.body.voice_enabled, monthly_limit_rub: entry.body.monthly_limit_rub,
         key_hint: entry.body.clear_key ? '' : entry.body.api_key ? entry.body.api_key.slice(-4) : ai.settings.key_hint, status: 'not_configured' },
@@ -121,6 +123,6 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     else { unexpected.push(method + ' ' + p); return route.fulfill({ status: 501, contentType: 'application/json', body: '{"detail":"Unmocked request"}' }); }
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) });
   });
-  return { calls, mutations, errors, unexpected, conversations, messages, ai };
+  return { calls, mutations, errors, unexpected, conversations, messages, ai, preferences };
 }
 module.exports = { fixture };

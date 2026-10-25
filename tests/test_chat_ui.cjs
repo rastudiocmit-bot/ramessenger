@@ -84,6 +84,30 @@ test("enter keeps all channels selected", async t => {
   assert.ok(!ui.calls.find(url => url.pathname.endsWith("/chats")).searchParams.has("connection"));
 });
 
+test("child-first presentation persists through context and keeps identities, counters and drafts", async t=>{
+  let preference='parent_first';const parent='Мария Иванова',child='Анна Иванова';
+  const ui=setup(t,(url,options)=>{
+    if(url.pathname.endsWith('/chats/context'))return {channels:[],branches:[],preferences:{name_order:preference}};
+    if(url.pathname.endsWith('/preferences')){preference=options.data.name_order;return {name_order:preference};}
+  },{conversations:[{...conversation(1),name:parent,parent_name:parent,students:[child],children:[{id:'child-1',name:child}]}]});
+  await ui.app.enter();ui.$('#chat-input').value='Черновик';
+  ui.$('#chat-name-order').value='child_first';ui.$('#chat-name-order').dispatchEvent(new ui.window.Event('change'));await flush();
+  assert.equal(ui.$('.row-name').textContent,child);assert.equal(ui.$('.row-kids').textContent,parent);
+  assert.equal(ui.$('.avatar-count').textContent,'1');assert.equal(ui.$('.chat-row').dataset.id,identifier(1));
+  assert.equal(ui.$('#chat-input').value,'Черновик');
+  await ui.app.enter();assert.equal(ui.$('.row-name').textContent,child);
+});
+
+test("name presentation has deterministic multiple children and an honest missing-parent fallback", async t=>{
+  const ui=setup(t,url=>url.pathname.endsWith('/chats/context')?{channels:[],branches:[],preferences:{name_order:'child_first'}}:undefined,
+    {conversations:[{...conversation(1),parent_name:'Родитель',children:[{id:'2',name:'Яна'},{id:'1',name:'Анна'}]},
+      {...conversation(2),name:'Известное имя',parent_name:null,children:[{id:'3',name:'Ирина'}]}]});
+  await ui.app.enter();const rows=[...ui.window.document.querySelectorAll('.chat-row')];
+  assert.equal(rows[0].querySelector('.row-name').textContent,'Анна · Яна');
+  assert.equal(rows[1].querySelector('.row-name').textContent,'Ирина');
+  assert.equal(rows[1].querySelector('.row-kids').textContent,'Родитель не указан');
+});
+
 test("dialog list keeps unread first and newest first in each group after a live update", async t => {
   let rows = [
     {...conversation(1), unread:false, unread_count:0, last_message_at:'2026-10-24T12:00:00Z'},
