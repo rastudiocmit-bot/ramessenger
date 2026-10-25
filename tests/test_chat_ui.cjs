@@ -74,7 +74,7 @@ function setup(t, handler, { conversations = [conversation(1)], autoFrames = fal
     return entry[1].callback();
   };
   const ids = () => [...$("#chat-history").querySelectorAll(".chat-bubble")].map(node => node.dataset.id);
-  return { app, $, window, calls, poll, ids };
+  return { app, $, window, calls, poll, ids, timers, state };
 }
 
 test("enter keeps all channels selected", async t => {
@@ -662,8 +662,10 @@ test("family uses unique server subscription and paid totals while retaining bot
   assert.equal(ui.$('.family-stats').children[1].querySelector('strong').textContent,'9 занятий');
   assert.equal(ui.$('.family-stats').children[2].querySelector('strong').textContent,'1');
   assert.equal(ui.$('#chat-details-student').querySelectorAll('.family-item-value').length,1);
-  assert.match(ui.$('.family-item-main small').textContent,/Центральный · Северный/);
+  assert.equal(ui.$('.family-item-main small').textContent,'до 04.07.2027');
   assert.match(ui.$('#chat-details-student').textContent,/Филиалы/);
+  const branches=[...ui.$('#chat-details-student').querySelectorAll('.family-part')].find(part=>part.querySelector('.family-label').textContent==='Филиалы');
+  assert.doesNotMatch(branches.textContent,/Клиент|Лид|Архивный/);
   assert.doesNotMatch(ui.$('#chat-details-student').textContent,/оплачено 9/);
 });
 
@@ -733,6 +735,129 @@ function dockFamily(ui) {
   dialog.show=dialog.showModal=function(){this.open=true;};
   dialog.close=function(){this.open=false;this.dispatchEvent(new ui.window.Event('close'));};
 }
+
+function enableBulkDialog(ui) {
+  const dialog=ui.$('#chat-bulk-dialog');
+  dialog.showModal=function(){this.open=true;};
+  dialog.close=function(){this.open=false;this.dispatchEvent(new ui.window.Event('close'));};
+  return dialog;
+}
+function handledPointer(ui,type,x=20,y=20) {
+  const event=new ui.window.MouseEvent(type,{bubbles:true,button:0,clientX:x,clientY:y});
+  Object.defineProperties(event,{pointerId:{value:1},isPrimary:{value:true}});
+  ui.$('#chat-handled').dispatchEvent(event);
+}
+async function holdHandled(ui) {
+  handledPointer(ui,'pointerdown');
+  const timer=[...ui.timers.entries()].find(([,timer])=>timer.delay===700);
+  assert.ok(timer,'a long press has an explicit hold delay');
+  ui.timers.delete(timer[0]);timer[1].callback();await flush();
+}
+const bulkPreview=(n=1)=>({operation_id:identifier(800+n),client_count:71,conversation_count:72,message_count:93,
+  expires_at:new Date(Date.now()+600000).toISOString()});
+
+test('long press prepares all unread chats and cancellation never marks the current chat or the batch',async t=>{
+  const posts=[];
+  const ui=setup(t,(url,options)=>{
+    if(options?.method==='POST'){posts.push(url.pathname);if(url.pathname.endsWith('/handled/prepare'))return bulkPreview();}
+  });
+  const dialog=enableBulkDialog(ui);await ui.app.enter();
+  await holdHandled(ui);
+  assert.equal(dialog.open,true);
+  assert.match(ui.$('#chat-bulk-summary').textContent,/Клиентов: 71.*Диалогов: 72.*Сообщений без ответа: 93/);
+  assert.equal(ui.$('#chat-bulk-confirm').disabled,false);
+  handledPointer(ui,'pointerup');
+  ui.$('#chat-handled').dispatchEvent(new ui.window.MouseEvent('click',{bubbles:true,detail:1}));
+  ui.$('#chat-bulk-cancel').click();await flush();
+  assert.equal(dialog.open,false);
+  assert.deepEqual(posts,['/workspaces/test/chats/handled/prepare']);
+});
+
+test('a short handled click still only processes the current conversation',async t=>{
+  const posts=[];
+  const ui=setup(t,(url,options)=>{
+    if(options?.method==='POST'){posts.push(url.pathname);if(url.pathname.endsWith('/handled'))return {conversation:{...conversation(1),unread:false,unread_count:0}};}
+  });
+  enableBulkDialog(ui);await ui.app.enter();
+  handledPointer(ui,'pointerdown');handledPointer(ui,'pointerup');
+  ui.$('#chat-handled').dispatchEvent(new ui.window.MouseEvent('click',{bubbles:true,detail:1}));await flush();
+  assert.deepEqual(posts,[`/workspaces/test/chats/${identifier(1)}/handled`]);
+});
+
+test('moving or cancelling a press does not process a conversation',async t=>{
+  const ui=setup(t);enableBulkDialog(ui);await ui.app.enter();
+  handledPointer(ui,'pointerdown');handledPointer(ui,'pointermove',40,40);handledPointer(ui,'pointerup');
+  ui.$('#chat-handled').dispatchEvent(new ui.window.MouseEvent('click',{bubbles:true,detail:1}));await flush();
+  assert.equal([...ui.timers.values()].some(timer=>timer.delay===700),false);
+  assert.equal(ui.calls.filter(url=>url.pathname.includes('/handled')).length,0);
+  handledPointer(ui,'pointerdown');handledPointer(ui,'pointercancel');
+  ui.$('#chat-handled').dispatchEvent(new ui.window.MouseEvent('click',{bubbles:true,detail:1}));await flush();
+  assert.equal(ui.calls.filter(url=>url.pathname.includes('/handled')).length,0);
+});
+
+test('bulk confirmation requires its own button and a lost response retries the same frozen operation',async t=>{
+  const bodies=[];let attempts=0,prepares=0;
+  const ui=setup(t,(url,options)=>{
+    if(url.pathname.endsWith('/handled/prepare')){prepares++;return bulkPreview();}
+    if(url.pathname.endsWith('/handled/confirm')){
+      bodies.push(JSON.parse(JSON.stringify(options.data)));
+      if(++attempts===1)throw Object.assign(new Error('Ответ временно недоступен'),{status:503});
+      return {processed:72,already_handled:0,skipped:0,messages:93};
+    }
+  });
+  const dialog=enableBulkDialog(ui);await ui.app.enter();await holdHandled(ui);
+  assert.equal(attempts,0);
+  assert.equal(ui.window.document.activeElement,ui.$('#chat-bulk-cancel'));
+  ui.$('#chat-bulk-confirm').click();await flush();
+  assert.equal(dialog.open,true);
+  assert.match(ui.$('#chat-bulk-error').textContent,/временно недоступен/);
+  ui.$('#chat-bulk-confirm').click();await flush();
+  assert.equal(dialog.open,false);
+  assert.equal(prepares,1);
+  assert.deepEqual(bodies,[{operation_id:identifier(801),confirmed:true},{operation_id:identifier(801),confirmed:true}]);
+});
+
+test('Shift Enter opens the same confirmation and an expired operation needs a refreshed list',async t=>{
+  let prepares=0;
+  const ui=setup(t,(url,options)=>{
+    if(url.pathname.endsWith('/handled/prepare'))return bulkPreview(++prepares);
+    if(url.pathname.endsWith('/handled/confirm'))throw Object.assign(new Error('Срок подтверждения истёк'),{status:409});
+  });
+  enableBulkDialog(ui);await ui.app.enter();
+  ui.$('#chat-handled').dispatchEvent(new ui.window.KeyboardEvent('keydown',{key:'Enter',shiftKey:true,bubbles:true}));await flush();
+  ui.$('#chat-bulk-confirm').click();await flush();
+  assert.equal(ui.$('#chat-bulk-confirm').disabled,true);
+  assert.equal(ui.$('#chat-bulk-retry').hidden,false);
+  ui.$('#chat-bulk-retry').click();await flush();
+  assert.equal(prepares,2);
+  assert.equal(ui.$('#chat-bulk-confirm').disabled,false);
+});
+
+test('reset discards a delayed bulk preview and restores controls',async t=>{
+  let release;
+  const ui=setup(t,url=>{if(url.pathname.endsWith('/handled/prepare'))return new Promise(resolve=>{release=resolve;});});
+  const dialog=enableBulkDialog(ui);await ui.app.enter();await holdHandled(ui);
+  ui.app.reset();release(bulkPreview());await flush();
+  assert.equal(dialog.open,false);
+  assert.equal(ui.$('#chat-bulk-cancel').disabled,false);
+  assert.equal(ui.$('#chat-bulk-close').disabled,false);
+  assert.equal(ui.$('#chat-bulk-confirm').disabled,true);
+});
+
+test('a queued native close event cannot erase a newly opened bulk confirmation',async t=>{
+  let confirms=0;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/handled/prepare'))return bulkPreview();
+    if(url.pathname.endsWith('/handled/confirm')){confirms++;return {processed:72,already_handled:0,skipped:0,messages:93};}
+  });
+  const dialog=enableBulkDialog(ui),closed=[];
+  dialog.close=function(){this.open=false;closed.push(()=>this.dispatchEvent(new ui.window.Event('close')));};
+  await ui.app.enter();await holdHandled(ui);ui.$('#chat-bulk-cancel').click();
+  ui.$('#chat-handled').dispatchEvent(new ui.window.KeyboardEvent('keydown',{key:'Enter',shiftKey:true,bubbles:true}));await flush();
+  closed.shift()();
+  assert.equal(dialog.open,true);ui.$('#chat-bulk-confirm').click();await flush();
+  assert.equal(confirms,1);assert.equal(dialog.open,false);
+});
 
 test('pinned read client defers full card until explicit open and clears the previous family', async t=>{
   const rows=[{...conversation(1),contact_id:identifier(91)}, {...conversation(2),unread:false,unread_count:0,contact_id:identifier(92)}];

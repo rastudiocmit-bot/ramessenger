@@ -28,7 +28,7 @@ from center_messenger.alfa_max import AlfaMaxConnections, AlfaMaxWorker
 from center_messenger.alfa_history import PROJECTION_VERSION, RECHECK_INTERVAL, advance_history, history_coverage, history_pending, plan_history, retry_history, verify_saved_pages, next_history_delay
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser, _message_time, parse_history_html
 from bs4 import BeautifulSoup
-from center_messenger.chat_api import ChatReader, SendInput, HandleInput
+from center_messenger.chat_api import ChatReader, SendInput, HandleInput, BulkHandleInput
 from center_messenger.chat_store import changed, project_event, refresh_unread
 from center_messenger.messaging import Messaging
 from center_messenger.crm_api import DirectoryReader
@@ -388,6 +388,122 @@ class MessageSyncTests(unittest.TestCase):
 
     def checkpoint(self, conversation):
         return HandleInput(seen_checkpoint=self.reader.history(None, self.workspace, conversation)["conversation"]["seen_checkpoint"])
+
+    def prepare_bulk(self):
+        return self.reader.prepare_bulk_handled(SimpleNamespace(user_id=self.user),self.workspace)
+
+    def confirm_bulk(self, preview, *, actor=None, workspace=None):
+        return self.reader.confirm_bulk_handled(actor or SimpleNamespace(user_id=self.user),workspace or self.workspace,
+            BulkHandleInput(operation_id=preview['operation_id'],confirmed=True))
+
+    def test_bulk_preview_captures_all_pages_and_changes_no_message_status(self):
+        rows=[self.row()]
+        for customer in range(8,47):
+            self.add_customer(uuid4(),1,customer)
+            rows.append(self.row(str(customer),customer=customer))
+        self.project(*rows)
+        self.assertEqual(len(self.reader.listing(None,self.workspace)['conversations']),30)
+        preview=self.prepare_bulk()
+        self.assertEqual(preview['conversation_count'],40)
+        self.assertEqual(preview['client_count'],40)
+        self.assertEqual(preview['message_count'],40)
+        self.assertTrue(all(m['payload'].get('handled_receipt') is None for m in self.messages()))
+
+    def test_bulk_confirmation_preserves_new_incoming_new_chats_and_late_history(self):
+        self.add_customer(uuid4(),1,8)
+        self.project(self.row('1',body='Known one'),self.row('2',customer=8,body='Known two'))
+        preview=self.prepare_bulk()
+        self.add_customer(uuid4(),1,9)
+        self.project(self.row('3',body='New incoming',at=self.at+timedelta(minutes=1)),
+                     self.row('4',customer=9,body='New chat'),
+                     self.row('5',body='Late history',at=self.at-timedelta(days=100)))
+        result=self.confirm_bulk(preview)
+        self.assertEqual(result['processed'],2)
+        self.assertEqual(len(self.messages()),5)
+        for message in self.messages():
+            self.assertEqual(message['payload'].get('handled_receipt') is not None,message['text'].startswith('Known'))
+        self.assertEqual(self.reader.listing(None,self.workspace)['unread'],2)
+
+    def test_bulk_confirmation_replay_never_marks_later_incoming(self):
+        self.project(self.row())
+        preview=self.prepare_bulk()
+        first=self.confirm_bulk(preview)
+        self.project(self.row('2',body='Keep unread',at=self.at+timedelta(minutes=1)))
+        latest=self.db.execute(text('SELECT max(seq) FROM message_changes WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one()
+        self.assertEqual(self.confirm_bulk(preview),first)
+        self.assertEqual(self.db.execute(text('SELECT max(seq) FROM message_changes WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one(),latest)
+        self.assertIsNone(next(m for m in self.messages() if m['text']=='Keep unread')['payload'].get('handled_receipt'))
+        self.assertTrue(self.reader.history(None,self.workspace,self.conversation()['id'])['conversation']['unread'])
+
+    def test_bulk_snapshot_is_bound_to_actor_workspace_and_current_write_permission(self):
+        self.project(self.row())
+        preview=self.prepare_bulk()
+        for kwargs in ({'actor':SimpleNamespace(user_id=uuid4())},{'workspace':uuid4()}):
+            with self.subTest(kwargs=kwargs),self.assertRaises(AuthError) as raised:
+                self.confirm_bulk(preview,**kwargs)
+            self.assertEqual(raised.exception.status,404)
+        self.membership['role']='observer'
+        with self.assertRaises(AuthError) as raised:self.confirm_bulk(preview)
+        self.assertEqual(raised.exception.status,403)
+        with self.assertRaises(AuthError):self.prepare_bulk()
+        self.assertIsNone(self.messages()[0]['payload'].get('handled_receipt'))
+
+    def test_bulk_confirmation_requires_explicit_true_and_rejects_expired_preview(self):
+        from pydantic import ValidationError
+        self.project(self.row())
+        preview=self.prepare_bulk()
+        for body in ({'operation_id':preview['operation_id']},{'operation_id':preview['operation_id'],'confirmed':False}):
+            with self.subTest(body=body),self.assertRaises(ValidationError):BulkHandleInput(**body)
+        self.db.execute(text("UPDATE outbox_events SET payload=jsonb_set(payload,'{expires_at}',to_jsonb(CAST(:at AS text))) WHERE id=:id"),
+            {'id':preview['operation_id'],'at':'2000-01-01T00:00:00+00:00'})
+        with self.assertRaises(AuthError) as raised:self.confirm_bulk(preview)
+        self.assertEqual(raised.exception.status,409)
+        self.assertIsNone(self.messages()[0]['payload'].get('handled_receipt'))
+
+    def test_bulk_skips_a_chat_relinked_after_preview(self):
+        self.project(self.row())
+        preview=self.prepare_bulk()
+        other=uuid4()
+        self.db.execute(text("INSERT INTO contacts(workspace_id,id,display_name) VALUES(:w,:c,'Other')"),{'w':self.workspace,'c':other})
+        self.db.execute(text('UPDATE conversations SET contact_id=:c WHERE workspace_id=:w'),{'w':self.workspace,'c':other})
+        result=self.confirm_bulk(preview)
+        self.assertEqual(result['skipped'],1)
+        self.assertEqual(result['processed'],0)
+        self.assertIsNone(self.messages()[0]['payload'].get('handled_receipt'))
+
+    def test_bulk_id_snapshot_does_not_cover_a_late_commit_in_an_earlier_sequence_gap(self):
+        self.project(self.row('1',direction='out',actor='automation',body='System'),
+                     self.row('2',body='Known',at=self.at+timedelta(minutes=5)))
+        system=next(m for m in self.messages() if m['text']=='System')
+        gap=self.db.execute(text('SELECT min(seq) FROM message_changes WHERE message_id=:m'),{'m':system['id']}).scalar_one()
+        self.db.execute(text('DELETE FROM message_changes WHERE message_id=:m'),{'m':system['id']})
+        preview=self.prepare_bulk()
+        self.project(self.row('3',body='Late commit',at=self.at+timedelta(minutes=1)))
+        late=next(m for m in self.messages() if m['text']=='Late commit')
+        seq=self.db.execute(text('SELECT min(seq) FROM message_changes WHERE message_id=:m'),{'m':late['id']}).scalar_one()
+        self.db.execute(text('INSERT INTO message_changes(workspace_id,conversation_id,message_id,new_inbound,seq) OVERRIDING SYSTEM VALUE '
+            'SELECT workspace_id,conversation_id,message_id,new_inbound,:gap FROM message_changes WHERE message_id=:m AND seq=:seq'),
+            {'m':late['id'],'gap':gap,'seq':seq})
+        self.db.execute(text('DELETE FROM message_changes WHERE message_id=:m AND seq=:seq'),{'m':late['id'],'seq':seq})
+        self.confirm_bulk(preview)
+        self.assertIsNone(next(m for m in self.messages() if m['text']=='Late commit')['payload'].get('handled_receipt'))
+        self.assertIsNotNone(next(m for m in self.messages() if m['text']=='Known')['payload'].get('handled_receipt'))
+
+    def test_bulk_failure_rolls_back_all_chats_and_keeps_the_same_confirmation_retryable(self):
+        self.add_customer(uuid4(),1,8)
+        self.project(self.row(),self.row('2',customer=8))
+        preview=self.prepare_bulk()
+        apply=self.reader._apply_handled
+        calls=0
+        def fail_second(*args,**kwargs):
+            nonlocal calls
+            calls+=1
+            if calls==2:raise RuntimeError('synthetic database failure')
+            return apply(*args,**kwargs)
+        with patch.object(self.reader,'_apply_handled',side_effect=fail_second),self.assertRaises(RuntimeError):
+            self.confirm_bulk(preview)
+        self.assertTrue(all(m['payload'].get('handled_receipt') is None for m in self.messages()))
+        self.assertEqual(self.confirm_bulk(preview)['processed'],2)
 
     def local_reply(self, conversation, *, seconds=5):
         command, message = uuid4(), uuid4()

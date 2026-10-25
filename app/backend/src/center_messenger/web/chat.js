@@ -19,6 +19,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   let timer, searchTimer, linkTimer, pollBusy = false, actionBusy = false, historyBusy = false, listLoading = false, listRetryRequired = false;
   let notifyTimer, notifySeq = null, notifyEpoch = null, notifyTarget = null, notifyBusy = false;
   let nameOrder = "parent_first", preferenceBusy = false;
+  const bulkDialog = $("#chat-bulk-dialog");
+  let bulkOperation = null, bulkLoading = false, bulkBusy = false, bulkSeq = 0, bulkOpenedSeq = -1;
+  let handledTimer = null, handledPointer = null, handledConsumed = false;
   let lastList = "", linkConversation = null, tokenChannel = null, soundContext = null;
   const cache = new Map();
   const active = () => state.user && state.workspace && state.pane === "messages";
@@ -34,6 +37,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     control.addEventListener("click", handler); return control;
   }
   function reset() {
+    bulkSeq += 1; bulkOperation = null; bulkLoading = false; bulkBusy = false;
+    clearTimeout(handledTimer); handledTimer = null; handledPointer = null; handledConsumed = false;
+    if (bulkDialog.open) bulkDialog.close();
+    $("#chat-bulk-summary").replaceChildren(); notice("", $("#chat-bulk-error"));
+    for (const id of ["#chat-bulk-close", "#chat-bulk-cancel", "#chat-bulk-retry"]) $(id).disabled = false;
+    $("#chat-bulk-confirm").disabled = true; $("#chat-bulk-confirm").textContent = "Подтвердить";
+    show($("#chat-bulk-retry"), false);
     state.voiceInput = false; document.dispatchEvent(new CustomEvent("cm:voice-availability"));
     nameOrder = "parent_first"; preferenceBusy = false;
     state.chatPreferenceRevision = (state.chatPreferenceRevision || 0) + 1;
@@ -466,7 +476,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if ($("#chat-header-avatar")) { const avatar = $("#chat-header-avatar"); avatar.className = `ava ${item?.status || "me"}`; avatar.textContent = name.split(/\s+/).slice(0, 2).map(part => part[0]).join("").toLocaleUpperCase("ru"); }
     show($("#chat-handled"), Boolean(data.meta?.unread) && state.workspace?.role !== "observer");
     show($("#chat-details"), Boolean(data.meta));
-    $("#chat-handled").disabled = actionBusy;
+    $("#chat-handled").disabled = actionBusy || bulkLoading;
+    $("#chat-handled").setAttribute("aria-busy", String(bulkLoading || bulkBusy));
     const unavailable = !data.meta?.can_send || state.workspace?.role === "observer";
     $("#chat-input").disabled = unavailable || Boolean(data.pending);
     if ($("#chat-templates")) $("#chat-templates").disabled = unavailable || Boolean(data.pending);
@@ -905,7 +916,44 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   $(".chat-list-scroll").addEventListener("scroll", maybeLoadMore, { passive: true });
   $("#chat-retry").addEventListener("click", () => { listRetryRequired = false; loadList(true).catch(error => fail(error)); });
-  $("#chat-handled").addEventListener("click", markHandled);
+  const handledButton = $("#chat-handled");
+  handledButton.title = "Обработать диалог. Удерживайте или нажмите Shift+Enter для всех непрочитанных диалогов";
+  handledButton.setAttribute("aria-keyshortcuts", "Shift+Enter");
+  const cancelHandledPress = () => { clearTimeout(handledTimer); handledTimer = null; handledPointer = null; };
+  const abortHandledPress = () => { if (handledPointer) handledConsumed = true; cancelHandledPress(); };
+  handledButton.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || event.isPrimary === false || actionBusy || bulkLoading || bulkDialog.open) return;
+    handledConsumed = false; handledPointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    try { handledButton.setPointerCapture(event.pointerId); } catch (_) {}
+    handledTimer = setTimeout(() => { handledConsumed = true; cancelHandledPress(); openBulkHandled(); }, 700);
+  });
+  handledButton.addEventListener("pointermove", event => {
+    if (handledPointer && event.pointerId === handledPointer.id && Math.hypot(event.clientX-handledPointer.x,event.clientY-handledPointer.y)>12) {
+      handledConsumed = true; cancelHandledPress();
+    }
+  });
+  handledButton.addEventListener("pointerup", cancelHandledPress);
+  for (const type of ["pointercancel", "lostpointercapture"]) handledButton.addEventListener(type, abortHandledPress);
+  handledButton.addEventListener("contextmenu", event => event.preventDefault());
+  handledButton.addEventListener("keydown", event => {
+    if (event.key === "Enter" && event.shiftKey) { event.preventDefault(); handledConsumed = true; openBulkHandled(); }
+  });
+  handledButton.addEventListener("click", event => {
+    if (handledConsumed && event.detail !== 0) { handledConsumed = false; event.preventDefault(); return; }
+    if (!bulkDialog.open && !bulkLoading) markHandled();
+  });
+  const clearBulk = () => { bulkSeq += 1; bulkOperation = null; bulkLoading = false; notice("", $("#chat-bulk-error")); renderHeader(); };
+  const closeBulk = () => { clearBulk(); if (bulkDialog.open) bulkDialog.close(); };
+  const showBulk = seq => { bulkOpenedSeq = seq; if (!bulkDialog.open) bulkDialog.showModal(); };
+  for (const id of ["#chat-bulk-cancel", "#chat-bulk-close"]) $(id).addEventListener("click", () => { if (!bulkBusy) closeBulk(); });
+  bulkDialog.addEventListener("cancel", event => { if (bulkBusy) event.preventDefault(); else clearBulk(); });
+  // Native close events are queued. A previous dialog's event must not clear
+  // the confirmation already being prepared or displayed after reopening.
+  bulkDialog.addEventListener("close", () => { if (!bulkDialog.open && bulkOpenedSeq === bulkSeq) clearBulk(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) abortHandledPress(); });
+  window.addEventListener("blur", abortHandledPress);
+  $("#chat-bulk-retry").addEventListener("click", openBulkHandled);
+  $("#chat-bulk-confirm").addEventListener("click", confirmBulkHandled);
   // The name plate always opens the card; the info button opens and closes it.
   document.addEventListener("cm:chat-details-open", () => {
     if (detailsDialog.open && !detailsDialog.classList.contains("is-closing")) return;
@@ -936,6 +984,63 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       loadList(false, true, true).catch(error => fail(error));
     } catch (error) { if (valid(epoch, gen)) { fail(error); if (error.status === 409) await loadHistory(id).catch(() => {}); } }
     finally { if (valid(epoch, gen)) { actionBusy = false; renderHeader(); } }
+  }
+
+  async function openBulkHandled() {
+    if (!active() || actionBusy || bulkBusy || bulkLoading || state.workspace.role === "observer") return;
+    const epoch = state.epoch, gen = generation, seq = ++bulkSeq;
+    bulkLoading = true; bulkOperation = null; renderHeader();
+    $("#chat-bulk-confirm").disabled = true; $("#chat-bulk-summary").replaceChildren();
+    notice("", $("#chat-bulk-error")); show($("#chat-bulk-retry"), false);
+    try {
+      const result = await api(`${chatPath()}/handled/prepare`, { method: "POST" });
+      if (!valid(epoch, gen) || seq !== bulkSeq || !active()) return;
+      bulkOperation = result;
+      for (const [label, value] of [["Клиентов", result.client_count], ["Диалогов", result.conversation_count], ["Сообщений без ответа", result.message_count]])
+        $("#chat-bulk-summary").append(node("span", `${label}: ${Number(value).toLocaleString("ru-RU")}`));
+      $("#chat-bulk-confirm").disabled = !result.conversation_count;
+      if (!result.conversation_count) $("#chat-bulk-summary").append(node("span", "Все диалоги уже обработаны."));
+      // The server snapshot precedes opening: incoming after this dialog opens
+      // can never be included by the confirmation button.
+      showBulk(seq);
+      $("#chat-bulk-cancel").focus();
+    } catch (error) {
+      if (valid(epoch, gen) && seq === bulkSeq) {
+        if (error.status === 403) { closeBulk(); fail(error); }
+        else { notice(error.message, $("#chat-bulk-error")); show($("#chat-bulk-retry")); showBulk(seq); }
+      }
+    } finally { if (valid(epoch, gen) && seq === bulkSeq) { bulkLoading = false; renderHeader(); } }
+  }
+
+  async function confirmBulkHandled() {
+    if (!bulkOperation || !bulkDialog.open || bulkBusy || !bulkOperation.conversation_count) return;
+    const epoch = state.epoch, gen = generation, seq = bulkSeq, operation = bulkOperation;
+    const controls = ["#chat-bulk-confirm", "#chat-bulk-cancel", "#chat-bulk-close", "#chat-bulk-retry"];
+    bulkBusy = true; actionBusy = true; controls.forEach(id => { $(id).disabled = true; }); renderHeader();
+    notice("", $("#chat-bulk-error")); $("#chat-bulk-confirm").textContent = "Обрабатываем…";
+    try {
+      const result = await api(`${chatPath()}/handled/confirm`, { method: "POST", data: { operation_id: operation.operation_id, confirmed: true } });
+      if (!valid(epoch, gen) || seq !== bulkSeq) return;
+      bulkBusy = false; closeBulk();
+      toast(`Обработано диалогов: ${result.processed}.${result.already_handled ? ` Уже обработаны: ${result.already_handled}.` : ""}${result.skipped ? ` Пропущено из-за изменений: ${result.skipped}.` : ""}`);
+      await loadList(false, true, true);
+      if (selected) await loadHistory(selected);
+    } catch (error) {
+      if (valid(epoch, gen) && seq === bulkSeq) {
+        if (error.status === 403) { bulkBusy = false; closeBulk(); fail(error); }
+        else {
+          notice(error.message, $("#chat-bulk-error"));
+          if ([404,409].includes(error.status)) { bulkOperation = null; show($("#chat-bulk-retry")); }
+          // A lost response retries this same operation; it never captures new incoming.
+        }
+      }
+    } finally {
+      if (valid(epoch, gen)) {
+        bulkBusy = false; actionBusy = false; controls.forEach(id => { $(id).disabled = false; });
+        $("#chat-bulk-confirm").textContent = "Подтвердить"; $("#chat-bulk-confirm").disabled = !bulkOperation?.conversation_count;
+        renderHeader();
+      }
+    }
   }
 
   const crmUrl = value => {
@@ -1091,7 +1196,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const paidTotal = student.paid_lesson_count === undefined ? (paid.length ? paid.reduce((sum, card) => sum + Number(card.paid_lesson_count), 0) : null) : student.paid_lesson_count;
     const negative = known(student.balance) && Number(student.balance) < 0;
     detail.append(el("div", "family-stats",
-      stat("Баланс", known(student.balance) ? familyMoney(student.balance) : "—", known(student.balance) ? "Общий баланс в AlfaCRM: базовый счёт и абонементы" : "требует уточнения", negative ? "negative" : ""),
+      stat("Баланс", known(student.balance) ? familyMoney(student.balance) : "—", known(student.balance) ? "Общий баланс в AlfaCRM: базовый счёт и абонементы" : "требует уточнения", negative ? "negative" : known(student.balance) ? "positive" : ""),
       stat("Оплачено", known(paidTotal) ? `${paidTotal} ${plural(paidTotal, "занятие", "занятия", "занятий")}` : "—", known(paidTotal) ? "к посещению" : "нет данных"),
       stat("Абонементы", subscriptionsReady ? String(subs.length) : "—", subscriptionConflict ? "уточните данные" : !subscriptionsReady ? "загружаем" : subs.length ? plural(subs.length, "активный", "активных", "активных") : "нет активных")));
 
@@ -1101,8 +1206,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         const left = item.end ? daysBetween(today, item.end) : null, soon = left !== null && left <= 7;
         const until = item.end ? `до ${familyDate(item.end)}` : "срок не указан";
         rows.append(el("div", `family-item${soon ? " soon" : ""}`,
-          el("div", "family-item-main", node("strong", subName(item)), node("small", `${item.branch_name} · ${until}`)),
-          node("span", item.balance === null || item.balance === undefined ? "—" : familyMoney(item.balance), "family-item-value")));
+          el("div", "family-item-main", node("strong", subName(item)), node("small", until)),
+          node("span", item.balance === null || item.balance === undefined ? "—" : familyMoney(item.balance), `family-item-value${known(item.balance) && Number(item.balance)<0 ? " negative" : ""}`)));
       }
       detail.append(part("Абонементы", rows));
     }
@@ -1128,7 +1233,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const rows = el("div", "family-list");
       for (const card of cards) {
         rows.append(el("div", "family-item",
-          el("div", "family-item-main", node("strong", card.branch_name || "Филиал не указан"), node("small", statuses[card.status] || "Статус не указан")),
+          el("div", "family-item-main", node("strong", card.branch_name || "Филиал не указан")),
           familyLink(card.url, `Открыть карточку в филиале ${card.branch_name} в АльфаCRM`)));
       }
       detail.append(part(cards.length > 1 ? "Филиалы" : "Филиал", rows));

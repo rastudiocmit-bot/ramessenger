@@ -27,9 +27,10 @@
   --card-soft:0 5px 18px rgba(35,59,81,.05);
   --sheet-shadow:0 -14px 60px rgba(26,53,69,.22);
   --ava-ring:rgba(255,255,255,.55);
-  --st-client-bg:#e8f2fa; --st-client-ink:#235f88;
+  --st-client-bg:var(--bubble-out); --st-client-ink:#426d4d;
   --st-lead-bg:#e3f3fb;   --st-lead-ink:#3a91b9;
-  --st-archive-bg:#edf2fa; --st-archive-ink:#426d97;
+  --st-archive-bg:#f9ecee; --st-archive-ink:#a34e5d;
+  --debt-bg:#f9ecee; --debt-ink:#a34e5d;
   --chip-on:#2574ad;
   --st-unlinked-bg:#fff0d6; --st-unlinked-ink:#97631a;
   --ui:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
@@ -60,9 +61,10 @@
   --card-soft:0 5px 18px rgba(0,0,0,.3);
   --sheet-shadow:0 -14px 60px rgba(0,0,0,.6);
   --ava-ring:rgba(255,255,255,.08);
-  --st-client-bg:#15283a; --st-client-ink:#8fc3e8;
+  --st-client-bg:var(--bubble-out); --st-client-ink:#a2c8aa;
   --st-lead-bg:#122a36;   --st-lead-ink:#73bada;
-  --st-archive-bg:#1b293b; --st-archive-ink:#9abbe0;
+  --st-archive-bg:#35282d; --st-archive-ink:#d8a9b2;
+  --debt-bg:#35282d; --debt-ink:#d8a9b2;
   --chip-on:#3a8ec9;
   --st-unlinked-bg:#312411; --st-unlinked-ink:#dfae63;
   color-scheme:dark;
@@ -949,7 +951,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-note.next{background:var(--bubble-out);color:#2f6b3c}
 :root[data-theme="dark"] .family-note.next{color:#9fd3ab}
 .family-note.warn{background:var(--st-unlinked-bg);color:var(--st-unlinked-ink)}
-.family-note.debt{background:color-mix(in srgb,var(--danger) 10%,var(--surface));color:var(--danger)}
+.family-note.debt{background:var(--debt-bg);color:var(--debt-ink)}
 
 .family-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line-soft);border-radius:11px;overflow:hidden;
   background:var(--surface-2)}
@@ -958,9 +960,12 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-stat span,.family-stat strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .family-stat span{font-size:11px;color:var(--muted)}
 .family-stat strong{font-size:14.5px;font-weight:650;margin-top:1px;font-variant-numeric:tabular-nums}
-/* A negative balance keeps a solid blue cell with a white label and sum. */
-.family-stat.negative{background:#235f88}
-.family-stat.negative span,.family-stat.negative strong{color:#fff}
+/* Debt uses the same restrained red family as archived client markers. */
+.family-stat.positive{background:var(--bubble-out)}
+.family-stat.positive span,.family-stat.positive strong{color:var(--st-client-ink)}
+.family-stat.negative{background:var(--debt-bg)}
+.family-stat.negative span,.family-stat.negative strong{color:var(--debt-ink)}
+.family-item-value.negative{color:var(--debt-ink)}
 
 .family-part{margin-top:14px}
 /* Section titles («Абонементы», «Группы», «Филиал») as tinted labels, in the same
@@ -1342,7 +1347,15 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-panel:focus{outline:none}
 /* System notices: frosted glass — more see-through, blurred and tinted by the
    wallpaper behind, no bright edge or drop shadow, so they do not glare. */
-.sys,.chat-bubble.system.sys{background:rgba(255,255,255,.16);-webkit-backdrop-filter:blur(14px) saturate(1.5);backdrop-filter:blur(14px) saturate(1.5);
+.sys,.chat-bubble.system.sys{background:rgba(255,255,255,.1);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
   box-shadow:inset 0 0 0 .5px rgba(255,255,255,.28)}
 .sys:hover{box-shadow:inset 0 0 0 1px rgba(255,255,255,.38)}
-:root[data-theme="dark"] .sys,:root[data-theme="dark"] .chat-bubble.system.sys{background:rgba(10,20,26,.22);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.08)}
+:root[data-theme="dark"] .sys,:root[data-theme="dark"] .chat-bubble.system.sys{background:rgba(255,255,255,.1);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.08)}
+
+#chat-handled{touch-action:manipulation;-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}
+#chat-handled[aria-busy="true"]{background:var(--bubble-out);color:var(--st-client-ink);cursor:progress}
+.bulk-handled-summary{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0;padding:12px;border-radius:12px;background:var(--bubble-out);color:var(--st-client-ink)}
+.bulk-handled-summary span{padding:3px 6px;font-size:13px}
+#chat-bulk-dialog .dialog-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;padding:16px 0 0}
+#chat-bulk-dialog .bulk-confirm{background:var(--bubble-out);color:var(--st-client-ink);border:1px solid color-mix(in srgb,var(--st-client-ink) 20%,var(--bubble-out))}
+#chat-bulk-dialog .bulk-confirm:hover{filter:brightness(.98)}

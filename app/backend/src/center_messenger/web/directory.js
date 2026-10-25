@@ -231,7 +231,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
         const url = new URL(card.url);
         if (url.protocol !== "https:" || !/^[a-z0-9-]+\.s20\.online$/i.test(url.hostname)) continue;
         link.href = url.href; link.target = "center-messenger-crm"; link.rel = "noopener noreferrer";
-        link.append(node("strong", student.name), node("small", `${card.branch_name} · ${labels[card.status]}`), node("span", "↗", "crm-link-arrow"));
+        link.append(node("strong", student.name), node("small", card.branch_name), node("span", "↗", "crm-link-arrow"));
         options.append(link);
       }
       if (contact.has_more) options.append(node("p", "Выберите филиал в фильтре, чтобы увидеть остальные карточки.", "muted small"));

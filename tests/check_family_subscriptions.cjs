@@ -39,7 +39,8 @@ const { fixture } = require('./browser_fixture.cjs');
       assert.equal(await page.locator('.family-item-value').count(),1);
       assert.match(await page.locator('#chat-details-sync').textContent(),/Баланс и абонементы:.*Занятия:.*Год занятий проверен/);
       assert.match(await page.locator('#chat-details-sync').textContent(),/Группы:/);
-      assert.match(await page.locator('.family-item-main').first().textContent(),/Октябрьской/);
+      assert.doesNotMatch(await page.locator('.family-item-main').first().textContent(),/Октябрьской/);
+      assert.match(await page.locator('.family-item-main').first().textContent(),/до 04\.07\.2027/);
       assert.doesNotMatch(await page.locator('.family-item-main').first().textContent(),/Гражданская/);
       assert.equal(await page.locator('.family-scroll').evaluate(e=>e.scrollWidth<=e.clientWidth+1),true);
       // An independent purchase of the same tariff must remain visible.
