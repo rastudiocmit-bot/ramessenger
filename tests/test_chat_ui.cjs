@@ -966,3 +966,134 @@ test('preferred CRM child opens first while an operator child choice survives ca
   assert.ok(watch);ui.timers.delete(watch[0]);await watch[1].callback();await flush();
   assert.match(ui.$('#chat-details-student h3').textContent,/Child 1/);
 });
+
+test('a stalled list does not hold multiple rounds of live messages or duplicate its request', async t=>{
+  let lists=0,deltas=0,release;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/chats')&&++lists===2)return new Promise(resolve=>{release=()=>resolve({conversations:[conversation(1)],page:0,total:1,unread:1,has_more:false});});
+    if(url.pathname.endsWith('/messages'))return url.searchParams.has('after_seq')
+      ?history(identifier(1),[message(2+(deltas++))],{next_seq:100+deltas}):history(identifier(1),[message(1)]);
+  });
+  await ui.app.enter();const first=ui.poll();await flush();
+  assert.deepEqual(ui.ids(),[1,2].map(identifier));assert.equal(lists,2);
+  await ui.poll();assert.deepEqual(ui.ids(),[1,2,3].map(identifier));assert.equal(lists,2);
+  release();await first;
+});
+
+test('a stalled timeline does not hold list updates or queue duplicate history polls', async t=>{
+  let lists=0,deltas=0,release;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/chats'))return {conversations:[{...conversation(1),name:`List ${++lists}`}],page:0,total:1,unread:1,has_more:false};
+    if(url.pathname.endsWith('/messages'))return url.searchParams.has('after_seq')
+      ?new Promise(resolve=>{deltas++;release=()=>resolve(history(identifier(1),[message(2)],{next_seq:101}));}):history(identifier(1),[message(1)]);
+  });
+  await ui.app.enter();const first=ui.poll();await flush();
+  await ui.poll();await ui.poll();assert.equal(lists,4);assert.equal(deltas,1);
+  assert.match(ui.$('.row-name').textContent,/List 4/);release();await first;
+});
+
+test('a failing list backs off independently while new messages continue and its error stays visible', async t=>{
+  let lists=0,deltas=0;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/chats')&&++lists>1)throw new Error('List unavailable');
+    if(url.pathname.endsWith('/messages'))return url.searchParams.has('after_seq')
+      ?history(identifier(1),[message(2+(deltas++))],{next_seq:100+deltas}):history(identifier(1),[message(1)]);
+  });
+  await ui.app.enter();await ui.poll();await ui.poll();
+  assert.equal(lists,2);assert.deepEqual(ui.ids(),[1,2,3].map(identifier));
+  assert.equal(ui.$('#chat-error').textContent,'List unavailable');
+});
+
+test('selecting a different client aborts the previous timeline and immediately loads the new one', async t=>{
+  let signal;
+  const ui=setup(t,(url,options)=>{
+    if(!url.pathname.endsWith('/messages'))return;
+    const id=url.pathname.split('/').at(-2);
+    if(url.searchParams.has('after_seq'))return new Promise((resolve,reject)=>{
+      signal=options.signal;signal.addEventListener('abort',()=>reject(new ui.window.DOMException('Cancelled','AbortError')),{once:true});
+    });
+    return history(id,[message(id===identifier(1)?1:2)],{conversation:{...conversation(id===identifier(1)?1:2),id}});
+  },{conversations:[conversation(1),conversation(2)]});
+  await ui.app.enter();ui.$('#chat-input').value='Saved draft';const pending=ui.poll();await flush();
+  ui.$(`.chat-row[data-id="${identifier(2)}"] .chat-select`).click();await flush();await pending;
+  assert.equal(signal.aborted,true);assert.deepEqual(ui.ids(),[identifier(2)]);
+  assert.equal(ui.$('#chat-error').textContent,'');
+  ui.$(`.chat-row[data-id="${identifier(1)}"] .chat-select`).click();await flush();
+  assert.equal(ui.$('#chat-input').value,'Saved draft');
+});
+
+test('a live patch retains unchanged bubbles, dates and expanded automation while editing and inserting in time order', async t=>{
+  let round=0;
+  const initial=[message(1),message(2,{actor_type:'automation',template_name:'Reminder'}),message(3)];
+  const ui=setup(t,url=>url.pathname.endsWith('/messages')?(url.searchParams.has('after_seq')
+    ?history(identifier(1),[message(4,{crm_order:'2'}),message(3,{text:'Edited',version:2})],{next_seq:++round+100})
+    :history(identifier(1),initial)):undefined);
+  await ui.app.enter();const kept=ui.$(`[data-id="${identifier(1)}"].chat-bubble`),system=ui.$('.system'),day=ui.$('.chat-day'),edited=ui.$(`[data-id="${identifier(3)}"].chat-bubble`);
+  ui.$('.system-toggle').click();await ui.poll();
+  assert.equal(ui.$(`[data-id="${identifier(1)}"].chat-bubble`),kept);assert.equal(ui.$('.system'),system);assert.equal(ui.$('.chat-day'),day);
+  assert.equal(ui.$('.system-body').hidden,false);assert.notEqual(ui.$(`[data-id="${identifier(3)}"].chat-bubble`),edited);
+  assert.deepEqual(ui.ids(),[1,2,4,3].map(identifier));assert.match(ui.$('#chat-history').textContent,/Edited/);
+  const all=[...ui.$('#chat-history').children];await ui.poll();assert.deepEqual([...ui.$('#chat-history').children],all);
+});
+
+test('metadata-only updates retain the timeline while updating history progress and the handled checkpoint', async t=>{
+  const ui=setup(t,url=>url.pathname.endsWith('/messages')?(url.searchParams.has('after_seq')
+    ?history(identifier(1),[],{next_seq:101,total:50,conversation:{...conversation(1),revision:2,inbound_seq:7,history_loading:true,seen_checkpoint:'new'}})
+    :history(identifier(1),[message(1)])):undefined);
+  await ui.app.enter();const bubble=ui.$('.chat-bubble'),day=ui.$('.chat-day');await ui.poll();
+  assert.equal(ui.$('.chat-bubble'),bubble);assert.equal(ui.$('.chat-day'),day);
+  assert.match(ui.$('#chat-history-note').textContent,/1 из 50.*более раннюю историю/);
+});
+
+test('retained message grouping and day separators follow removals and older insertions', async t=>{
+  const yesterday=message(4,{occurred_at:'2026-10-23T00:00:00Z',sort_time:'1792713600000000'});
+  const ui=setup(t,url=>url.pathname.endsWith('/messages')?(url.searchParams.has('after_seq')
+    ?history(identifier(1),[yesterday],{next_seq:101,removed_ids:[identifier(2)]})
+    :history(identifier(1),[message(1),message(2),message(3)])):undefined);
+  await ui.app.enter();const first=ui.$(`[data-id="${identifier(1)}"].chat-bubble`),last=ui.$(`[data-id="${identifier(3)}"].chat-bubble`);
+  await ui.poll();assert.deepEqual(ui.ids(),[4,1,3].map(identifier));assert.equal(ui.$('#chat-history').querySelectorAll('.chat-day').length,2);
+  assert.equal(ui.$(`[data-id="${identifier(1)}"].chat-bubble`),first);assert.equal(ui.$(`[data-id="${identifier(3)}"].chat-bubble`),last);
+  assert.equal(first.classList.contains('first'),true);assert.equal(first.classList.contains('last'),false);assert.equal(last.classList.contains('last'),true);
+});
+
+test('card freshness updates retain focused controls and child choice, and changed balances preserve scrolling', async t=>{
+  const original=preparedFamily(1),second=preparedFamily(2);
+  let family={...original,students:[...original.students,...second.students],cache:{...original.cache,auto_refresh:true}};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return family;
+  });
+  ui.$('#cabinet').hidden=false;ui.$('#pane-messages').hidden=false;
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  const selected=ui.$('.family-kid:nth-child(2)');selected.click();selected.focus();const stats=ui.$('.family-stats');
+  assert.equal(ui.window.document.activeElement,selected);
+  const refresh=async()=>{const timer=[...ui.timers.entries()].find(([,entry])=>entry.delay===60000);assert.ok(timer);ui.timers.delete(timer[0]);await timer[1].callback();};
+  family={...family,snapshot_at:'2026-10-24T10:00:00Z',cache:{...family.cache,updated_at:'2026-10-24T01:00:00Z'}};
+  await refresh();assert.equal(ui.$('.family-stats'),stats);assert.equal(ui.$('.family-kid[aria-pressed="true"]'),selected);
+  assert.equal(ui.window.document.activeElement,selected);assert.match(ui.$('#chat-details-sync').textContent,/01:00/);
+  const scroll=ui.$('.family-scroll');scroll.scrollTop=120;
+  family={...family,students:family.students.map(student=>student.id===second.students[0].id?{...student,balance:'345'}:student)};
+  await refresh();assert.match(ui.$('.family-stats').textContent,/345/);assert.equal(scroll.scrollTop,120);
+  assert.match(ui.$('#chat-details-student h3').textContent,/Child 2/);
+});
+
+test('repeated card opening shares one pending read and cannot render a different client response', async t=>{
+  let reads=0,release;
+  const rows=[{...conversation(1),contact_id:identifier(91)},{...conversation(2),contact_id:identifier(92)}];
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages')){const n=url.pathname.includes(identifier(2))?2:1;return history(identifier(n),[],{conversation:rows[n-1]});}
+    if(url.pathname.endsWith('/family')){reads++;if(url.pathname.includes(identifier(1)))return new Promise(resolve=>{release=()=>resolve(preparedFamily(1));});return preparedFamily(2);}
+  },{conversations:rows});
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();ui.$('#chat-details').click();await flush();assert.equal(reads,1);
+  ui.$('#chat-details-pin').click();ui.$(`.chat-row[data-id="${identifier(2)}"] .chat-select`).click();await flush();
+  assert.match(ui.$('#chat-details-student').textContent,/Child 2/);release();await flush();
+  assert.equal(reads,2);assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Child 1/);
+});
+
+test('date formatter reuse follows the workspace timezone when an unchanged message crosses midnight', async t=>{
+  const record=message(1,{occurred_at:'2026-10-23T22:30:00Z',sort_time:'1792794600000000'});
+  const ui=setup(t,url=>url.pathname.endsWith('/messages')?history(identifier(1),url.searchParams.has('after_seq')?[]:[record]):undefined);
+  await ui.app.enter();assert.match(ui.$('.chat-day').textContent,/24 октября/);assert.equal(ui.$('.meta time').textContent,'01:30');
+  ui.state.workspace.timezone='Etc/UTC';await ui.poll();
+  assert.match(ui.$('.chat-day').textContent,/23 октября/);assert.equal(ui.$('.meta time').textContent,'22:30');
+});

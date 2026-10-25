@@ -12,11 +12,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   const sendLabels = { queued: "В очереди", sending: "Отправляем…", accepted: "Принято MAX", delivered: "Доставлено", read: "Прочитано", failed: "Не отправлено", unknown: "Результат неизвестен", cancelled: "Отменено" };
   let generation = 0, listSeq = 0, selectionSeq = 0, linkSeq = 0, cardSeq = 0, detailsSeq = 0;
   let family = null, familySelected = null, familyBusy = false, familyChildChoice = false;
-  let familyTimer = null;
-  const familyCache = new Map();
+  let familyTimer = null, familyRenderKey = "";
+  const familyCache = new Map(), familyRequests = new Map();
   let listToken = null, listTask = null;
   let channels = [], items = [], selected = null, page = 0, hasMore = false;
   let timer, searchTimer, linkTimer, pollBusy = false, actionBusy = false, historyBusy = false, listLoading = false, listRetryRequired = false;
+  let listPollAfter = 0, listPollError = null, historyPollError = null;
   let notifyTimer, notifySeq = null, notifyEpoch = null, notifyTarget = null, notifyBusy = false;
   let nameOrder = "parent_first", preferenceBusy = false;
   const bulkDialog = $("#chat-bulk-dialog");
@@ -36,6 +37,15 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const control = node("button", text, className); control.type = "button";
     control.addEventListener("click", handler); return control;
   }
+  function patchChildren(parent, wanted) {
+    let cursor = parent.firstChild;
+    for (const child of wanted) {
+      if (child === cursor) cursor = cursor.nextSibling;
+      else parent.insertBefore(child, cursor);
+    }
+    const retained = new Set(wanted);
+    for (const child of [...parent.children]) if (!retained.has(child)) child.remove();
+  }
   function reset() {
     bulkSeq += 1; bulkOperation = null; bulkLoading = false; bulkBusy = false;
     clearTimeout(handledTimer); handledTimer = null; handledPointer = null; handledConsumed = false;
@@ -52,7 +62,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     generation += 1; listSeq += 1; selectionSeq += 1; linkSeq += 1; cardSeq += 1; detailsSeq += 1; family = null; familySelected = null; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     clearTimeout(timer); clearTimeout(searchTimer); clearTimeout(linkTimer); clearTimeout(notifyTimer);
     notifyTimer = null; notifyBusy = false; notifySeq = null; notifyEpoch = null; notifyTarget = null; show($("#chat-new-marker"), false);
-    cache.clear(); familyCache.clear(); listToken = null; listTask = null; channels = []; items = []; selected = null; page = 0; hasMore = false;
+    for (const data of cache.values()) data.controller?.abort();
+    cache.clear(); familyCache.clear(); familyRequests.clear(); familyRenderKey = ""; listToken = null; listTask = null; channels = []; items = []; selected = null; page = 0; hasMore = false;
+    listPollAfter = 0; listPollError = null; historyPollError = null;
     pollBusy = false; actionBusy = false; historyBusy = false; listLoading = false; listRetryRequired = false; lastList = ""; linkConversation = null; tokenChannel = null;
     ["#chat-list", "#chat-history", "#chat-link-results", "#max-channels"].forEach(id => $(id).replaceChildren());
     ["#chat-error", "#max-error", "#max-token-error", "#chat-link-error"].forEach(id => notice("", $(id)));
@@ -156,7 +168,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function entry(id) {
     if (!cache.has(id)) {
       if (cache.size >= 60) { const removable = [...cache.keys()].find(key => key !== selected && !cache.get(key).draft && !cache.get(key).pending); if (removable) cache.delete(removable); }
-      cache.set(id, { messages: new Map(), next: 0, oldest: null, expanded: new Set(), more: false, loaded: false, meta: null, draft: "", pending: null });
+      cache.set(id, { messages: new Map(), messageRevision: 0, next: 0, oldest: null, expanded: new Set(), more: false, loaded: false, meta: null, draft: "", pending: null });
     }
     return cache.get(id);
   }
@@ -208,7 +220,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   });
   function renderList(force = false) {
     items.sort(compareConversations);
-    const signature = JSON.stringify([items, selected, nameOrder]); if (!force && signature === lastList) return; lastList = signature;
+    const today = dayKey(new Date());
+    const signature = JSON.stringify([items, selected, nameOrder, today, state.workspace?.timezone]); if (!force && signature === lastList) return; lastList = signature;
     const list = $("#chat-list"), scroller = $(".chat-list-scroll"), top = scroller.scrollTop;
     const bounds = scroller.getBoundingClientRect();
     const anchor = [...list.children].find(row => row.getBoundingClientRect().bottom > bounds.top);
@@ -216,7 +229,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const existing = new Map([...list.children].map(row => [row.dataset.key, row]));
     const wanted = [];
     for (const item of items) {
-      const key = JSON.stringify([item, item.id === selected, dayKey(new Date()), nameOrder]);
+      const key = JSON.stringify([item, item.id === selected, today, nameOrder, state.workspace?.timezone]);
       const previous = existing.get(item.id);
       if (previous?.listKey === key) { wanted.push(previous); continue; }
       const row = node("div", undefined, `row chat-row${item.unread ? " unread waiting" : ""}${item.id === selected ? " selected" : ""}`); row.dataset.id = item.id; row.setAttribute("aria-current", String(item.id === selected));
@@ -366,16 +379,30 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (suppressClick) { suppressClick = false; event.preventDefault(); event.stopImmediatePropagation(); }
     }, true);
   }
+  let dateFormats, dateTimezone;
+  function chatDateFormats() {
+    const timeZone = state.workspace?.timezone;
+    if (!dateFormats || dateTimezone !== timeZone) {
+      dateTimezone = timeZone;
+      dateFormats = {
+        time: new Intl.DateTimeFormat("ru-RU", { timeZone, hour: "2-digit", minute: "2-digit" }),
+        day: new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }),
+        short: new Intl.DateTimeFormat("en-GB", { timeZone, day: "2-digit", month: "2-digit" }),
+        long: new Intl.DateTimeFormat("ru-RU", { timeZone, day: "numeric", month: "long", year: "numeric" })
+      };
+    }
+    return dateFormats;
+  }
   function time(value) {
-    const d = new Date(value); return Number.isNaN(d.getTime()) ? "" : new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, hour: "2-digit", minute: "2-digit" }).format(d);
+    const d = new Date(value); return Number.isNaN(d.getTime()) ? "" : chatDateFormats().time.format(d);
   }
   const dayKey = value => {
     const d = new Date(value); if (Number.isNaN(d.getTime())) return "";
-    return new Intl.DateTimeFormat("en-CA", { timeZone: state.workspace?.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+    return chatDateFormats().day.format(d);
   };
   const shortDate = value => {
     const d = new Date(value); if (Number.isNaN(d.getTime())) return "";
-    return new Intl.DateTimeFormat("en-GB", { timeZone: state.workspace?.timezone, day: "2-digit", month: "2-digit" }).format(d).replace("/", ".");
+    return chatDateFormats().short.format(d).replace("/", ".");
   };
   function currentMeta(next, previous) {
     if (!previous) return true;
@@ -425,7 +452,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     listLoading = true;
     if (append) updateListLoader({ loading: true });
     try {
-      const payload = await api(`${chatPath()}?${params}`);
+      const payload = await api(`${chatPath()}?${params}`, { timeoutMs: 20000 });
       if (!valid(epoch, gen) || seq !== listSeq || !active()) return;
       if (payload.window_token) {
         listToken = payload.window_token;
@@ -521,8 +548,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     }
     stream.scrollTop = position.top + (older ? stream.scrollHeight - position.height : 0);
   }
-  function renderHistoryControls(data) {
-    const position = rememberScroll();
+  function renderHistoryControls(data, { preserve = true } = {}) {
+    const position = preserve ? rememberScroll() : null;
     const more = $("#chat-history-more"), status = $("#chat-history-status");
     show(more, Boolean(data.more || data.olderError));
     more.disabled = Boolean(data.olderLoading);
@@ -535,7 +562,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const progress = data.meta?.history_error ? ` История AlfaCRM пока загружена не полностью. ${data.meta.history_error}`
       : data.meta?.history_loading ? " Загружаем более раннюю историю из AlfaCRM…" : "";
     $("#chat-history-note").textContent = count + progress;
-    restoreScroll(position);
+    if (position) restoreScroll(position);
   }
   function maybeFillHistory() {
     const data = cache.get(selected), stream = $("#chat-stream");
@@ -563,21 +590,39 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   function renderMessages(id, { bottom = false, older = false } = {}) {
     const data = cache.get(id); if (id !== selected || !data) return;
-    renderHistoryControls(data);
-    const renderKey = `${id}/${data.next}/${data.meta?.revision}/${data.messages.size}/${data.more}`;
-    if (!bottom && !older && data.renderKey === renderKey) { renderHeader(); return; }
+    const history = $("#chat-history"), todayKey = dayKey(new Date());
+    const renderKey = `${id}/${data.messageRevision}/${todayKey}/${state.workspace?.timezone}`;
+    if (!bottom && !older && data.renderKey === renderKey && history.dataset.conversation === id) {
+      renderHistoryControls(data); renderHeader(); return;
+    }
     data.renderKey = renderKey;
     const stream = $("#chat-stream"), position = rememberScroll();
-    const history = $("#chat-history"); history.replaceChildren(); let day = "";
-    const todayKey = dayKey(new Date());
+    renderHistoryControls(data, { preserve: false });
+    const existing = new Map(history.dataset.conversation === id ? [...history.children].map(child => [child.dataset.key, child]) : []);
+    const wanted = []; let day = "";
     const messages = [...data.messages.values()].sort(compareMessages);
     for (let i = 0; i < messages.length; i++) {
       const message = messages[i];
       const messageDay = dayKey(message.occurred_at);
-      const label = new Intl.DateTimeFormat("ru-RU", { timeZone: state.workspace?.timezone, day: "numeric", month: "long", year: "numeric" }).format(new Date(message.occurred_at));
-      if (messageDay !== day) { history.append(node("div", messageDay === todayKey ? "Сегодня" : label, "chat-day sep")); day = messageDay; }
+      if (messageDay !== day) {
+        const key = `day:${messageDay}`, label = messageDay === todayKey ? "Сегодня" : chatDateFormats().long.format(new Date(message.occurred_at));
+        const separator = existing.get(key) || node("div", label, "chat-day sep");
+        separator.dataset.key = key;
+        if (separator.textContent !== label) separator.textContent = label;
+        wanted.push(separator); day = messageDay;
+      }
+      const next = messages[i + 1], previous = messages[i - 1];
+      const grouped = Boolean(next && next.actor_type !== "automation" && next.direction === message.direction && next.actor_type === message.actor_type && dayKey(next.occurred_at) === messageDay);
+      const first = !previous || previous.actor_type !== message.actor_type || previous.direction !== message.direction || dayKey(previous.occurred_at) !== messageDay;
+      const key = `message:${message.id}`, messageKey = JSON.stringify([message, todayKey, state.workspace?.timezone]);
+      const retained = existing.get(key);
+      if (retained?.messageKey === messageKey) {
+        if (message.actor_type !== "automation") { retained.classList.toggle("first", first); retained.classList.toggle("last", !grouped); }
+        wanted.push(retained); continue;
+      }
       if (message.actor_type === "automation") {
         const bubble = node("div", undefined, "chat-bubble system sys"); bubble.dataset.id = message.id;
+        bubble.dataset.key = key; bubble.messageKey = messageKey;
         const body = node("p", message.text || "", "system-body sys-body");
         body.hidden = !data.expanded.has(message.id);
         const glyph = node("span", body.hidden ? "+" : "−", "system-toggle-glyph glyph");
@@ -601,13 +646,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         bubble.addEventListener("click", () => { if (!String(window.getSelection?.() || "")) toggle.click(); });
         bubble.append(row, body);
         if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
-        history.append(bubble);
+        wanted.push(bubble);
         continue;
       }
-      const next = messages[i + 1], previous = messages[i - 1];
-      const grouped = Boolean(next && next.actor_type !== "automation" && next.direction === message.direction && next.actor_type === message.actor_type && dayKey(next.occurred_at) === messageDay);
-      const first = !previous || previous.actor_type !== message.actor_type || previous.direction !== message.direction || dayKey(previous.occurred_at) !== messageDay;
       const bubble = node("div", undefined, `chat-bubble msg ${message.direction === "out" ? "out outgoing" : "in incoming"}${first ? " first" : ""}${grouped ? "" : " last"}${message.state === "failed" ? " failed" : ""}`); bubble.dataset.id = message.id;
+      bubble.dataset.key = key; bubble.messageKey = messageKey;
       const content = node("div", undefined, "bub");
       if (message.forwarded) content.append(node("small", "Пересланное сообщение", "chat-forwarded"));
       content.append(node("span", message.deleted ? "Сообщение удалено" : message.text || (message.forwarded ? "Пересланное содержимое пока недоступно" : message.attachments.length ? "" : "Содержимое сообщения недоступно"), message.deleted ? "muted msg-text" : "msg-text"));
@@ -624,8 +667,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }
       content.append(meta); bubble.append(content);
       if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
-      history.append(bubble);
+      wanted.push(bubble);
     }
+    patchChildren(history, wanted); history.dataset.conversation = id;
     show(stream); show($("#chat-compose"));
     resizeCompose();
     restoreScroll(position, { bottom, older, follow: true });
@@ -660,7 +704,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (!first || !data.more) return;
       params.set("before_time", first.occurred_at); params.set("before_id", first.id);
     }
-    const result = await api(`${chatPath(id)}/messages?${params}`);
+    const controller = new AbortController(); data.controller = controller;
+    let result;
+    try { result = await api(`${chatPath(id)}/messages?${params}`, { signal: controller.signal, timeoutMs: 20000 }); }
+    finally { if (data.controller === controller) data.controller = null; }
     if (!valid(epoch, gen) || cache.get(id) !== data || choice !== selectionSeq || selected !== id) return;
     if (result.conversation.id !== id) {
       const canonical = entry(result.conversation.id);
@@ -675,11 +722,16 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       await select(result.conversation.id, false);
       return;
     }
+    let changed = Boolean(result.reset);
     if (result.reset) { data.messages.clear(); data.loaded = false; data.oldest = null; }
     for (const message of result.messages) {
-      const old = data.messages.get(message.id); if (!old || old.version <= message.version) data.messages.set(message.id, message);
+      const old = data.messages.get(message.id);
+      if ((!old || old.version <= message.version) && JSON.stringify(old) !== JSON.stringify(message)) {
+        data.messages.set(message.id, message); changed = true;
+      }
     }
-    for (const removed of result.removed_ids || []) data.messages.delete(removed);
+    for (const removed of result.removed_ids || []) changed = data.messages.delete(removed) || changed;
+    if (changed) data.messageRevision += 1;
     data.total = result.total ?? data.messages.size;
     // Earlier pages must not advance the live cursor past unseen intervening updates.
     if (mode !== "older" || result.reset) data.next = result.reset ? result.next_seq : Math.max(data.next, result.next_seq);
@@ -704,12 +756,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (result.more_changes && mode !== "older") await loadHistoryPage(id);
   }
   async function select(id, mobile = true) {
+    cache.get(selected)?.controller?.abort(); historyPollError = null;
     if (id !== selected) document.dispatchEvent(new CustomEvent("cm:chat-selected"));
     const keepDetails = id !== selected && pinnedDocked();
     if (id !== selected && detailsDialog.open && !keepDetails) detailsDialog.close();
     if (keepDetails && detailsDialog.open) familyPending(currentItemFor(id)?.name);
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
-    selectionSeq += 1; selected = id; const data = entry(id); historyBusy = false;
+    selectionSeq += 1; selected = id; const data = entry(id); historyBusy = false; data.pollAfter = 0;
     if (mobile) $("#chat-layout").classList.add("has-selection");
     $("#chat-input").value = data.draft; resizeCompose();
     renderList(); notice("", $("#chat-error"));
@@ -728,7 +781,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     clearTimeout(timer); notice("", $("#chat-error"));
     try {
       const preferenceRevision = state.chatPreferenceRevision || 0;
-      const context = await api(`${chatPath()}/context`);
+      const context = await api(`${chatPath()}/context`, { timeoutMs: 20000 });
       if (!valid(epoch, gen) || !active()) return;
       if (preferenceRevision === (state.chatPreferenceRevision || 0) && !preferenceBusy) applyPreferences(context.preferences);
       state.voiceInput = Boolean(context.voice_input);
@@ -751,18 +804,42 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     clearTimeout(timer); if (!active()) return;
     timer = setTimeout(poll, delay);
   }
+  function renderPollStatus() {
+    const error = listPollError || historyPollError;
+    $("#chat-sync-state").textContent = error ? "Ожидаем соединение…" : "Обновлено · история на сервере";
+    if (error) fail(error); else notice("", $("#chat-error"));
+  }
   async function poll() {
     if (!active()) return;
-    if (document.hidden || pollBusy) return schedule(5000);
+    if (document.hidden) return schedule(5000);
     const epoch = state.epoch, gen = generation;
-    pollBusy = true;
-    let delay = 2500;
-    try {
-      await loadList(false, true);
-      if (selected && valid(epoch, gen) && active()) await loadHistory(selected);
-      if (valid(epoch, gen)) { $("#chat-sync-state").textContent = "Обновлено · история на сервере"; notice("", $("#chat-error")); }
-    } catch (error) { delay = 8000; if (valid(epoch, gen)) { fail(error); $("#chat-sync-state").textContent = "Ожидаем соединение…"; } }
-    finally { if (valid(epoch, gen)) { pollBusy = false; schedule(delay); } }
+    const tasks = [], now = Date.now();
+    // Tick independently of request completion. A slow list must not hold the
+    // open conversation; each feed keeps at most one poll in flight and backs off separately.
+    schedule();
+    if (!pollBusy && now >= listPollAfter) {
+      pollBusy = true;
+      const request = loadList(false, true), seq = listSeq;
+      tasks.push(request.then(() => {
+        if (valid(epoch, gen) && active() && seq === listSeq) { listPollError = null; listPollAfter = 0; renderPollStatus(); }
+      }).catch(error => {
+        if (valid(epoch, gen) && active() && seq === listSeq && !ignored(error)) {
+          listPollError = error; listPollAfter = Date.now() + 8000; renderPollStatus();
+        }
+      }).finally(() => { if (valid(epoch, gen)) pollBusy = false; }));
+    }
+    const id = selected, data = cache.get(id), choice = selectionSeq;
+    if (id && data && !data.polling && now >= (data.pollAfter || 0)) {
+      data.polling = true;
+      tasks.push(loadHistory(id).then(() => {
+        if (valid(epoch, gen) && active() && choice === selectionSeq) { historyPollError = null; data.pollAfter = 0; renderPollStatus(); }
+      }).catch(error => {
+        if (valid(epoch, gen) && active() && choice === selectionSeq && !ignored(error)) {
+          historyPollError = error; data.pollAfter = Date.now() + 8000; renderPollStatus();
+        }
+      }).finally(() => { data.polling = false; }));
+    }
+    await Promise.all(tasks);
   }
   async function submit() {
     const id = selected, data = cache.get(id); if (!data || historyBusy || !data.meta?.can_send) return;
@@ -873,6 +950,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function filtersChanged() {
     renderFilterChip();
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
+    cache.get(selected)?.controller?.abort(); listPollAfter = 0; listPollError = null; historyPollError = null;
     listToken = null; listTask = null;
     selected = null; historyBusy = false; listLoading = false; listRetryRequired = false; hasMore = false; page = 0;
     updateListLoader();
@@ -1133,19 +1211,21 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function renderFamily() {
     if (!family) return;
     detailsDialog.classList.remove("is-loading");
-    $("#chat-details-name").textContent = family.name;
-    const found = familyStatus(), main = found[0] || currentItem()?.status || "unlinked";
-    const avatar = $("#chat-details-avatar"); avatar.textContent = initialsOf(family.name); avatar.className = `ava family-ava ${statuses[main] ? main : "unlinked"}`;
-    const badges = $("#chat-details-badges"); badges.replaceChildren();
-    for (const status of found) badges.append(chip(statuses[status], status));
-    if (family.max_connected || family.max_bot_connected) { const max = chip("MAX", "max"); max.title = "Родитель подключён к MAX"; badges.append(max); }
-    if (family.needs_review) badges.append(chip("Нужна проверка в CRM", "unlinked"));
-    const contact = $("#chat-details-contact"); contact.replaceChildren();
-    for (const phone of family.phones || []) contact.append(contactRow("phone", phone));
-    for (const email of family.emails || []) contact.append(contactRow("email", email));
-    if (!contact.childNodes.length) contact.append(node("p", "Телефон и почта в CRM не указаны.", "family-empty"));
     const students = orderStudents(family.students || []);
     if (!familyChildChoice && students.some(student => student.id === family.selection?.student)) familySelected = family.selection.student;
+    if (!students.some(student => student.id === familySelected)) familySelected = students[0]?.id || null;
+    renderFamilySync(students);
+    // Queue progress and freshness change more often than the actual card facts.
+    // Keep its focused controls, child choice and scroll position when only the footer changes.
+    const { cache: progress, snapshot_at: snapshot, ...facts } = family;
+    const key = JSON.stringify([facts, familySelected, familyToday(), state.workspace?.timezone, currentItem()?.status]);
+    if (familyRenderKey === key) return;
+    const scroll = detailsDialog.querySelector(".family-scroll"), top = scroll.scrollTop;
+    familyRenderKey = key;
+    renderFamilyContent(students);
+    scroll.scrollTop = top;
+  }
+  function renderFamilySync(students) {
     const synced = family.snapshot_at ? new Date(family.snapshot_at) : null;
     const selected = students.find(student => student.id === familySelected) || students[0];
     const times = (selected?.cards || []).map(card => card.refreshed_at).filter(Boolean).sort();
@@ -1162,19 +1242,40 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         [updated, lessons, history, groups, status, info.error].filter(Boolean).join(" · "));
       detailsDialog.classList.toggle("is-refreshing", Boolean(info.refreshing));
     }
+    if (!family.cache) detailsDialog.classList.remove("is-refreshing");
+  }
+  function renderFamilyContent(students) {
+    $("#chat-details-name").textContent = family.name;
+    const found = familyStatus(), main = found[0] || currentItem()?.status || "unlinked";
+    const avatar = $("#chat-details-avatar"); avatar.textContent = initialsOf(family.name); avatar.className = `ava family-ava ${statuses[main] ? main : "unlinked"}`;
+    const badges = $("#chat-details-badges"); badges.replaceChildren();
+    for (const status of found) badges.append(chip(statuses[status], status));
+    if (family.max_connected || family.max_bot_connected) { const max = chip("MAX", "max"); max.title = "Родитель подключён к MAX"; badges.append(max); }
+    if (family.needs_review) badges.append(chip("Нужна проверка в CRM", "unlinked"));
+    const contact = $("#chat-details-contact"); contact.replaceChildren();
+    for (const phone of family.phones || []) contact.append(contactRow("phone", phone));
+    for (const email of family.emails || []) contact.append(contactRow("email", email));
+    if (!contact.childNodes.length) contact.append(node("p", "Телефон и почта в CRM не указаны.", "family-empty"));
     $("#chat-details-count").textContent = students.length > 1 ? String(students.length) : "";
-    const list = $("#chat-details-children"), detail = $("#chat-details-student"); list.replaceChildren(); detail.replaceChildren();
+    const list = $("#chat-details-children"), detail = $("#chat-details-student"); detail.replaceChildren();
+    const previousKids = new Map([...list.children].map(kid => [kid.dataset.student, kid])), kids = [];
     detailsDialog.querySelector(".family-kids-block").hidden = students.length < 2;
-    if (!students.length) { detail.append(part("Дети", node("p", "В CRM у этого контакта нет детей.", "family-empty"))); return; }
+    if (!students.length) { list.replaceChildren(); detail.append(part("Дети", node("p", "В CRM у этого контакта нет детей.", "family-empty"))); return; }
     if (!students.some(student => student.id === familySelected)) familySelected = students[0].id;
     for (const student of students) {
       const chosen = student.id === familySelected, status = (student.cards || [])[0]?.status;
-      const kid = button("", "family-kid", () => { familyChildChoice = true; if (familySelected === student.id) return; familySelected = student.id; renderFamily(); });
+      const key = JSON.stringify([student.id, student.name, student.dob, status, familyToday()]);
+      let kid = previousKids.get(student.id);
+      if (!kid || kid.kidKey !== key) {
+        kid = button("", "family-kid", () => { familyChildChoice = true; if (familySelected === student.id) return; familySelected = student.id; renderFamily(); });
+        kid.dataset.student = student.id; kid.kidKey = key;
+        kid.title = `${student.name}${statuses[status] ? ` · ${statuses[status]}` : ""}`;
+        kid.append(firstName(student.name), node("small", familyAge(student.dob)));
+      }
       kid.setAttribute("aria-pressed", String(chosen));
-      kid.title = `${student.name}${statuses[status] ? ` · ${statuses[status]}` : ""}`;
-      kid.append(firstName(student.name), node("small", familyAge(student.dob)));
-      list.append(kid);
+      kids.push(kid);
     }
+    patchChildren(list, kids);
     const student = students.find(person => person.id === familySelected), cards = student.cards || [];
     const today = familyToday(), subs = activeSubscriptions(student), groups = student.groups || [];
     const subscriptionsLoaded = cards.every(card => Array.isArray(card.subscriptions)), subscriptionConflict = subs.some(item => item.needs_review);
@@ -1250,6 +1351,16 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (familyCache.size >= 40) familyCache.delete(familyCache.keys().next().value);
     familyCache.set(contact, { value, at: Date.now() });
   }
+  function preparedFamilyRequest(conversation, cachedOnly = false) {
+    const path = `${chatPath(conversation)}/family${cachedOnly ? "?cached_only=true" : ""}`;
+    if (!familyRequests.has(path)) {
+      const request = api(path, { timeoutMs: 20000 }).finally(() => {
+        if (familyRequests.get(path) === request) familyRequests.delete(path);
+      });
+      familyRequests.set(path, request);
+    }
+    return familyRequests.get(path);
+  }
   function watchFamily(conversation, contact, epoch, gen, seq) {
     clearTimeout(familyTimer);
     if (!family?.cache || (!family.cache.refreshing && !family.cache.auto_refresh)) return;
@@ -1257,8 +1368,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const delay = family.cache.refreshing ? (family.cache.error ? 30000 : 3000) : 60000;
     familyTimer = setTimeout(async () => {
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation || !active()) return;
+      if (document.hidden) { watchFamily(conversation, contact, epoch, gen, seq); return; }
       try {
-        const updated = await api(`${chatPath(conversation)}/family?cached_only=true`);
+        const updated = await preparedFamilyRequest(conversation, true);
         if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation) return;
         family = updated; rememberFamily(contact, updated); renderFamily();
       } catch (_) { /* Keep the last good card during a temporary outage. */ }
@@ -1284,7 +1396,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-details-student").replaceChildren(node("div", undefined, "family-skel tall"), node("div", undefined, "family-skel"), node("div", undefined, "family-skel tall"));
   }
   function familyPending(name) {
-    detailsSeq += 1; family = null; familySelected = null; familyChildChoice = false; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
+    detailsSeq += 1; family = null; familyRenderKey = ""; familySelected = null; familyChildChoice = false; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
+    detailsDialog.querySelector(".family-scroll").scrollTop = 0;
     $("#chat-details-name").textContent = name || "Загружаем сведения…";
     detailsDialog.classList.add("is-loading"); detailsDialog.classList.remove("is-refreshing"); familySkeleton();
   }
@@ -1314,7 +1427,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     try {
       // An open panel is a request for this client's card, including a pinned
       // panel following a read chat. Background preparation remains server-owned.
-      const result = await api(`${chatPath(conversation)}/family`);
+      const result = await preparedFamilyRequest(conversation);
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
       family = result; rememberFamily(contactId, result); renderFamily();
       watchFamily(conversation, contactId, epoch, gen, seq);
@@ -1547,7 +1660,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (!state.user || !state.workspace || !(["owner", "admin"].includes(state.workspace.role) || state.workspace.sections?.includes("messages"))) return;
     let delay = 3500; notifyBusy = true;
     try {
-      const result = await api(`${base()}/chat-updates${notifySeq === null ? "" : `?after_seq=${notifySeq}`}`);
+      const result = await api(`${base()}/chat-updates${notifySeq === null ? "" : `?after_seq=${notifySeq}`}`, { timeoutMs: 20000 });
       if (!valid(epoch, gen)) return;
       notifySeq = result.next_seq;
       let latest = null;
@@ -1589,7 +1702,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   resizer.addEventListener("pointerup", endDrag); resizer.addEventListener("pointercancel", endDrag); resizer.addEventListener("lostpointercapture", endDrag);
   resizer.addEventListener("keydown", event => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) { event.preventDefault(); resize(event.key === "Home" ? 300 : event.key === "End" ? 640 : width + (event.key === "ArrowRight" ? 20 : -20)); } });
   return { reset, connections, enter, watch, setView, leave: () => {
-    clearTimeout(timer); selectionSeq += 1;
+    clearTimeout(timer); selectionSeq += 1; historyBusy = false; cache.get(selected)?.controller?.abort();
     // The docked card lives inside the Chats section and hides with it; a floating card
     // sits above every section, so it closes when the operator leaves Chats.
     if (detailsDialog.open && detailsDialog.dataset.mode !== "docked") detailsDialog.close();
