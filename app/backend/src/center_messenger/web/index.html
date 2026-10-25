@@ -7,8 +7,8 @@
   <link rel="stylesheet" href="/assets/app.css?v=0.8.35">
   <link rel="stylesheet" href="/assets/cabinet.css?v=2.18.0">
   <script src="/assets/icons.js?v=1.2.1" defer=""></script><script src="/assets/directory.js?v=0.9.0" defer=""></script>
-  <script src="/assets/chat.js?v=0.11.4" defer=""></script><script src="/assets/voice.js?v=1.3.1" defer=""></script><script src="/assets/ai.js?v=1.1" defer=""></script>
-  <script src="/assets/alfa-progress.js?v=0.12.1" defer=""></script>
+  <script src="/assets/chat.js?v=0.11.5" defer=""></script><script src="/assets/voice.js?v=1.3.1" defer=""></script><script src="/assets/ai.js?v=1.1" defer=""></script>
+  <script src="/assets/alfa-progress.js?v=0.12.2" defer=""></script>
   <script src="/assets/cabinet.js?v=2.6" defer=""></script><script src="/assets/app.js?v=0.12.0" defer=""></script>
 </head>
 <body>
@@ -91,7 +91,8 @@
     <div class="alfa-loader-progress-label"><strong id="alfa-loader-cards-value">—</strong><span id="alfa-loader-cards-queue"></span></div>
     <div id="alfa-loader-cards-track" class="alfa-loader-card-track" role="progressbar" aria-label="Клиенты с актуальной карточкой"><span id="alfa-loader-cards-fill"></span></div>
     <p id="alfa-loader-cards-current"></p><p id="alfa-loader-cards-error" class="alfa-loader-small" hidden></p>
-    <p class="alfa-loader-small">Фоном — для клиентов, которым нужен ответ, с периодом 30 минут. Остальные карточки — при открытии.</p>
+    <p id="alfa-loader-groups-status" class="alfa-loader-small" hidden=""></p>
+    <p class="alfa-loader-small">Баланс и занятия — каждые 30 минут для ожидающих ответа; остальные карточки — при открытии. Группы действующих клиентов — раз в 6 часов.</p>
   </section>
   <details id="alfa-loader-review" class="alfa-loader-review"><summary id="alfa-loader-review-summary">Действующие клиенты · сверка раз в 6 часов</summary><p id="alfa-loader-review-detail" class="alfa-loader-small"></p><div id="alfa-loader-review-operation"></div><button id="alfa-active-review" class="btn sec" type="button">Проверить действующих</button></details>
   <div id="alfa-max-progress-warning" class="alfa-loader-warning" role="status" hidden></div>

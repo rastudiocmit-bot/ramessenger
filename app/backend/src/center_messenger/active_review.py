@@ -44,6 +44,10 @@ def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False):
     old = db.execute(text("SELECT * FROM alfa_customers WHERE workspace_id=:w AND run_id=:r "
         "AND branch_id=:b AND external_id=:id"),
         {"w": workspace, "r": snapshot["run"], "b": branch, "id": customer}).mappings().one_or_none()
+    if old:
+        for field in ("dob", "study_status_id", "lead_status_ids"):
+            if field not in raw:
+                value[field] = old[field]
     # No name/phone matching. Existing verified bindings survive name changes.
     contact = old["contact_id"] if old else None
     student = old["student_id"] if old else None
@@ -51,12 +55,12 @@ def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False):
         matches = list(db.execute(text("SELECT contact_id,student_id,branch_id FROM alfa_customers "
             "WHERE workspace_id=:w AND run_id=:r AND external_id=:id AND contact_id IS NOT NULL"),
             {"w": workspace, "r": snapshot["run"], "id": customer}).mappings())
-        # Cross-branch identity is reused only when the source confirms membership.
-        membership = {str(b) for b in (raw.get("branch_ids") or [])} if isinstance(raw.get("branch_ids", []), list) else set()
-        if len({(m["contact_id"], m["student_id"]) for m in matches}) == 1 and str(branch) in membership and any(str(m["branch_id"]) in membership for m in matches):
+        # Customer IDs are global within this CRM connection. A second branch
+        # is another observation, including APIs omitting optional branch_ids.
+        if len({(m["contact_id"], m["student_id"]) for m in matches}) == 1:
             contact, student = matches[0]["contact_id"], matches[0]["student_id"]
     contact = contact or uuid5(UUID(str(settings["connection_id"])), f"active-contact:{branch}:{customer}")
-    student = student or uuid5(UUID(str(settings["connection_id"])), f"active-student:{branch}:{customer}")
+    student = student or uuid5(UUID(str(settings["connection_id"])), f"student:{customer}")
     parent = value["legal_name"] or value["name"]
     review = bool(old and normalized_name(old["legal_name"]) != normalized_name(value["legal_name"]))
     db.execute(text("INSERT INTO contacts(workspace_id,id,display_name) VALUES(:w,:id,:name) ON CONFLICT DO NOTHING"),
@@ -66,13 +70,16 @@ def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False):
         {"w": workspace, "id": student, "name": value["name"]})
     db.execute(text("INSERT INTO contact_student_links(workspace_id,contact_id,student_id,managed_by_alfa) "
         "VALUES(:w,:c,:s,true) ON CONFLICT DO NOTHING"), {"w": workspace, "c": contact, "s": student})
-    db.execute(text("INSERT INTO alfa_customers(workspace_id,run_id,branch_id,external_id,name,legal_name,status,"
-        "contact_id,student_id,needs_review,phones,emails) VALUES(:w,:r,:b,:id,:name,:parent,:status,:c,:s,:review,CAST(:phones AS jsonb),CAST(:emails AS jsonb)) "
+    db.execute(text("INSERT INTO alfa_customers(workspace_id,run_id,branch_id,external_id,name,legal_name,status,dob,study_status_id,lead_status_ids,"
+        "contact_id,student_id,needs_review,phones,emails) VALUES(:w,:r,:b,:id,:name,:parent,:status,:dob,:study,CAST(:leads AS jsonb),:c,:s,:review,CAST(:phones AS jsonb),CAST(:emails AS jsonb)) "
         "ON CONFLICT(workspace_id,run_id,branch_id,external_id) DO UPDATE SET name=EXCLUDED.name,"
-        "legal_name=EXCLUDED.legal_name,status=EXCLUDED.status,phones=EXCLUDED.phones,emails=EXCLUDED.emails,contact_id=EXCLUDED.contact_id,"
+        "legal_name=EXCLUDED.legal_name,status=EXCLUDED.status,dob=EXCLUDED.dob,study_status_id=EXCLUDED.study_status_id,"
+        "lead_status_ids=EXCLUDED.lead_status_ids,phones=EXCLUDED.phones,emails=EXCLUDED.emails,contact_id=EXCLUDED.contact_id,"
         "student_id=EXCLUDED.student_id,needs_review=alfa_customers.needs_review OR EXCLUDED.needs_review"),
         {"w": workspace, "r": snapshot["run"], "b": branch, "id": customer, "name": value["name"],
-         "parent": value["legal_name"], "status": value["status"], "c": contact, "s": student, "review": review, "phones":json.dumps(value["phones"]),"emails":json.dumps(value["emails"])})
+         "parent": value["legal_name"], "status": value["status"], "dob": value["dob"], "study": value["study_status_id"],
+         "leads": json.dumps(value["lead_status_ids"]), "c": contact, "s": student, "review": review,
+         "phones":json.dumps(value["phones"]),"emails":json.dumps(value["emails"])})
     # Published lightweight directory gets new ID-bound cards without a full archive import.
     db.execute(text("INSERT INTO alfa_directory(workspace_id,run_id,contact_id,display_name,phones,emails,needs_review,search_text) "
         "VALUES(:w,:r,:c,:name,CAST(:phones AS jsonb),CAST(:emails AS jsonb),:review,:search) ON CONFLICT(workspace_id,run_id,contact_id) "

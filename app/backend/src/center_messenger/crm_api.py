@@ -4,6 +4,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query, Request
 from sqlalchemy import text
@@ -15,6 +16,7 @@ from center_messenger.alfa_sync import SyncOptions
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_directory import normalized_name, phone_number
 from center_messenger.family_cache import enqueue, cache_status
+from center_messenger.group_links import TOPIC as GROUPS_TOPIC
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}/directory")
 STATUS = {3: "client", 2: "lead", 1: "archive"}
@@ -58,7 +60,7 @@ class DirectoryReader:
         return (
             db.execute(
                 text(
-                    "SELECT c.published_id AS run,c.connection_id,a.origin,a.version,r.finished_at,"
+                    "SELECT c.published_id AS run,c.connection_id,a.origin,a.version,r.finished_at,w.timezone,"
                     "CAST(now() AT TIME ZONE w.timezone AS date) AS today "
                     "FROM alfa_sync_control c JOIN alfa_settings a ON "
                     "a.workspace_id=c.workspace_id "
@@ -214,7 +216,7 @@ class DirectoryReader:
                 r["contact_id"]: r
                 for r in db.execute(
                     text(
-                        "SELECT c.contact_id,count(DISTINCT g.external_id) AS group_count,"
+                        "SELECT c.contact_id,count(DISTINCT (g.branch_id,g.external_id)) AS group_count,"
                         "(array_agg(DISTINCT g.name ORDER BY g.name))[1:4] AS names "
                         "FROM alfa_customers c JOIN alfa_memberships m "
                         "ON m.workspace_id=c.workspace_id AND m.run_id=c.run_id AND "
@@ -316,7 +318,7 @@ class DirectoryReader:
                 db.execute(
                     text(
                         "SELECT c.student_id,c.external_id AS customer_id,"
-                        "g.external_id,g.name,g.branch_id,"
+                        "g.external_id,g.name,g.branch_id,m.b_date,m.e_date,"
                         "b.name AS branch_name FROM alfa_customers c "
                         "JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND "
                         "b.external_id=c.branch_id "
@@ -377,8 +379,16 @@ class DirectoryReader:
                     {**params, "version": snapshot["version"]},
                 ).mappings()
             }
+            group_states = {(row["branch_id"], row["external_id"]): row["payload"] for row in db.execute(text(
+                "SELECT c.branch_id,c.external_id,e.payload FROM alfa_customers c JOIN outbox_events e "
+                "ON e.workspace_id=c.workspace_id AND e.topic=:topic AND e.event_key=concat(CAST(:conn AS text),':',c.branch_id,':',c.external_id) "
+                "WHERE c.workspace_id=:w AND c.run_id=:r AND c.contact_id=:id AND e.payload->>'version'=CAST(:version AS text) "
+                "AND e.payload->>'student'=c.student_id::text AND e.payload->>'contact'=c.contact_id::text "
+                "AND e.payload->>'checked_run'=CAST(:r AS text)"),
+                {**params, "topic": GROUPS_TOPIC, "version": snapshot["version"]}).mappings()}
             for person in people.values():
                 for card in person["cards"]:
+                    card["groups_refreshed_at"] = group_states.get((int(card["branch_id"]), int(card["id"])), {}).get("refreshed_at")
                     source = cached.get((int(card["branch_id"]), int(card["id"])))
                     if source:
                         if snapshot["finished_at"] is None or source["refreshed_at"] >= snapshot["finished_at"]:
@@ -394,6 +404,9 @@ class DirectoryReader:
                             lessons_refreshed_at=source["lessons_refreshed_at"].isoformat() if source["lessons_refreshed_at"] else None,
                             lessons_full_refreshed_at=source["lessons_full_refreshed_at"].isoformat() if source["lessons_full_refreshed_at"] else None,
                         )
+                        zone = ZoneInfo(snapshot.get("timezone", "UTC"))
+                        card["lessons_recent_day"] = source["lessons_refreshed_at"].astimezone(zone).date().isoformat() if source["lessons_refreshed_at"] else None
+                        card["lessons_full_day"] = source["lessons_full_refreshed_at"].astimezone(zone).date().isoformat() if source["lessons_full_refreshed_at"] else None
                     card["needs_mapping_refresh"] = mapping_pending(card)
                     card["needs_refresh"] = card["needs_mapping_refresh"] or source is None or source["refreshed_at"] < datetime.now(
                         UTC
@@ -421,9 +434,16 @@ class DirectoryReader:
                     )
                     if existing is None:
                         group["customer_ids"] = [str(row["customer_id"])]
+                        group["memberships"] = []
                         person["groups"].append(group)
+                        existing = group
                     elif str(row["customer_id"]) not in existing["customer_ids"]:
                         existing["customer_ids"].append(str(row["customer_id"]))
+                    period = {"customer_id": str(row["customer_id"]),
+                              "begin": row["b_date"].isoformat() if row["b_date"] else None,
+                              "end": row["e_date"].isoformat() if row["e_date"] else None}
+                    if period not in existing["memberships"]:
+                        existing["memberships"].append(period)
             for person in people.values():
                 person["balance"] = customer_balance(person["cards"])
                 person["paid_lesson_count"] = customer_paid_lessons(person["cards"])

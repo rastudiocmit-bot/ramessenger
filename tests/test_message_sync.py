@@ -1484,7 +1484,7 @@ class MessageSyncTests(unittest.TestCase):
         self.assertIn("AlfaCRM", meta["history_error"])
         self.assertIsNotNone(self.reader.listing(None, self.workspace)["conversations"][0]["history_error"])
 
-    def family_worker_fixture(self):
+    def family_worker_fixture(self, *, include_groups=False):
         from center_messenger.alfa_service import AlfaConnections
         from center_messenger.family_cache import FamilyCacheWorker
         reader, student = self.family_balance_fixture()
@@ -1499,6 +1499,11 @@ class MessageSyncTests(unittest.TestCase):
             yield Mock()
         connections._host_gate = gate
         worker = FamilyCacheWorker(connections)
+        if not include_groups:
+            # Finance/lesson regressions isolate this independent queue. The
+            # group lifecycle tests below enable all normal worker capabilities.
+            stub=patch('center_messenger.group_links.enqueue',return_value=0)
+            stub.start();self.addCleanup(stub.stop)
         return reader, worker, student
 
     def family_jobs(self):
@@ -1835,6 +1840,177 @@ class MessageSyncTests(unittest.TestCase):
         self.assertIsNone(self.family_facts()['lessons_refreshed_at'])
         worker.schedule(self.workspace)
         self.assertEqual(worker.claim(self.workspace)['topic'],'crm.card.refresh')
+
+    def test_existing_cross_id_student_aliases_are_repaired_in_bounded_idempotent_batches(self):
+        from center_messenger.family_identity import repair
+        reader,worker,shared=self.family_worker_fixture()
+        self.project(self.row())
+        for customer in (8,9):
+            self.add_customer(self.contact,1,customer)
+        self.db.execute(text('UPDATE alfa_customers SET student_id=:s WHERE workspace_id=:w'),{'w':self.workspace,'s':shared})
+        self.db.execute(text("INSERT INTO contact_student_links(workspace_id,contact_id,student_id,managed_by_alfa) VALUES(:w,:c,:s,false)"),
+            {'w':self.workspace,'c':self.contact,'s':shared})
+        messages_before=[m['id'] for m in self.messages()]
+        self.assertEqual(repair(self.db,self.workspace,self.snapshot,limit=1),1)
+        self.assertEqual(repair(self.db,self.workspace,self.snapshot,limit=1),1)
+        self.assertEqual(repair(self.db,self.workspace,self.snapshot,limit=1),1)
+        self.assertEqual(repair(self.db,self.workspace,self.snapshot,limit=1),0)
+        rows=list(self.db.execute(text('SELECT external_id,student_id FROM alfa_customers WHERE workspace_id=:w ORDER BY external_id'),{'w':self.workspace}).mappings())
+        self.assertEqual(len({r['student_id'] for r in rows}),3)
+        self.assertEqual(rows[0]['student_id'],shared)
+        self.assertFalse(self.db.execute(text('SELECT managed_by_alfa FROM contact_student_links WHERE workspace_id=:w AND student_id=:s'),
+            {'w':self.workspace,'s':shared}).scalar_one())
+        self.assertEqual([m['id'] for m in self.messages()],messages_before)
+        self.assertEqual(len(reader.detail(None,self.workspace,self.contact)['students']),3)
+
+    def test_same_customer_entering_another_branch_keeps_its_parent_and_child_without_optional_branch_ids(self):
+        from center_messenger.active_review import apply_customer
+        reader,worker,student=self.family_worker_fixture()
+        settings={'connection_id':self.crm}
+        fact=apply_customer(self.db,self.workspace,settings,self.snapshot,
+            {'id':7,'name':'Child corrected','legal_name':'Parent','is_study':1,'dob':'2015-02-03','_branch':2})
+        self.assertEqual(fact['student_id'],str(student))
+        self.assertEqual(fact['contact_id'],str(self.contact))
+        self.assertEqual(self.db.execute(text('SELECT dob FROM alfa_customers WHERE workspace_id=:w AND branch_id=2'),
+            {'w':self.workspace}).scalar_one(),datetime(2015,2,3).date())
+        apply_customer(self.db,self.workspace,settings,self.snapshot,
+            {'id':7,'name':'Child corrected again','legal_name':'Parent','is_study':1,'_branch':2})
+        self.assertEqual(self.db.execute(text('SELECT dob FROM alfa_customers WHERE workspace_id=:w AND branch_id=2'),
+            {'w':self.workspace}).scalar_one(),datetime(2015,2,3).date())
+
+    def test_group_refresh_replaces_only_the_selected_customer_and_branch(self):
+        from center_messenger import group_links
+        reader,worker,student=self.family_worker_fixture(include_groups=True)
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        job=worker.claim(self.workspace)
+        self.assertEqual(job['topic'],group_links.TOPIC)
+        self.add_customer(self.contact,2,7)
+        self.add_customer(self.contact,1,8)
+        for branch,customer,member in ((1,7,100),(1,8,101),(2,7,100)):
+            self.db.execute(text("INSERT INTO alfa_groups(workspace_id,run_id,branch_id,external_id,name) VALUES(:w,:r,:b,10,'Old') ON CONFLICT DO NOTHING"),
+                {'w':self.workspace,'r':self.run,'b':branch})
+            self.db.execute(text('INSERT INTO alfa_memberships(workspace_id,run_id,branch_id,group_id,external_id,customer_id) VALUES(:w,:r,:b,10,:id,:c)'),
+                {'w':self.workspace,'r':self.run,'b':branch,'id':member,'c':customer})
+        def fetch(*args):
+            self.assertIsNone(self.db.get_nested_transaction())
+            return {20:'New group'},[{'id':200,'group_id':20,'begin':self.at.date(),'end':None}]
+        with patch('center_messenger.group_links.fetch',side_effect=fetch):
+            worker.process(self.workspace,job)
+        values=list(self.db.execute(text('SELECT branch_id,customer_id,group_id FROM alfa_memberships WHERE workspace_id=:w ORDER BY branch_id,customer_id'),
+            {'w':self.workspace}))
+        self.assertEqual(values,[(1,7,20),(1,8,10),(2,7,10)])
+        card=reader.detail(None,self.workspace,self.contact)
+        child=next(s for s in card['students'] if s['id']==str(student))
+        self.assertEqual(child['groups'][0]['id'],'20')
+        self.assertEqual(child['groups'][0]['memberships'][0]['begin'],'2026-10-24')
+        self.assertIsNotNone(child['cards'][0]['groups_refreshed_at'])
+        self.assertIsNone(self.family_facts(),'A light group refresh must not fetch a read client financial card')
+
+    def test_group_refresh_only_schedules_active_clients_and_repeats_after_six_hours(self):
+        from center_messenger import group_links
+        _,worker,student=self.family_worker_fixture(include_groups=True)
+        self.add_customer(self.contact,1,8)
+        self.db.execute(text("UPDATE alfa_customers SET status='archive',student_id=:s WHERE workspace_id=:w AND external_id=8"),{'w':self.workspace,'s':student})
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        job=worker.claim(self.workspace)
+        self.assertEqual(job['customer'],'7')
+        with patch('center_messenger.group_links.fetch',return_value=({},[])):
+            worker.process(self.workspace,job)
+        self.assertIsNone(worker.claim(self.workspace))
+        self.assertEqual(group_links.enqueue(self.db,self.workspace,self.snapshot),0)
+        self.db.execute(text("UPDATE outbox_events SET payload=jsonb_set(payload,'{refreshed_at}',to_jsonb(CAST(:at AS text))) WHERE id=:id"),
+            {'id':job['id'],'at':(datetime.now(UTC)-timedelta(hours=7)).isoformat()})
+        self.assertEqual(group_links.enqueue(self.db,self.workspace,self.snapshot),1)
+        self.assertEqual(worker.claim(self.workspace)['customer'],'7')
+
+    def test_failed_group_refresh_retains_enrollments_last_success_and_its_retry_deadline(self):
+        from center_messenger import group_links
+        from center_messenger.alfa_client import AlfaError
+        reader,worker,_=self.family_worker_fixture(include_groups=True)
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        job=worker.claim(self.workspace)
+        with patch('center_messenger.group_links.fetch',return_value=({10:'Kept'},[{'id':100,'group_id':10,'begin':None,'end':None}])):
+            worker.process(self.workspace,job)
+        at=(datetime.now(UTC)-timedelta(hours=7)).isoformat()
+        self.db.execute(text("UPDATE outbox_events SET payload=jsonb_set(payload,'{refreshed_at}',to_jsonb(CAST(:at AS text))) WHERE id=:id"),{'id':job['id'],'at':at})
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        with patch('center_messenger.group_links.fetch',side_effect=AlfaError('network')):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        before=self.db.execute(text('SELECT payload FROM outbox_events WHERE id=:id'),{'id':job['id']}).scalar_one()
+        self.assertEqual(before['refreshed_at'],at)
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        after=self.db.execute(text('SELECT payload FROM outbox_events WHERE id=:id'),{'id':job['id']}).scalar_one()
+        self.assertEqual(after['available_at'],before['available_at'])
+        self.assertIsNone(worker.claim(self.workspace))
+        details=reader.detail(None,self.workspace,self.contact)
+        self.assertEqual(details['students'][0]['groups'][0]['name'],'Kept')
+        self.assertIsNotNone(details['cache']['groups_updated_at'])
+        self.assertIn('Не удалось обновить группы',details['cache']['error'])
+
+    def test_an_archived_client_groups_only_refresh_after_explicit_open(self):
+        from center_messenger import group_links
+        reader,worker,_=self.family_worker_fixture(include_groups=True)
+        self.db.execute(text("UPDATE alfa_customers SET status='archive' WHERE workspace_id=:w"),{'w':self.workspace})
+        self.assertEqual(group_links.enqueue(self.db,self.workspace,self.snapshot),0)
+        self.assertEqual(group_links.enqueue(self.db,self.workspace,self.snapshot,contact=self.contact),1)
+        with patch('center_messenger.group_links.fetch',return_value=({},[])),patch('center_messenger.family_cache.fetch_family_finance') as money:
+            worker.process(self.workspace,worker.claim(self.workspace))
+        money.assert_not_called()
+        self.assertEqual(group_links.enqueue(self.db,self.workspace,self.snapshot),0)
+
+    def test_group_response_cannot_publish_after_settings_or_source_mapping_changes(self):
+        from center_messenger import group_links
+        _,worker,_=self.family_worker_fixture(include_groups=True)
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        job=worker.claim(self.workspace)
+        def change(*args):
+            self.db.execute(text('UPDATE alfa_settings SET version=2 WHERE workspace_id=:w'),{'w':self.workspace})
+            return {10:'Stale'},[{'id':100,'group_id':10,'begin':None,'end':None}]
+        with patch('center_messenger.group_links.fetch',side_effect=change):
+            worker.process(self.workspace,job)
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_memberships WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one(),0)
+
+    def test_force_request_during_group_io_runs_again_and_preserves_the_live_lease(self):
+        from center_messenger import group_links
+        _,worker,_=self.family_worker_fixture(include_groups=True)
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        job=worker.claim(self.workspace)
+        def request(*args):
+            group_links.enqueue(self.db,self.workspace,self.snapshot,contact=self.contact,force=True)
+            return {},[]
+        with patch('center_messenger.group_links.fetch',side_effect=request):
+            worker.process(self.workspace,job)
+        again=worker.claim(self.workspace)
+        self.assertEqual(again['id'],job['id'])
+        self.assertIsNotNone(again['force_at'])
+        with patch('center_messenger.group_links.fetch',return_value=({},[])) as fetch:
+            worker.process(self.workspace,again)
+        fetch.assert_called_once()
+
+    def test_group_member_id_collision_rolls_back_without_stealing_another_child(self):
+        from center_messenger import group_links
+        _,worker,_=self.family_worker_fixture(include_groups=True)
+        self.db.execute(text("INSERT INTO alfa_groups(workspace_id,run_id,branch_id,external_id,name) VALUES(:w,:r,1,10,'Original')"),{'w':self.workspace,'r':self.run})
+        self.db.execute(text('INSERT INTO alfa_memberships(workspace_id,run_id,branch_id,group_id,external_id,customer_id) VALUES(:w,:r,1,10,100,8)'),{'w':self.workspace,'r':self.run})
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        with patch('center_messenger.group_links.fetch',return_value=({10:'Wrong'},[{'id':100,'group_id':10,'begin':None,'end':None}])):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        self.assertEqual(self.db.execute(text('SELECT customer_id FROM alfa_memberships WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one(),8)
+        self.assertEqual(self.db.execute(text('SELECT name FROM alfa_groups WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one(),'Original')
+
+    def test_group_progress_counts_one_global_customer_and_waits_for_every_branch(self):
+        from center_messenger import group_links
+        _,worker,student=self.family_worker_fixture(include_groups=True)
+        self.add_customer(self.contact,2,7)
+        self.db.execute(text('UPDATE alfa_customers SET student_id=:s WHERE workspace_id=:w'),{'w':self.workspace,'s':student})
+        group_links.enqueue(self.db,self.workspace,self.snapshot)
+        for ready in (0,1):
+            with patch('center_messenger.group_links.fetch',return_value=({},[])):
+                worker.process(self.workspace,worker.claim(self.workspace))
+            report=group_links.progress(self.db,self.workspace,self.snapshot)
+            self.assertEqual(report['total'],1)
+            self.assertEqual(report['ready'],ready)
+            self.assertEqual(report['queued'],1-ready)
 
     def test_list_window_is_unchanged_until_a_real_change_and_moves_rows_without_gaps(self):
         self.project(self.row())

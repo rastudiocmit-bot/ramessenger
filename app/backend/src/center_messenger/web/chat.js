@@ -1045,8 +1045,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const updated = info.updated_at ? `Баланс и абонементы: ${date(info.updated_at)}` : `Готовим карточку · ${info.cached_sources} из ${info.sources}`;
       const lessons = "lessons_updated_at" in info ? info.lessons_updated_at ? `Занятия: ${date(info.lessons_updated_at)}` : "Занятия: загружаем" : "";
       const history = "lessons_history_updated_at" in info ? info.lessons_history_updated_at ? `Год занятий проверен ${date(info.lessons_history_updated_at)}` : "Год занятий: ожидает проверки" : "";
+      const groups = "groups_updated_at" in info ? info.groups_updated_at ? `Группы: ${date(info.groups_updated_at)}` : info.groups_refreshing ? "Группы: проверяем на сервере" : "Группы: из справочника CRM" : "";
       const status = info.refreshing ? "Обновляем на сервере" : info.overdue ? "Ожидает обновления" : info.auto_refresh ? "Обновляем каждые 30 минут" : "Обновляем при открытии карточки";
-      $("#chat-details-sync").textContent = [updated, lessons, history, status, info.error].filter(Boolean).join(" · ");
+      $("#chat-details-sync").textContent = [updated, lessons, history, groups, status, info.error].filter(Boolean).join(" · ");
       detailsDialog.classList.toggle("is-refreshing", Boolean(info.refreshing));
     }
     $("#chat-details-count").textContent = students.length > 1 ? String(students.length) : "";

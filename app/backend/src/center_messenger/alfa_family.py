@@ -274,30 +274,77 @@ def mapping_pending(card):
                for item in card.get("lessons", [])))
 
 
-def _subscription_usage(subscriptions, cards, groups):
-    """ctt_id proves a purchase; subject/type/date prove an unambiguous fallback.
+def _observed_at(value):
+    try:
+        return datetime.fromisoformat(value).astimezone(UTC) if value else None
+    except (ValueError, TypeError):
+        return None
 
-    A request path and Tariff.branch_ids alone never prove actual lesson usage.
-    """
-    available = {str(card["branch_id"]) for card in cards}
-    lessons = {}
+
+def _coverage_windows(card):
+    """Only a complete date window can prove absence from the actual branch."""
+    windows = []
+    for field, days, local_field in (("lessons_refreshed_at", 30, "lessons_recent_day"),
+                                     ("lessons_full_refreshed_at", 365, "lessons_full_day")):
+        at = _observed_at(card.get(field))
+        if at is None:
+            continue
+        checked_day = source_date(card.get(local_field)) or at.date()
+        windows.append((checked_day - timedelta(days=days), checked_day + timedelta(days=90), at))
+    return windows
+
+
+def current_lessons(cards):
+    """Resolve mirrored lesson versions before computing dates or branch links."""
+    available = {(str(c["id"]), str(c["branch_id"])) for c in cards}
+    branches = {}
+    for card in cards:
+        key = (str(card["id"]), str(card["branch_id"]))
+        identifiers = {str(item["id"]) for item in card.get("lessons", []) if str(item.get("branch_id")) == key[1]}
+        branches.setdefault(key, []).append((identifiers, _coverage_windows(card)))
+    observations = {}
     for card in cards:
         for lesson in card.get("lessons", []):
             branch, customer = str(lesson.get("branch_id")), str(lesson.get("customer_id"))
-            if branch not in available or customer != str(card["id"]) or lesson.get("status") not in (1, 3):
+            if (customer, branch) not in available or customer != str(card["id"]) or not lesson.get("date"):
                 continue
-            member = any(str(g["branch_id"]) == branch and int(g["id"]) in lesson.get("group_ids", [])
-                and customer in g.get("customer_ids", []) for g in groups)
-            if not lesson.get("customer_verified") and not member:
-                continue
-            key = (customer, branch, str(lesson["id"]))
             # Updating the recent window does not make retained old lessons a
             # new observation. Legacy rows use their last complete read time.
-            observed_at = lesson.get("observed_at") or card.get("lessons_full_refreshed_at",
-                card.get("lessons_refreshed_at", card.get("refreshed_at"))) or ""
-            if key not in lessons or observed_at > lessons[key][0]:
-                lessons[key] = (observed_at, lesson)
-    for (_, branch, _), (_, lesson) in sorted(lessons.items()):
+            observed_at = _observed_at(lesson.get("observed_at") or card.get("lessons_full_refreshed_at",
+                card.get("lessons_refreshed_at", card.get("refreshed_at")))) or datetime.min.replace(tzinfo=UTC)
+            key = (customer, branch, str(lesson["id"]))
+            observations.setdefault(key, []).append((observed_at, lesson))
+    result = []
+    for (customer, branch, identifier), values in sorted(observations.items()):
+        latest = max(at for at, _ in values)
+        rows = [lesson for at, lesson in values if at == latest]
+        fields = ("date", "time", "status", "subject_id", "lesson_type_id", "group_ids", "subscription_id", "customer_verified", "attended")
+        if any(any(row.get(f) != rows[0].get(f) for f in fields) for row in rows[1:]):
+            continue
+        lesson = rows[0]
+        day = source_date(lesson["date"])
+        absent = any(identifier not in identifiers and any(first <= day <= last and at > latest for first, last, at in windows)
+                     for identifiers, windows in branches.get((customer, branch), []))
+        if not absent and lesson.get("status") in (1, 3):
+            result.append(lesson)
+    return result
+
+
+def _member_at(group, customer, day):
+    if "memberships" in group:
+        return any(str(m["customer_id"]) == customer and (not m.get("begin") or m["begin"] <= day)
+            and (not m.get("end") or m["end"] >= day) for m in group["memberships"])
+    return customer in group.get("customer_ids", [])
+
+
+def _subscription_usage(subscriptions, cards, groups):
+    """ctt_id proves a purchase; subject/type/date prove an unambiguous fallback."""
+    for lesson in current_lessons(cards):
+        branch, customer = str(lesson["branch_id"]), str(lesson["customer_id"])
+        member = any(str(g["branch_id"]) == branch and int(g["id"]) in lesson.get("group_ids", [])
+            and _member_at(g, customer, lesson["date"]) for g in groups)
+        if not lesson.get("customer_verified") and not member:
+            continue
         candidates = []
         explicit = lesson.get("subscription_id")
         for item in subscriptions:
@@ -334,19 +381,27 @@ def customer_subscriptions(cards, *, groups=None):
     Keep raw branch caches and group links intact; never merge by tariff/name.
     """
     observed = {}
+    customer_cards = {}
     for card in cards:
         customer = positive_id(card["id"])
+        if "subscriptions" in card:
+            customer_cards.setdefault(customer, []).append(card)
         for item in card.get("subscriptions", []):
             key = (customer, positive_id(item["id"]))
             observed.setdefault(key, []).append((card, item))
     result = []
     for (customer, subscription), observations in sorted(observed.items()):
-        latest = max(card.get("refreshed_at") or "" for card, _ in observations)
+        snapshots = customer_cards[customer]
+        latest = max(card.get("refreshed_at") or "" for card in snapshots)
+        current_cards = [card for card in snapshots if (card.get("refreshed_at") or "") == latest]
+        inventories = [{positive_id(s["id"]) for s in card["subscriptions"]} for card in current_cards]
+        if not any(subscription in ids for ids in inventories):
+            continue
         current = [item for card, item in observations if (card.get("refreshed_at") or "") == latest]
         item = dict(current[0], customer_id=str(customer), id=subscription)
         # Equally recent contradictory facts are not a second subscription or a
         # trustworthy amount. Keep the identity visible and ask for a refresh.
-        item["needs_review"] = any(any(other.get(field) != item.get(field)
+        item["needs_review"] = any(ids != inventories[0] for ids in inventories[1:]) or any(any(other.get(field) != item.get(field)
             for field in ("tariff_id", "balance", "begin", "end", "archived", "subject_ids", "lesson_type_ids")) for other in current)
         if item["needs_review"]:
             item.update(balance=None, begin=None, end=None, archived=all(other.get("archived", False) for other in current))
@@ -368,18 +423,19 @@ def group_facts(groups, cards, *, today=None, subscriptions=None):
     """A lesson links to a group by branch and ID; ctt_id is the tariff link."""
     today = today or date.today()
     subscriptions = customer_subscriptions(cards, groups=groups) if subscriptions is None else subscriptions
+    lessons = current_lessons(cards)
     for group in groups:
         matched, linked = [], {}
-        for card in cards:
-            if group.get("customer_ids") and str(card.get("id")) not in group["customer_ids"]:
-                continue
-            for lesson in card.get("lessons", []):
-                if str(lesson.get("branch_id")) == str(group["branch_id"]) and int(group["id"]) in lesson["group_ids"]:
-                    matched.append(lesson)
-            for item in subscriptions:
-                if str(item["customer_id"]) == str(card["id"]) and any(use["branch_id"] == str(group["branch_id"])
-                    and str(group["id"]) in use["group_ids"] for use in item["usage"]):
-                    linked[(item["customer_id"],item["id"])] = item
+        for lesson in lessons:
+            customer = str(lesson["customer_id"])
+            if (str(lesson["branch_id"]) == str(group["branch_id"]) and int(group["id"]) in lesson.get("group_ids", [])
+                and (not group.get("customer_ids") or customer in group["customer_ids"])
+                and (lesson.get("customer_verified") or _member_at(group, customer, lesson["date"]))):
+                matched.append(lesson)
+        for item in subscriptions:
+            if (not group.get("customer_ids") or str(item["customer_id"]) in group["customer_ids"]) and any(
+                use["branch_id"] == str(group["branch_id"]) and str(group["id"]) in use["group_ids"] for use in item["usage"]):
+                linked[(item["customer_id"],item["id"])] = item
         before = [
             item for item in matched if item["status"] == 3 and item["date"] <= today.isoformat()
         ]
