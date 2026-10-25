@@ -3,12 +3,12 @@
 // to one attempt and one chat; cancelling fences even promises browsers cannot abort.
 window.CenterVoice = ({ $, state, api }) => {
   const LIMIT = 30, RATE = 16000, HOLD_MS = 220, STREAM_HOLD_MS = 450;
-  const CANCEL_PX = 90, EDIT_PX = { button: 34, stream: 60 }, STILL_PX = 10;
+  const CANCEL_PX = 90, STILL_PX = 10;
   const compose = $("#chat-compose"), input = $("#chat-input"), button = $("#chat-voice"), stream = $("#chat-stream");
   const panel = $("#chat-voice-panel"), label = $("#chat-voice-label"), time = $("#chat-voice-time");
   const level = $("#chat-voice-level"), done = $("#chat-voice-done"), cancel = $("#chat-voice-cancel"), retry = $("#chat-voice-retry");
   const clear = $("#chat-clear"), scroller = stream.closest(".canvas") || stream;
-  let attempt = null, hold = null, preview = null, shared = null, generation = 0;
+  let attempt = null, hold = null, shared = null, generation = 0;
   let status = "idle", suppressClick = false, swallowUntil = 0;
   const supported = () => Boolean(navigator.mediaDevices?.getUserMedia && (window.AudioContext || window.webkitAudioContext));
   const available = () => Boolean(state.voiceInput && state.workspace && !input.disabled && !compose.hidden && supported()
@@ -23,18 +23,11 @@ window.CenterVoice = ({ $, state, api }) => {
   layer.setAttribute("role", "region"); layer.setAttribute("aria-label", "Голосовое сообщение");
   layer.innerHTML = `<div class="voice-hold-stage">
     <div class="voice-hold-orb"><span class="voice-hold-ring"></span><span class="voice-hold-mic"></span></div>
-    <div class="voice-hold-time">0:00</div><div class="voice-hold-hint"></div></div>
-    <div class="voice-hold-card" hidden>
-    <button type="button" class="voice-hold-clear" aria-label="Удалить текст, ничего не отправлять" title="Удалить"></button>
-    <p class="voice-hold-text"></p><p class="voice-hold-note">Проверка перед отправкой. Касание чата отменит отправку и сохранит текст в поле.</p>
-    <div class="voice-hold-bar"><i></i></div><div class="voice-hold-actions">
-    <button type="button" class="btn sec voice-hold-edit">Изменить</button>
-    <button type="button" class="btn primary voice-hold-send">Отправить</button></div></div>`;
-  layer.querySelector(".voice-hold-mic").append(icon("mic")); layer.querySelector(".voice-hold-clear").append(icon("close"));
+    <div class="voice-hold-time">0:00</div><div class="voice-hold-hint"></div></div>`;
+  layer.querySelector(".voice-hold-mic").append(icon("mic"));
   document.body.append(layer);
   const stage = layer.querySelector(".voice-hold-stage"), orb = layer.querySelector(".voice-hold-orb");
   const holdTime = layer.querySelector(".voice-hold-time"), holdHint = layer.querySelector(".voice-hold-hint");
-  const card = layer.querySelector(".voice-hold-card"), cardText = layer.querySelector(".voice-hold-text"), bar = layer.querySelector(".voice-hold-bar i");
 
   function failure(code, message) { return Object.assign(new Error(message || code), { code }); }
   function bounded(promise, ms, signal, code) {
@@ -75,7 +68,7 @@ window.CenterVoice = ({ $, state, api }) => {
     try { Promise.resolve(context.close()).catch(() => {}); } catch (_) { /* Already closed. */ }
   }
   function phase(kind, text = "") {
-    status = kind; panel.dataset.phase = kind; label.textContent = text;
+    status = kind; panel.dataset.phase = kind; label.textContent = text; label.title = kind === "error" ? text : "";
     done.hidden = kind !== "recording"; retry.hidden = kind !== "error";
     retry.textContent = attempt?.clip ? "Повторить" : "Записать";
     time.hidden = level.parentElement.hidden = kind !== "recording";
@@ -84,14 +77,12 @@ window.CenterVoice = ({ $, state, api }) => {
   function render() {
     if (attempt && !current(attempt)) { reset(); return; }
     clear.hidden = !input.value || input.disabled;
-    const can = available(), capture = status === "starting" || status === "recording", busy = Boolean(attempt);
+    const can = available(), busy = Boolean(attempt);
     const empty = !input.value.trim(), phone = matchMedia("(max-width: 719px)").matches;
     button.hidden = !hold && (!can || busy || (phone && !empty));
     compose.classList.toggle("voice-swap", can && phone && empty && !busy);
-    compose.classList.toggle("voice-active", capture);
-    compose.classList.toggle("voice-inline", ["working", "error", "notice"].includes(status));
-    compose.classList.toggle("voice-preview", Boolean(preview));
-    panel.hidden = status === "idle" || status === "preview" || !layer.hidden;
+    compose.classList.toggle("voice-active", status !== "idle");
+    panel.hidden = status === "idle" || !layer.hidden;
   }
   function lockList(on) {
     document.documentElement.classList.toggle("voice-holding", on);
@@ -107,11 +98,7 @@ window.CenterVoice = ({ $, state, api }) => {
     document.documentElement.classList.remove("voice-pending"); lockList(false);
     stage.classList.remove("dragging"); stage.style.transform = "";
   }
-  function closeLayer() {
-    if (preview) clearTimeout(preview.timer);
-    preview = null; layer.hidden = true; layer.dataset.phase = ""; card.hidden = true;
-    if (layer.parentNode !== document.body) document.body.append(layer);
-  }
+  function closeLayer() { layer.hidden = true; layer.dataset.phase = ""; }
   function stopTracks(media) { media?.getTracks().forEach(track => { track.onended = null; track.onmute = null; track.stop(); }); }
   function stopCapture(mine) {
     const capture = mine?.capture; if (!capture) return null;
@@ -155,7 +142,7 @@ window.CenterVoice = ({ $, state, api }) => {
   }
   function fail(mine, error) {
     if (!current(mine)) return;
-    stopCapture(mine); releaseGesture(); closeLayer(); mine.auto = false;
+    stopCapture(mine); releaseGesture(); closeLayer();
     mine.controller.abort(); report(mine, "error", diagnosticCode(error));
     if (!mine.clip) discardContext(mine.context);
     phase("error", errorMessage(error));
@@ -170,15 +157,15 @@ window.CenterVoice = ({ $, state, api }) => {
     return "browser_error";
   }
   function holdPhase(kind) {
-    layer.hidden = false; layer.dataset.phase = kind; card.hidden = kind !== "preview";
+    layer.hidden = false; layer.dataset.phase = kind;
     holdHint.textContent = kind === "starting" ? "Включаем микрофон…"
-      : kind === "recording" ? "Отпустите — отправим\nВверх — отмена · вниз — в поле"
-      : kind === "cancel" ? "Отпустите — запись удалится" : kind === "edit" ? "Отпустите — текст в поле, без отправки" : "";
+      : kind === "recording" ? "Отпустите — текст в поле\nВверх — отмена"
+      : kind === "cancel" ? "Отпустите — запись удалится" : "";
   }
   async function start(prepared = prepare()) {
     if (!available() || attempt) return;
     const mine = { id: crypto.randomUUID(), generation, workspace: state.workspace.id, epoch: state.epoch,
-      controller: new AbortController(), started: performance.now(), frames: 0, rate: RATE, auto: true };
+      controller: new AbortController(), started: performance.now(), frames: 0, rate: RATE };
     attempt = mine; phase("starting", "Включаем микрофон…");
     if (hold?.armed) { holdTime.textContent = `0:00 / ${clock(LIMIT)}`; holdPhase("starting"); render(); }
     let media, source, processor, gain;
@@ -209,7 +196,7 @@ window.CenterVoice = ({ $, state, api }) => {
         time.textContent = holdTime.textContent = `${clock(mine.frames / capture.rate)} / ${clock(LIMIT)}`;
         level.style.transform = `scaleX(${Math.min(1, capture.peak * 6).toFixed(3)})`;
         orb.style.setProperty("--level", Math.min(1, capture.peak * 6).toFixed(3));
-        if (mine.frames / capture.rate >= LIMIT) finish({ auto: Boolean(hold?.armed) });
+        if (mine.frames / capture.rate >= LIMIT) finish();
       };
       context.onstatechange = () => { if (current(mine) && mine.capture && context.state !== "running") fail(mine, failure("audio_interrupted")); };
       for (const track of media.getTracks()) track.onended = () => { if (current(mine) && mine.capture) fail(mine, failure("capture_stalled")); };
@@ -234,7 +221,7 @@ window.CenterVoice = ({ $, state, api }) => {
   function endHold(cancelled = false) {
     const mine = hold; if (!mine) return;
     if (mine.armed) swallowUntil = performance.now() + 600;
-    const toField = layer.dataset.phase === "edit", toCancel = cancelled || layer.dataset.phase === "cancel";
+    const toCancel = cancelled || layer.dataset.phase === "cancel";
     releaseGesture();
     if (!mine.armed) {
       suppressClick = !cancelled && mine.source === "button";
@@ -242,18 +229,16 @@ window.CenterVoice = ({ $, state, api }) => {
       return;
     }
     if (toCancel || attempt?.firstFrame == null) {
-      const wasPreparing = !toCancel && status === "starting";
       if (attempt) report(attempt, "cancelled"); reset();
-      if (wasPreparing) phase("notice", "Микрофон ещё включался. Коснитесь кнопки микрофона для записи.");
       return;
     }
-    finish({ auto: !toField });
+    finish();
   }
   function track(event) {
     if (!hold?.armed || event.pointerId !== hold.id || status !== "recording") return;
     const dy = event.clientY - hold.y, eased = Math.sign(dy) * Math.min(170, Math.abs(dy) * 0.85);
     stage.classList.add("dragging"); stage.style.transform = `translateY(${eased.toFixed(1)}px)`;
-    holdPhase(-dy > CANCEL_PX ? "cancel" : dy > EDIT_PX[hold.source] ? "edit" : "recording");
+    holdPhase(-dy > CANCEL_PX ? "cancel" : "recording");
   }
   // 16 kHz, 16-bit little-endian LPCM accepted directly by SpeechKit.
   function encode(chunks, rate) {
@@ -271,88 +256,56 @@ window.CenterVoice = ({ $, state, api }) => {
     let binary = ""; for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
     return btoa(binary);
   }
-  function insert(text, focus = false) {
+  function insert(text) {
     const value = text.trim(); if (!value) return;
     const before = input.value, joined = before && !/\s$/.test(before) ? ` ${value}` : value;
-    const top = scroller.scrollTop;
-    if (focus) input.focus({ preventScroll: true });
+    const top = scroller.scrollTop, historyTop = stream.scrollTop;
+    const following = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48;
     let inserted = false;
     if (document.activeElement === input) {
       input.setSelectionRange(before.length, before.length);
       try { inserted = document.execCommand("insertText", false, joined); } catch (_) { /* Fallback below. */ }
     }
     if (!inserted || input.value === before) { input.value = before + joined; input.dispatchEvent(new Event("input", { bubbles: true })); }
+    if (!following) stream.scrollTop = historyTop;
     scroller.scrollTop = top;
   }
-  function finish({ auto = false } = {}) {
+  function finish() {
     const mine = attempt; if (!mine || !current(mine) || !mine.capture) return;
     const capture = stopCapture(mine); releaseGesture(); closeLayer();
     if (mine.frames / capture.rate < 0.3) {
-      if (mine.frames / capture.rate < 0.15) { report(mine, "cancelled"); reset(); }
-      else fail(mine, failure("audio_short"));
+      report(mine, "cancelled"); reset();
       return;
     }
-    mine.clip = encode(capture.chunks, capture.rate); send(mine, auto);
+    mine.clip = encode(capture.chunks, capture.rate); transcribe(mine);
   }
-  async function send(mine, auto = false) {
+  async function transcribe(mine) {
     if (!current(mine) || !mine.clip || status === "working") return;
-    mine.controller = new AbortController(); mine.auto = auto;
-    const draft = input.value;
+    mine.controller = new AbortController();
     phase("working", "Распознаём запись…");
     try {
       const result = await api(`/workspaces/${mine.workspace}/voice/transcribe`, { method: "POST",
         data: { audio: base64(mine.clip), attempt_id: mine.id }, timeoutMs: 60000, signal: mine.controller.signal });
       if (!current(mine) || mine.controller.signal.aborted) return;
       mine.clip = null; report(mine, "complete");
-      if (auto && mine.auto && input.value === draft && result.text && !result.warning && !result.fallback) { showPreview(mine, result.text, draft); return; }
       if (result.text) insert(result.text);
-      const warning = result.warning || (!result.text ? "Речь не распознана. Попробуйте говорить ближе к микрофону." : "");
-      reset(); if (warning) phase("notice", warning);
+      // Recognition only edits the draft. Empty speech and provider notices do
+      // not add a row, a popup or a message to the conversation.
+      reset();
     } catch (error) { if (current(mine) && !mine.controller.signal.aborted) fail(mine, error); }
   }
-  function showPreview(mine, text, draft) {
-    const top = scroller.scrollTop;
-    compose.prepend(layer); cardText.textContent = draft.trim() ? `${draft.trim()} ${text}` : text;
-    preview = { mine, text, draft };
-    holdPhase("preview"); phase("preview");
-    bar.style.animation = "none"; void bar.offsetWidth; bar.style.animation = "";
-    const delay = Math.round(Math.min(30000, Math.max(7000, 2500 + cardText.textContent.length * 85)));
-    bar.style.animationDuration = `${delay}ms`;
-    preview.timer = setTimeout(() => commit(true), delay); scroller.scrollTop = top;
-  }
-  function commit(sendNow, focus = false) {
-    if (!preview) return;
-    const { mine, text, draft } = preview;
-    if (!sameScope(mine) || input.disabled || compose.hidden) { reset(); return; }
-    const canSend = sendNow && available() && mine.auto && input.value === draft;
-    closeLayer(); insert(text, focus); reset();
-    if (canSend) compose.requestSubmit ? compose.requestSubmit() : compose.dispatchEvent(new Event("submit", { cancelable: true }));
-  }
-  function interruptPreview(event) {
-    if (event.type === "pointerdown") swallowUntil = 0;
-    if (!attempt) return;
-    if (preview && !card.contains(event.target)) commit(false);
-    else if (status === "working") attempt.auto = false;
-  }
-  document.addEventListener("pointerdown", interruptPreview, true);
-  scroller.addEventListener("wheel", interruptPreview, { passive: true });
-  scroller.addEventListener("touchmove", event => { interruptPreview(event); if (hold?.armed && event.cancelable) event.preventDefault(); }, { passive: false });
+  document.addEventListener("pointerdown", () => { swallowUntil = 0; }, true);
+  scroller.addEventListener("touchmove", event => { if (hold?.armed && event.cancelable) event.preventDefault(); }, { passive: false });
   scroller.addEventListener("scroll", () => {
     if (hold?.armed && scroller.scrollTop !== hold.scrollTop) scroller.scrollTop = hold.scrollTop;
-    else if (preview) commit(false);
-    else if (status === "working" && attempt) attempt.auto = false;
   }, { passive: true });
-  document.addEventListener("keydown", event => {
-    if (event.key === "Escape") { if (preview) commit(false); else if (attempt) reset(); return; }
-    if (preview && !card.contains(event.target)) commit(false);
-    if (status === "working" && attempt) attempt.auto = false;
-  }, true);
+  document.addEventListener("keydown", event => { if (event.key === "Escape" && attempt) reset(); }, true);
   document.addEventListener("click", event => {
-    if (event.detail && performance.now() < swallowUntil && !card.contains(event.target)) {
+    if (event.detail && performance.now() < swallowUntil) {
       swallowUntil = 0; event.preventDefault(); event.stopPropagation();
     }
   }, true);
-  const busy = () => Boolean(attempt || hold || preview);
+  const busy = () => Boolean(attempt || hold);
   button.addEventListener("click", event => {
     if (suppressClick || hold) { suppressClick = false; event.preventDefault(); return; }
     if (event.detail === 0) start(prepare());
@@ -388,25 +341,21 @@ window.CenterVoice = ({ $, state, api }) => {
   stream.addEventListener("contextmenu", event => { if (hold?.source === "stream") event.preventDefault(); });
   button.addEventListener("contextmenu", event => event.preventDefault());
   for (const type of ["touchstart", "touchend"]) button.addEventListener(type, event => { if (event.cancelable) event.preventDefault(); }, { passive: false });
-  layer.querySelector(".voice-hold-send").addEventListener("click", () => commit(true));
-  layer.querySelector(".voice-hold-edit").addEventListener("click", () => commit(false, true));
-  layer.querySelector(".voice-hold-clear").addEventListener("click", reset);
   done.addEventListener("click", () => finish());
   cancel.addEventListener("click", reset);
   retry.addEventListener("click", () => {
     if (status !== "error") return;
-    if (attempt?.clip) send(attempt); else { reset(); start(prepare()); }
+    if (attempt?.clip) transcribe(attempt); else { reset(); start(prepare()); }
   });
   clear.addEventListener("click", () => { if (input.value) { input.value = ""; input.dispatchEvent(new Event("input", { bubbles: true })); } render(); });
-  input.addEventListener("input", () => { if (preview) commit(false); if (status === "working" && attempt) attempt.auto = false; render(); });
+  input.addEventListener("input", render);
   document.addEventListener("cm:voice-availability", render);
   document.addEventListener("cm:chat-selected", reset);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) return;
-    if (preview) commit(false);
     if (attempt) report(attempt, "cancelled"); reset(); discardContext(shared);
   });
-  window.addEventListener("pagehide", () => { if (preview) commit(false); reset(); discardContext(shared); });
+  window.addEventListener("pagehide", () => { reset(); discardContext(shared); });
   window.addEventListener("resize", render);
   new MutationObserver(render).observe(input, { attributes: true, attributeFilter: ["disabled"] });
   new MutationObserver(render).observe(compose, { attributes: true, attributeFilter: ["hidden"] });

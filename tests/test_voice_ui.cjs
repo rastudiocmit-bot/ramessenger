@@ -61,7 +61,7 @@ test('cold permission is preparing; release unlocks and stops a late stream',asy
   assert.equal(s.locked(),true);await s.advance(3000);assert.equal(s.$('#chat-voice-panel').dataset.phase,'starting');
   s.pointer('#chat-voice','pointerup');assert.equal(s.locked(),false);assert.equal(s.$('#voice-hold').hidden,true);
   const stream=s.createMedia();pending.resolve(stream);await flush();assert.ok(stream.track.stops>0);assert.equal(s.transcriptions().length,0);
-  assert.equal(s.$('#chat-input').value,'');assert.equal(s.$('#chat-voice-panel').dataset.phase,'notice');
+  assert.equal(s.$('#chat-input').value,'');assert.equal(s.$('#chat-voice-panel').hidden,true);
 });
 test('permission and resume have finite deadlines with inline retry',async t=>{
   const pending=deferred();const s=setup(t,{getUserMedia:()=>pending.promise});await s.tap();await s.advance(20001);
@@ -96,9 +96,9 @@ test('cancel, interruption, background and page exit clean every capture resourc
     assert.equal(s.transcriptions().length,0,kind);
   }
 });
-test('brief accidental audio is discarded quietly; deliberate short audio is inline',async t=>{
+test('short recordings are discarded quietly without moving the composer',async t=>{
   const s=setup(t);await s.tap();s.frames(1);s.$('#chat-voice-done').click();await flush();assert.equal(s.$('#chat-voice-panel').hidden,true);assert.equal(s.transcriptions().length,0);
-  const r=setup(t);await r.tap();r.frames(3);r.$('#chat-voice-done').click();await flush();assert.equal(r.$('#chat-voice-panel').dataset.phase,'error');assert.match(r.$('#chat-voice-label').textContent,/0,3/);
+  const r=setup(t);await r.tap();r.frames(3);r.$('#chat-voice-done').click();await flush();assert.equal(r.$('#chat-voice-panel').hidden,true);assert.equal(r.transcriptions().length,0);
 });
 test('release unlocks immediately; retry reuses the clip and cannot automatically send',async t=>{
   let count=0;const request=deferred();const s=setup(t,{transcribe:()=>++count===1?request.promise:{text:'Повтор без отправки'}});
@@ -122,23 +122,25 @@ test('late permission and recognition never enter another chat/workspace/session
   const pending=deferred();const r=setup(t,{getUserMedia:()=>pending.promise});await r.tap();r.w.document.dispatchEvent(new r.w.CustomEvent('cm:chat-selected'));
   const stream=r.createMedia();pending.resolve(stream);await flush();assert.ok(stream.track.stops>0);assert.equal(r.$('#chat-voice-panel').hidden,true);
 });
-test('preview is inline and touching/scrolling history keeps text unsent',async t=>{
+test('hold recognition lands in the ordinary draft with no preview or send timer',async t=>{
   const s=setup(t);let submits=0;s.$('#chat-compose').addEventListener('submit',event=>{event.preventDefault();submits++;});
   await s.hold();s.frames();s.pointer('#chat-voice','pointerup');await flush();assert.equal(s.locked(),false);
-  assert.equal(s.$('#voice-hold').dataset.phase,'preview');assert.equal(s.$('#voice-hold').parentElement,s.$('#chat-compose'));
+  assert.equal(s.$('#voice-hold').hidden,true);assert.equal(s.$('#chat-compose #voice-hold'),null);assert.equal(s.$('.voice-hold-card'),null);
   s.pointer('#chat-stream','pointerdown');await s.advance(30000);assert.equal(submits,0);assert.equal(s.$('#chat-input').value,'Распознанный текст');
   assert.equal(s.$('#voice-hold').hidden,true);
 });
-test('typing or scrolling during recognition cancels automatic sending and preserves draft',async t=>{
+test('recognition appends to the latest draft without changing its chat',async t=>{
   const pending=deferred();const s=setup(t,{transcribe:()=>pending.promise});await s.hold();s.frames();s.pointer('#chat-voice','pointerup');await flush();
   s.$('#chat-input').value='Новый черновик.';s.$('#chat-input').dispatchEvent(new s.w.Event('input',{bubbles:true}));
   pending.resolve({text:'Голосом'});await flush();assert.equal(s.$('#chat-input').value,'Новый черновик. Голосом');assert.equal(s.$('#voice-hold').hidden,true);
 });
-test('fallback never auto-sends; a preview timer sends once and only in its source chat',async t=>{
-  const s=setup(t,{transcribe:()=>({text:'Без обработки',fallback:true,warning:'Проверьте текст'})});await s.hold();s.frames();s.pointer('#chat-voice','pointerup');await flush();
-  assert.equal(s.$('#chat-input').value,'Без обработки');assert.equal(s.$('#chat-voice-panel').dataset.phase,'notice');assert.equal(s.$('#voice-hold').hidden,true);
-  const r=setup(t);let submits=0;r.$('#chat-compose').addEventListener('submit',event=>{event.preventDefault();submits++;});
-  await r.hold();r.frames();r.pointer('#chat-voice','pointerup');await flush();await r.advance(30000);assert.equal(submits,1);await r.advance(30000);assert.equal(submits,1);
+test('successful and fallback recognition both stay unsent without automatic notices',async t=>{
+  for(const result of [{text:'Распознано'}, {text:'Без обработки',fallback:true,warning:'Проверьте текст'}]){
+    const s=setup(t,{transcribe:()=>result});let submits=0;s.$('#chat-compose').addEventListener('submit',event=>{event.preventDefault();submits++;});
+    await s.hold();s.frames();s.pointer('#chat-voice','pointerup');await flush();
+    assert.equal(s.$('#chat-input').value,result.text);assert.equal(s.$('#chat-voice-panel').hidden,true);assert.equal(s.$('#voice-hold').hidden,true);
+    await s.advance(60000);assert.equal(submits,0);assert.equal(s.$('.voice-hold-card'),null);
+  }
 });
 test('node setup failure stops the stream and allows a fresh microphone attempt',async t=>{
   const s=setup(t,{nodeError:true});await s.tap();assert.ok(s.media[0].track.stops>0);assert.equal(s.$('#chat-voice-panel').dataset.phase,'error');
@@ -149,9 +151,9 @@ test('diagnostics contain only bounded metadata, not audio or message text',asyn
   assert.equal(events.length,1);const data=events[0].args.data;assert.equal(data.outcome,'complete');assert.ok(data.captured_ms>1000);
   assert.deepEqual(Object.keys(data).sort(),['attempt_id','outcome','code','stage','audio_state','elapsed_ms','first_frame_ms','captured_ms'].sort());assert.ok(!JSON.stringify(data).includes('Распознанный'));
 });
-test('background preserves an already recognised preview as an unsent draft',async t=>{
+test('background preserves an already recognised ordinary draft',async t=>{
   const s=setup(t);let submits=0;s.$('#chat-compose').addEventListener('submit',event=>{event.preventDefault();submits++;});
-  await s.hold();s.frames();s.pointer('#chat-voice','pointerup');await flush();assert.equal(s.$('#voice-hold').dataset.phase,'preview');
+  await s.hold();s.frames();s.pointer('#chat-voice','pointerup');await flush();assert.equal(s.$('#voice-hold').hidden,true);
   s.hide();await s.advance(30000);assert.equal(s.$('#chat-input').value,'Распознанный текст');assert.equal(submits,0);assert.equal(s.locked(),false);
 });
 test('a cold touch tap resumes audio on pointerup, before requesting microphone',async t=>{
@@ -163,4 +165,17 @@ test('a cold touch tap resumes audio on pointerup, before requesting microphone'
 test('a normal chat tap never consumes the next keyboard microphone click',async t=>{
   const s=setup(t);s.pointer('#chat-stream','pointerdown');s.pointer('#chat-stream','pointerup');await flush();assert.equal(s.requests(),0);
   s.$('#chat-voice').click();await flush();assert.equal(s.requests(),1);s.frames(6);assert.equal(s.$('#chat-voice-panel').dataset.phase,'recording');
+});
+test('unrecognised speech leaves no notice and preserves the original draft',async t=>{
+  const s=setup(t,{transcribe:()=>({text:'',warning:'Речь не распознана. Попробуйте говорить ближе к микрофону.'})});
+  s.$('#chat-input').value='Черновик до записи';let submits=0;s.$('#chat-compose').addEventListener('submit',e=>{e.preventDefault();submits++;});
+  await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();
+  assert.equal(s.$('#chat-input').value,'Черновик до записи');assert.equal(s.$('#chat-voice-panel').hidden,true);assert.equal(s.$('#chat-voice-label').textContent,'');
+  assert.equal(s.$('#voice-hold').hidden,true);await s.advance(60000);assert.equal(submits,0);
+});
+test('processing uses the existing composer row and leaves no persistent extra row',async t=>{
+  const pending=deferred();const s=setup(t,{transcribe:()=>pending.promise});await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();
+  assert.equal(s.$('#chat-voice-panel').dataset.phase,'working');assert.equal(s.$('#chat-compose').classList.contains('voice-active'),true);
+  assert.equal(s.$('#chat-compose').classList.contains('voice-inline'),false);
+  pending.resolve({text:''});await flush();assert.equal(s.$('#chat-compose').classList.contains('voice-active'),false);assert.equal(s.$('#chat-voice-panel').hidden,true);
 });
