@@ -273,6 +273,19 @@ test("real cache counters and current card IDs are separate from history and sou
   assert.match(ui.$('#alfa-loader-live-count-label').textContent,/записей/);
   assert.equal(ui.$('#alfa-loader-cards-track').getAttribute('aria-valuemax'),'52');
 });
+test("card work names the exact financial or lesson operation", async t=>{
+  let operation='reading_finance';
+  const ui=setup(t,()=>{
+    const data=loaderReport();data.card_worker.operation=operation;return data;
+  });
+  await ui.app.start();
+  assert.match(ui.$('#alfa-loader-cards-current').textContent,/баланс и абонементы/);
+  operation='reading_recent_lessons';await ui.poll();
+  assert.match(ui.$('#alfa-loader-cards-current').textContent,/недавние и будущие занятия/);
+  operation='reading_lesson_history';await ui.poll();
+  assert.match(ui.$('#alfa-loader-cards-current').textContent,/годовая история занятий/);
+  assert.match(ui.$('#alfa-loader-cards-current').textContent,/9007199254740997/);
+});
 test("archive pause is a server mutation and retains all completed journals and live checks", async t=>{
   let paused=false;const posts=[];
   const ui=setup(t,(url,options)=>{

@@ -1,6 +1,6 @@
 """Read bounded customer finance and lessons from documented AlfaCRM v2api endpoints."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from center_messenger.alfa_client import AlfaError
 from center_messenger.crm_directory import (
@@ -93,9 +93,9 @@ def _lesson(raw, customer_id):
     }
 
 
-def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=None):
-    """Read live customer totals and bounded subscription/lesson details."""
-    today = today or date.today()
+def fetch_family_finance(client, branch_id, customer_id, *, source_customer):
+    """Read live totals/subscriptions without waiting for lesson history."""
+    branch_id = positive_id(branch_id)
     root = f"/v2api/{positive_id(branch_id)}"
     customer_id = positive_id(customer_id)
     if (
@@ -169,9 +169,21 @@ def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=
         item.update(
             names.get(item["tariff_id"], {"name": f"Абонемент №{item['tariff_id']}", "type": None})
         )
-    lessons = []
+    return {"balance": money, "paid_lesson_count": paid, "subscriptions": subscriptions}
+
+
+def fetch_family_lessons(client, branch_id, customer_id, *, today=None, full=False):
+    """Replace a date window, so removed/cancelled lessons do not linger.
+
+    AlfaCRM documents date_from/date_to for lesson/index. A short complete
+    window also detects deletions, unlike a changed-since-only request.
+    """
+    today = today or date.today()
+    root = f"/v2api/{positive_id(branch_id)}"
+    customer_id = positive_id(customer_id)
+    lessons, seen = [], set()
     for status, start, end in (
-        (3, today - timedelta(days=365), today),
+        (3, today - timedelta(days=365 if full else 30), today),
         (1, today, today + timedelta(days=90)),
     ):
         for raw in pages(
@@ -186,14 +198,36 @@ def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=
             maximum=1000,
         ):
             lesson = _lesson(raw, customer_id)
+            if not start.isoformat() <= lesson["date"] <= end.isoformat() or (
+                raw.get("status") is not None and str(raw["status"]) != str(status)
+            ) or lesson["id"] in seen:
+                raise AlfaError("invalid_response")
+            seen.add(lesson["id"])
             lesson["status"] = status
             lessons.append(lesson)
+    return lessons
+
+
+def merge_family_lessons(saved, incoming, *, today, full=False):
+    """Retain older proof of branch/subject/purchase; replace the recent window."""
+    first = (today - timedelta(days=365)).isoformat()
+    recent = (today - timedelta(days=30)).isoformat()
+    replacement_ids = {item["id"] for item in incoming}
+    retained = [] if full else [item for item in saved
+        if first <= item["date"] < recent and item["id"] not in replacement_ids]
+    return sorted(retained + incoming, key=lambda item: (item["date"], item.get("time") or "", item["id"]))
+
+
+def fetch_family_card(client, branch_id, customer_id, *, source_customer, today=None):
+    """Explicit synchronous full refresh, also used by the legacy card endpoint."""
+    today = today or date.today()
+    observed_at = datetime.now(UTC).isoformat()
+    data = fetch_family_finance(client, branch_id, customer_id, source_customer=source_customer)
     return {
+        **data,
         "today": today.isoformat(),
-        "balance": money,
-        "paid_lesson_count": paid,
-        "subscriptions": subscriptions,
-        "lessons": lessons,
+        "lessons": [dict(item, observed_at=observed_at) for item in
+                    fetch_family_lessons(client, branch_id, customer_id, today=today, full=True)],
     }
 
 
@@ -234,6 +268,7 @@ def customer_paid_lessons(cards):
 def mapping_pending(card):
     """Older persistent caches lack the facts needed to prove branch relations."""
     return ("subscriptions" not in card or "lessons" not in card
+        or ("lessons_refreshed_at" in card and card["lessons_refreshed_at"] is None)
         or any("subject_ids" not in item or "lesson_type_ids" not in item for item in card.get("subscriptions", []))
         or any(any(field not in item for field in ("branch_id", "subject_id", "lesson_type_id", "customer_id", "customer_verified"))
                for item in card.get("lessons", [])))
@@ -256,8 +291,12 @@ def _subscription_usage(subscriptions, cards, groups):
             if not lesson.get("customer_verified") and not member:
                 continue
             key = (customer, branch, str(lesson["id"]))
-            if key not in lessons or (card.get("refreshed_at") or "") > lessons[key][0]:
-                lessons[key] = (card.get("refreshed_at") or "", lesson)
+            # Updating the recent window does not make retained old lessons a
+            # new observation. Legacy rows use their last complete read time.
+            observed_at = lesson.get("observed_at") or card.get("lessons_full_refreshed_at",
+                card.get("lessons_refreshed_at", card.get("refreshed_at"))) or ""
+            if key not in lessons or observed_at > lessons[key][0]:
+                lessons[key] = (observed_at, lesson)
     for (_, branch, _), (_, lesson) in sorted(lessons.items()):
         candidates = []
         explicit = lesson.get("subscription_id")

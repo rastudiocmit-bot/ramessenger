@@ -1513,6 +1513,15 @@ class MessageSyncTests(unittest.TestCase):
     def live_family_facts():
         return {'balance':'4123.75','paid_lesson_count':5,'subscriptions':[{'id':40,'balance':'2725.00','subject_ids':[],'lesson_type_ids':[]}],'lessons':[]}
 
+    def finish_family_lessons(self, worker):
+        # A fresh balance is committed before either lesson request starts.
+        for expected in ('crm.card.lessons', 'crm.card.lesson-history'):
+            job = worker.claim(self.workspace)
+            self.assertEqual(job['topic'], expected)
+            with patch('center_messenger.family_cache.fetch_family_lessons', return_value=[]) as remote:
+                worker.process(self.workspace, job)
+            remote.assert_called_once()
+
     def test_family_cache_worker_prepares_pending_cards_without_any_operator_session(self):
         reader, worker, student = self.family_worker_fixture()
         self.project(self.row())
@@ -1524,21 +1533,22 @@ class MessageSyncTests(unittest.TestCase):
         def fetch(*args,**kwargs):
             self.assertIsNone(self.db.get_nested_transaction(), 'Network IO must not hold a database transaction')
             return self.live_family_facts()
-        with patch('center_messenger.family_cache.fetch_family_card',side_effect=fetch) as remote:
+        with patch('center_messenger.family_cache.fetch_family_finance',side_effect=fetch) as remote:
             worker.process(self.workspace,job)
         remote.assert_called_once()
         person = reader.detail(None,self.workspace,self.contact)['students'][0]
         self.assertEqual(person['balance'],'4123.75')
         self.assertEqual(person['cards'][0]['subscriptions'][0]['balance'],'2725.00')
         self.assertEqual(self.family_jobs()[0]['state'],'published')
+        self.finish_family_lessons(worker)
         worker.schedule(self.workspace)
         self.assertIsNone(worker.claim(self.workspace), 'Fresh cards must not refetch on every poll')
 
     def test_family_card_30_minute_clock_does_not_restart_with_each_new_message(self):
         reader, worker, student = self.family_worker_fixture()
         self.project(self.row())
-        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,refreshed_at) "
-            "VALUES (:w,:c,1,7,1,100,now()-interval '29 minutes')"),{'w':self.workspace,'c':self.crm})
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,refreshed_at,lessons_refreshed_at,lessons_full_refreshed_at) "
+            "VALUES (:w,:c,1,7,1,100,now()-interval '29 minutes',now(),now())"),{'w':self.workspace,'c':self.crm})
         worker.schedule(self.workspace)
         self.assertEqual(self.family_jobs(),[])
         self.project(self.row('2',at=self.at+timedelta(minutes=1)))
@@ -1564,7 +1574,7 @@ class MessageSyncTests(unittest.TestCase):
             "WHERE workspace_id=:w AND topic='crm.card.refresh'"),
             {'w':self.workspace,'p':json.dumps({'lease_until':'2000-01-01T00:00:00+00:00'})})
         new_job = restarted.claim(self.workspace)
-        with patch('center_messenger.family_cache.fetch_family_card',return_value=self.live_family_facts()):
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
             worker.process(self.workspace,old_job)
             self.assertIsNone(self.family_facts())
             restarted.process(self.workspace,new_job)
@@ -1574,10 +1584,10 @@ class MessageSyncTests(unittest.TestCase):
         from center_messenger.alfa_client import AlfaError
         reader, worker, _ = self.family_worker_fixture()
         self.project(self.row())
-        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,refreshed_at) "
-            "VALUES (:w,:c,1,7,1,123.45,now()-interval '31 minutes')"),{'w':self.workspace,'c':self.crm})
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,refreshed_at,lessons_refreshed_at,lessons_full_refreshed_at) "
+            "VALUES (:w,:c,1,7,1,123.45,now()-interval '31 minutes',now(),now())"),{'w':self.workspace,'c':self.crm})
         worker.schedule(self.workspace)
-        with patch('center_messenger.family_cache.fetch_family_card',side_effect=AlfaError('network')):
+        with patch('center_messenger.family_cache.fetch_family_finance',side_effect=AlfaError('network')):
             worker.process(self.workspace,worker.claim(self.workspace))
         self.assertEqual(str(self.family_facts()['balance']),'123.45')
         original = dict(self.family_jobs()[0]['payload'])
@@ -1594,7 +1604,7 @@ class MessageSyncTests(unittest.TestCase):
         self.project(self.row())
         worker.schedule(self.workspace)
         self.project(self.row('2',direction='out',at=self.at+timedelta(minutes=1)))
-        with patch('center_messenger.family_cache.fetch_family_card') as remote:
+        with patch('center_messenger.family_cache.fetch_family_finance') as remote:
             worker.process(self.workspace,worker.claim(self.workspace))
         remote.assert_not_called()
         self.assertEqual(self.family_jobs()[0]['state'],'published')
@@ -1612,7 +1622,7 @@ class MessageSyncTests(unittest.TestCase):
         saved = self.family_jobs()[0]['payload']
         self.assertTrue(saved['manual'])
         self.assertEqual(saved['lease_owner'],job['lease_owner'])
-        with patch('center_messenger.family_cache.fetch_family_card',return_value=self.live_family_facts()) as remote:
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()) as remote:
             worker.process(self.workspace,job)
         remote.assert_called_once()
         self.assertIsNotNone(self.family_facts())
@@ -1629,8 +1639,9 @@ class MessageSyncTests(unittest.TestCase):
         result = reader.prepare(None,self.workspace,self.contact,conversation=conversation)
         self.assertTrue(result['cache']['refreshing'])
         self.assertFalse(result['cache']['auto_refresh'])
-        with patch('center_messenger.family_cache.fetch_family_card',return_value=self.live_family_facts()):
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
             worker.process(self.workspace,worker.claim(self.workspace))
+        self.finish_family_lessons(worker)
         self.db.execute(text("UPDATE alfa_family_details SET refreshed_at=now()-interval '31 minutes' WHERE workspace_id=:w"),{'w':self.workspace})
         worker.schedule(self.workspace)
         reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True)
@@ -1652,9 +1663,178 @@ class MessageSyncTests(unittest.TestCase):
         self.assertNotIn('lease_owner',self.family_jobs()[0]['payload'])
         worker.process(self.workspace,job)
         self.assertIsNone(self.family_facts())
-        with patch('center_messenger.family_cache.fetch_family_card',return_value=self.live_family_facts()):
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
             worker.process(self.workspace,worker.claim(self.workspace))
         self.assertEqual(self.family_facts()['settings_version'],2)
+
+    def test_slow_or_failed_lesson_history_cannot_hold_live_money_or_its_next_refresh(self):
+        from center_messenger.family_cache import TOPIC, HISTORY
+        from center_messenger.alfa_client import AlfaError
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        worker.schedule(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        first=reader.detail(None,self.workspace,self.contact)
+        self.assertEqual(first['students'][0]['balance'],'4123.75')
+        self.assertIsNone(first['cache']['lessons_updated_at'])
+        self.assertTrue(first['cache']['refreshing'])
+        with patch('center_messenger.family_cache.fetch_family_lessons',return_value=[]):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        financial_time=self.family_facts()['refreshed_at']
+        history=worker.claim(self.workspace)
+        self.assertEqual(history['topic'],HISTORY)
+        with patch('center_messenger.family_cache.fetch_family_lessons',side_effect=AlfaError('network')):
+            worker.process(self.workspace,history)
+        cache=reader.detail(None,self.workspace,self.contact)['cache']
+        self.assertIn('Баланс и абонементы обновляются отдельно',cache['error'])
+        self.assertEqual(self.family_facts()['refreshed_at'],financial_time)
+        self.assertIsNone(self.family_facts()['lessons_full_refreshed_at'])
+        self.db.execute(text("UPDATE alfa_family_details SET refreshed_at=now()-interval '31 minutes' WHERE workspace_id=:w"),{'w':self.workspace})
+        worker.schedule(self.workspace)
+        money=worker.claim(self.workspace)
+        self.assertEqual(money['topic'],TOPIC)
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value={**self.live_family_facts(),'balance':'5000.00'}):
+            worker.process(self.workspace,money)
+        self.assertEqual(reader.detail(None,self.workspace,self.contact)['students'][0]['balance'],'5000.00')
+
+    def test_financial_refresh_preserves_lesson_proof_and_the_yearly_check_clock(self):
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        lesson={'id':10,'date':'2026-03-01','time':'12:00','branch_id':2,'subject_id':11,'lesson_type_id':1,
+                'customer_id':7,'customer_verified':True,'subscription_id':40,'group_ids':[5],'status':3}
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,lessons,"
+            "refreshed_at,lessons_refreshed_at,lessons_full_refreshed_at) VALUES(:w,:c,1,7,1,100,CAST(:l AS jsonb),"
+            "now()-interval '31 minutes',now(),now()-interval '23 hours')"),{'w':self.workspace,'c':self.crm,'l':json.dumps([lesson])})
+        before=dict(self.family_facts())
+        worker.schedule(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        after=self.family_facts()
+        self.assertEqual(after['lessons'],[lesson])
+        self.assertEqual(after['lessons_refreshed_at'],before['lessons_refreshed_at'])
+        self.assertEqual(after['lessons_full_refreshed_at'],before['lessons_full_refreshed_at'])
+        self.assertIsNone(worker.claim(self.workspace))
+        self.db.execute(text("UPDATE alfa_family_details SET lessons_full_refreshed_at=now()-interval '25 hours' WHERE workspace_id=:w"),{'w':self.workspace})
+        worker.schedule(self.workspace)
+        job=worker.claim(self.workspace)
+        self.assertEqual(job['topic'],'crm.card.lesson-history')
+        with patch('center_messenger.family_cache.fetch_family_lessons',return_value=[]) as remote:
+            worker.process(self.workspace,job)
+        self.assertTrue(remote.call_args.kwargs['full'])
+        self.assertEqual(self.family_facts()['lessons'],[],'A complete daily read must remove deleted old lessons')
+        self.assertEqual(self.family_facts()['refreshed_at'],after['refreshed_at'])
+
+    def test_recent_lesson_job_commits_cancellations_without_erasing_older_proof(self):
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        today=datetime.now(UTC).date()
+        old={'id':10,'date':(today-timedelta(days=100)).isoformat(),'status':3,'time':'12:00','branch_id':2,
+             'subject_id':11,'lesson_type_id':1,'customer_id':7,'customer_verified':True,'subscription_id':40,'group_ids':[5]}
+        removed={**old,'id':11,'date':today.isoformat()}
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,lessons,"
+            "lessons_refreshed_at,lessons_full_refreshed_at) VALUES(:w,:c,1,7,1,100,CAST(:l AS jsonb),"
+            "now()-interval '31 minutes',now())"),{'w':self.workspace,'c':self.crm,'l':json.dumps([old,removed])})
+        before=dict(self.family_facts())
+        worker.schedule(self.workspace)
+        job=worker.claim(self.workspace)
+        self.assertEqual(job['topic'],'crm.card.lessons')
+        with patch('center_messenger.family_cache.fetch_family_lessons',return_value=[]) as remote:
+            worker.process(self.workspace,job)
+        self.assertFalse(remote.call_args.kwargs['full'])
+        self.assertEqual(self.family_facts()['lessons'],[old])
+        self.assertEqual(self.family_facts()['refreshed_at'],before['refreshed_at'])
+        self.assertEqual(self.family_facts()['lessons_full_refreshed_at'],before['lessons_full_refreshed_at'])
+
+    def test_separate_lesson_job_survives_restart_and_stale_owner_cannot_publish(self):
+        from center_messenger.family_cache import FamilyCacheWorker
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        worker.schedule(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        old=worker.claim(self.workspace)
+        self.db.execute(text("UPDATE outbox_events SET payload=jsonb_set(payload,'{lease_until}',to_jsonb(CAST(:at AS text))) WHERE id=:id"),
+            {'id':old['id'],'at':'2000-01-01T00:00:00+00:00'})
+        restarted=FamilyCacheWorker(worker.connections)
+        job=restarted.claim(self.workspace)
+        self.assertEqual(job['id'],old['id'])
+        with patch('center_messenger.family_cache.fetch_family_lessons',return_value=[]) as remote:
+            worker.process(self.workspace,old)
+            remote.assert_not_called()
+            self.assertIsNone(self.family_facts()['lessons_refreshed_at'])
+            restarted.process(self.workspace,job)
+        self.assertIsNotNone(self.family_facts()['lessons_refreshed_at'])
+        self.assertEqual(str(self.family_facts()['balance']),'4123.75')
+
+    def test_force_request_during_lesson_io_preserves_lease_and_runs_again(self):
+        from center_messenger.family_cache import enqueue, LESSONS, HISTORY
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        worker.schedule(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        job=worker.claim(self.workspace)
+        def request_again(*args,**kwargs):
+            enqueue(self.db,self.workspace,self.snapshot,contact=self.contact,force=True,topics=(LESSONS,HISTORY))
+            saved=self.db.execute(text('SELECT payload FROM outbox_events WHERE id=:id'),{'id':job['id']}).scalar_one()
+            self.assertEqual(saved['lease_owner'],job['lease_owner'])
+            return []
+        with patch('center_messenger.family_cache.fetch_family_lessons',side_effect=request_again):
+            worker.process(self.workspace,job)
+        again=worker.claim(self.workspace)
+        self.assertEqual(again['id'],job['id'])
+        self.assertIsNotNone(again['force_at'])
+        with patch('center_messenger.family_cache.fetch_family_lessons',return_value=[]) as remote:
+            worker.process(self.workspace,again)
+        remote.assert_called_once()
+
+    def test_changing_crm_version_drops_old_lesson_proof_with_the_financial_cache(self):
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,lessons,"
+            "lessons_refreshed_at,lessons_full_refreshed_at) VALUES(:w,:c,1,7,0,999,CAST(:l AS jsonb),now(),now())"),
+            {'w':self.workspace,'c':self.crm,'l':json.dumps([{'id':99}])})
+        worker.schedule(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        self.assertEqual(self.family_facts()['lessons'],[])
+        self.assertIsNone(self.family_facts()['lessons_refreshed_at'])
+        self.assertIsNone(self.family_facts()['lessons_full_refreshed_at'])
+
+    def test_card_migration_keeps_existing_lesson_read_times_and_is_reversible(self):
+        path=ROOT/'app/backend/migrations/versions/0015_family_refresh_tiers.py'
+        spec=importlib.util.spec_from_file_location('family_tiers',path)
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        context=MigrationContext.configure(self.db)
+        with Operations.context(context):
+            module.downgrade()
+            self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,refreshed_at) "
+                "VALUES(:w,:c,1,7,1,100,:at)"),{'w':self.workspace,'c':self.crm,'at':self.at})
+            module.upgrade()
+        saved=self.family_facts()
+        self.assertEqual(saved['refreshed_at'],self.at)
+        self.assertEqual(saved['lessons_refreshed_at'],self.at)
+        self.assertEqual(saved['lessons_full_refreshed_at'],self.at)
+
+    def test_lesson_response_from_a_replaced_crm_connection_cannot_be_published(self):
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        worker.schedule(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        job=worker.claim(self.workspace)
+        def change_settings(*args,**kwargs):
+            self.assertIsNone(self.db.get_nested_transaction())
+            self.db.execute(text('UPDATE alfa_settings SET version=2 WHERE workspace_id=:w'),{'w':self.workspace})
+            self.snapshot['version']=2
+            return [{'id':99,'date':datetime.now(UTC).date().isoformat(),'status':1,'time':'12:00'}]
+        with patch('center_messenger.family_cache.fetch_family_lessons',side_effect=change_settings):
+            worker.process(self.workspace,job)
+        self.assertEqual(self.family_facts()['lessons'],[])
+        self.assertIsNone(self.family_facts()['lessons_refreshed_at'])
+        worker.schedule(self.workspace)
+        self.assertEqual(worker.claim(self.workspace)['topic'],'crm.card.refresh')
 
     def test_list_window_is_unchanged_until_a_real_change_and_moves_rows_without_gaps(self):
         self.project(self.row())
@@ -1750,8 +1930,9 @@ class MessageSyncTests(unittest.TestCase):
         worker.schedule(self.workspace)
         job=worker.claim(self.workspace)
         self.assertIsNotNone(job)
-        with patch('center_messenger.family_cache.fetch_family_card',return_value=self.live_family_facts()):
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
             worker.process(self.workspace,job)
+        self.finish_family_lessons(worker)
         worker.schedule(self.workspace)
         self.assertIsNone(worker.claim(self.workspace))
         self.assertFalse(reader.detail(None,self.workspace,self.contact)['students'][0]['cards'][0]['needs_mapping_refresh'])
@@ -2331,8 +2512,8 @@ class MessageSyncTests(unittest.TestCase):
         self.project(self.row())
         for branch in (1, 2):
             self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,"
-                "settings_version,balance,paid_lesson_count,subscriptions,lessons) "
-                "VALUES(:w,:c,:b,7,1,0,0,'[]','[]')"),
+                "settings_version,balance,paid_lesson_count,subscriptions,lessons,lessons_refreshed_at,lessons_full_refreshed_at) "
+                "VALUES(:w,:c,:b,7,1,0,0,'[]','[]',now(),now())"),
                 {"w": self.workspace, "c": self.crm, "b": branch})
             report = family_cache.progress(self.db, self.workspace, self.crm, self.snapshot)
             self.assertEqual(report["total"], 1)

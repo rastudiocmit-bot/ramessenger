@@ -21,7 +21,10 @@ const { fixture } = require('./browser_fixture.cjs');
       const student={id:'student-0',name:'Елизавета Тестовая',balance:'8062.50',paid_lesson_count:9,
         subscriptions:[subscription],cards,groups:[]};
       await context.route('**/chats/*/family*',route=>route.fulfill({contentType:'application/json',body:JSON.stringify({
-        id:'contact-0',name:'Тестовая семья',today:'2026-10-25',phones:[],emails:[],students:[student]})}));
+        id:'contact-0',name:'Тестовая семья',today:'2026-10-25',phones:[],emails:[],students:[student],
+        cache:{ready:true,refreshing:true,auto_refresh:true,updated_at:'2026-10-25T08:00:00Z',
+          lessons_updated_at:'2026-10-25T07:55:00Z',lessons_history_updated_at:'2026-10-24T12:00:00Z',
+          error:'Не удалось обновить занятия. Баланс и абонементы обновляются отдельно.'}})}));
       const open=async()=>{
         await page.goto('https://cabinet.example.test/');await page.waitForSelector('.chat-row');
         if(width<720)await page.locator('.chat-select').first().click();
@@ -33,6 +36,7 @@ const { fixture } = require('./browser_fixture.cjs');
       assert.equal(await stats.nth(1).textContent(),'9 занятий');
       assert.equal(await stats.nth(2).textContent(),'1');
       assert.equal(await page.locator('.family-item-value').count(),1);
+      assert.match(await page.locator('#chat-details-sync').textContent(),/Баланс и абонементы:.*Занятия:.*Год занятий проверен/);
       assert.match(await page.locator('.family-item-main').first().textContent(),/Октябрьской/);
       assert.doesNotMatch(await page.locator('.family-item-main').first().textContent(),/Гражданская/);
       assert.equal(await page.locator('.family-scroll').evaluate(e=>e.scrollWidth<=e.clientWidth+1),true);

@@ -1042,8 +1042,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-details-sync").textContent = times.length ? `Сведения из CRM обновлены ${date(times[0])}` : synced && !Number.isNaN(synced.getTime()) ? `Справочник CRM от ${date(family.snapshot_at)}` : "Справочник CRM";
     if (family.cache) {
       const info = family.cache;
-      const updated = info.updated_at ? `Карточка обновлена ${date(info.updated_at)}` : `Готовим карточку · ${info.cached_sources} из ${info.sources}`;
-      $("#chat-details-sync").textContent = info.error || `${updated}${info.refreshing ? " · обновляем на сервере" : info.overdue ? " · ожидает обновления" : " · каждые 30 минут"}`;
+      const updated = info.updated_at ? `Баланс и абонементы: ${date(info.updated_at)}` : `Готовим карточку · ${info.cached_sources} из ${info.sources}`;
+      const lessons = "lessons_updated_at" in info ? info.lessons_updated_at ? `Занятия: ${date(info.lessons_updated_at)}` : "Занятия: загружаем" : "";
+      const history = "lessons_history_updated_at" in info ? info.lessons_history_updated_at ? `Год занятий проверен ${date(info.lessons_history_updated_at)}` : "Год занятий: ожидает проверки" : "";
+      const status = info.refreshing ? "Обновляем на сервере" : info.overdue ? "Ожидает обновления" : info.auto_refresh ? "Обновляем каждые 30 минут" : "Обновляем при открытии карточки";
+      $("#chat-details-sync").textContent = [updated, lessons, history, status, info.error].filter(Boolean).join(" · ");
       detailsDialog.classList.toggle("is-refreshing", Boolean(info.refreshing));
     }
     $("#chat-details-count").textContent = students.length > 1 ? String(students.length) : "";
