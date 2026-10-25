@@ -52,7 +52,7 @@ const {fixture}=require('./browser_fixture.cjs');
       if(width<720)await page.locator('.chat-select').first().click();
       await page.waitForSelector('.chat-bubble.system.sys');
       const glass=await page.locator('.chat-bubble.system.sys').first().evaluate(e=>({background:getComputedStyle(e).backgroundColor,blur:getComputedStyle(e).backdropFilter}));
-      assert.equal(glass.background,'rgba(255, 255, 255, 0.1)');assert.equal(glass.blur,'blur(10px)');
+      assert.equal(glass.background,'rgba(255, 255, 255, 0.2)');assert.equal(glass.blur,'blur(5px)');
       await page.locator('.chat-bubble.system.sys .system-toggle').first().click();
       await page.locator('.chat-bubble.system.sys .system-body').first().waitFor({state:'visible'});
       const expanded=await page.locator('.chat-bubble.system.sys').first().evaluate(e=>({
