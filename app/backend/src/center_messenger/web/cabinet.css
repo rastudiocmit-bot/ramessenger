@@ -228,10 +228,6 @@ input,textarea{font:inherit;color:inherit}
   background-color:var(--wall);background-image:url(/assets/chat-wallpaper-20261025.webp?v=1);
   background-size:cover;background-position:center}
 .canvas::before{content:"";position:absolute;inset:0;background:var(--veil);pointer-events:none;z-index:0}
-/* Messages scroll beneath the floating header; this band keeps that edge soft. */
-.canvas::after{content:"";position:absolute;top:0;left:0;right:0;z-index:2;pointer-events:none;
-  height:calc(var(--sat) + 72px);opacity:.72;
-  background:linear-gradient(var(--wall) 38%,transparent)}
 .chat-head{position:absolute;top:calc(var(--sat) + 8px);z-index:3;
   left:max(8px,env(safe-area-inset-left,0px));right:max(8px,env(safe-area-inset-right,0px));
   display:flex;align-items:center;gap:11px;min-height:56px;padding:8px 12px 8px 6px;
