@@ -280,20 +280,20 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     assert.equal(await phone.locator('#chat-input').inputValue(), '');
     await phone.waitForTimeout(8000); assert.equal(sent().length, clearSent, '✕ never sends');
 
-    // ✕ in the composer clears the field; hidden while it is empty.
+    // «Очистить» in the composer clears the field; hidden while it is empty.
     assert.equal(await phone.locator('#chat-clear').isHidden(), true);
     const clipEmpty = await phone.locator('#chat-attachment').boundingBox(), bolt = await phone.locator('#chat-templates').boundingBox();
     assert.ok(Math.abs((clipEmpty.y + clipEmpty.height) - (bolt.y + bolt.height)) < 1, 'paperclip opposite the bolt');
     await phone.locator('#chat-input').fill('Черновик');
     await phone.waitForSelector('#chat-clear:not([hidden])'); await save(phone, 'composer-clear-short');
     const clipShort = await phone.locator('#chat-attachment').boundingBox();
-    assert.deepEqual(clipShort, clipEmpty, 'the ✕ does not move the paperclip');
-    await phone.locator('#chat-input').fill('Черновик, который не нужен');
+    assert.deepEqual(clipShort, clipEmpty, '«Очистить» does not move the paperclip');
+    await phone.locator('#chat-input').fill('Черновик, который не нужен, и ещё одна строка текста');
     await phone.waitForSelector('#chat-clear:not([hidden])'); await save(phone, 'composer-clear');
     const clearBox = await phone.locator('#chat-clear').boundingBox(), clipBox = await phone.locator('#chat-attachment').boundingBox();
-    const field = await phone.locator('#chat-compose .field').boundingBox();
-    assert.ok(Math.abs((clearBox.x + clearBox.width / 2) - (clipBox.x + clipBox.width / 2)) < 3, '✕ above the paperclip');
-    assert.ok(clearBox.y < field.y + 16 && clearBox.y + clearBox.height > field.y, '✕ in the top-right corner of the field');
+    assert.equal((await phone.locator('#chat-clear').textContent()).trim(), 'Очистить');
+    assert.ok(clearBox.x + clearBox.width <= clipBox.x + 1, '«Очистить» left of the paperclip');
+    assert.ok(Math.abs((clearBox.y + clearBox.height / 2) - (clipBox.y + clipBox.height / 2)) < 2, 'on the paperclip row');
     await phone.locator('#chat-clear').tap();
     assert.equal(await phone.locator('#chat-input').inputValue(), '');
     await phone.waitForSelector('#chat-clear', { state: 'hidden' });

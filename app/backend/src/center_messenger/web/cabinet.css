@@ -15,12 +15,13 @@
   --sel:#3d8dc4;
   --amber:#3d8dc4; --amber-deep:#3480b4; --amber-ink:#235f88; --amber-tint:#e8f2fa;
   --danger:#235f88; --ok:#2574ad;
-  --bubble-in:#ffffff; --bubble-out:#dceefa; --bubble-ink:#163047;
+  /* Operator's messages: a soft light green; the parent's stay white. */
+  --bubble-in:#ffffff; --bubble-out:#ddf5d4; --bubble-ink:#163047;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(16,27,35,.16));
   --glass:rgba(255,255,255,.72); --glass-line:rgba(255,255,255,.6);
-  /* Keep system plates translucent, with blue-grey ink over the wallpaper. */
-  --sys-bg:rgba(255,255,255,.45); --sys-line:rgba(255,255,255,.55); --sys-ink:#3b4d5a;
-  --sys-btn:rgba(255,255,255,.5); --sys-btn-line:rgba(59,77,90,.34);
+  /* System plates: clearly translucent, with blue-grey ink over the wallpaper. */
+  --sys-bg:rgba(255,255,255,.26); --sys-line:rgba(255,255,255,.4); --sys-ink:#34495a;
+  --sys-btn:rgba(255,255,255,.4); --sys-btn-line:rgba(59,77,90,.3);
   --wall:#6eb8f0; --veil:transparent;
   --card:0 4px 24px rgba(25,37,45,.10);
   --card-soft:0 5px 18px rgba(35,59,81,.05);
@@ -49,10 +50,10 @@
   --sel:#4e9ad1;
   --amber:#4e9ad1; --amber-deep:#4089c0; --amber-ink:#8fc3e8; --amber-tint:#15283a;
   --danger:#8fc3e8; --ok:#66b4e7;
-  --bubble-in:#1a2a31; --bubble-out:#1c3b56; --bubble-ink:#dfeef9;
+  --bubble-in:#1a2a31; --bubble-out:#21432f; --bubble-ink:#e2f2e6;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(0,0,0,.4));
   --glass:rgba(19,31,36,.74); --glass-line:rgba(255,255,255,.07);
-  --sys-bg:rgba(10,20,26,.46); --sys-line:rgba(255,255,255,.13); --sys-ink:#c6d1d9;
+  --sys-bg:rgba(10,20,26,.3); --sys-line:rgba(255,255,255,.1); --sys-ink:#c6d1d9;
   --sys-btn:rgba(255,255,255,.1); --sys-btn-line:rgba(198,209,217,.32);
   --wall:#1b3d55; --veil:rgba(8,18,24,.62);
   --card:0 4px 24px rgba(0,0,0,.38);
@@ -258,8 +259,8 @@ input,textarea{font:inherit;color:inherit}
   background:var(--amber)}
 /* Automation messages collapse to one line with a +/− toggle, as in the cabinet. */
 .sys{align-self:flex-end;max-width:min(88%,520px);margin-top:6px;cursor:pointer;
-  background:var(--sys-bg);backdrop-filter:blur(7px);border-radius:11px;
-  box-shadow:0 3px 12px rgba(25,37,45,.12), inset 0 0 0 1px var(--sys-line);
+  background:var(--sys-bg);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px);border-radius:11px;
+  box-shadow:0 2px 8px rgba(25,37,45,.06), inset 0 0 0 1px var(--sys-line);
   padding:4px 5px 4px 10px;animation:in .14s ease-out;transition:box-shadow .15s}
 .sys:hover{box-shadow:0 3px 14px rgba(25,37,45,.18), inset 0 0 0 1px var(--sys-btn-line)}
 .sys-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -866,6 +867,9 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* Compact reading order: identity and contacts in one block, then the child, what needs
    attention, three numbers, and the detail lists. Type stays at 11.5px and up. */
 .family-head{display:flex;align-items:flex-start;gap:10px;padding:12px 8px 10px 14px;flex:none}
+/* No initials circle here: the same initials are already in the list and the chat
+   header. Name, chips, phone and email start at the card's left edge like the rest. */
+.family-head .family-ava{display:none}
 .family-ava.ava{width:38px;height:38px;font-size:13.5px;margin-top:1px}
 .family-title{flex:1;min-width:0}
 .family-title h2{margin:0;font-size:15.5px;font-weight:650;letter-spacing:-.2px;line-height:1.3;overflow-wrap:anywhere}
@@ -898,7 +902,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-ic{display:grid;place-items:center;width:16px;height:16px;flex:none;color:var(--faint)}
 .family-ic svg{width:15px;height:15px;display:block}
 
-.family-contacts{display:grid;gap:0;padding:2px 0 0 48px;margin-top:-1px}
+.family-contacts{display:grid;gap:0;padding:2px 0 0;margin-top:-1px}
 .family-contact{display:flex;align-items:center;gap:8px;min-height:28px}
 .family-contact a{min-width:0;color:var(--ink);text-decoration:none;font-size:13.5px;font-weight:500;
   font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -957,6 +961,10 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-stat.negative span,.family-stat.negative strong{color:#fff}
 
 .family-part{margin-top:14px}
+/* Section titles («Абонементы», «Группы», «Филиал») as tinted labels, in the same
+   family as the tinted balance cells, so they read at a glance. */
+.family-part>.family-label{display:inline-flex;align-items:center;height:24px;margin:0 0 7px;padding:0 10px;border-radius:7px;
+  background:var(--primary-tint);color:var(--primary-ink);font-size:11.5px;font-weight:750;letter-spacing:.06em}
 .family-list{border:1px solid var(--line-soft);border-radius:11px;overflow:hidden;background:var(--surface)}
 .family-item{display:flex;align-items:center;gap:8px;min-height:40px;padding:6px 6px 6px 10px}
 .family-item+.family-item{border-top:1px solid var(--line-soft)}
@@ -1229,16 +1237,15 @@ body:has(#cabinet[hidden]){overflow:auto}
   display:grid;place-items:center;background:var(--sunken);color:var(--muted)}
 .voice-hold-clear:hover{background:var(--line);color:var(--ink)}
 .voice-hold-clear svg{width:16px;height:16px}
-/* Composer ✕: top-right corner of the field, over the paperclip, which keeps its
-   place opposite the quick-replies bolt. Both sit 4px further right. */
+/* Composer «Очистить»: a small pill left of the paperclip, on the bottom row with
+   the quick-replies bolt; shown only when there is text. Both sit 4px further right. */
 .field{position:relative}
-.field-side{display:flex;align-items:flex-end;align-self:flex-end;flex:none;margin-right:-4px}
-.field-clear{position:absolute;top:-8px;right:10px;z-index:1;width:22px;height:22px;min-height:0;padding:0;margin:0;border:0;border-radius:50%;
-  display:grid;place-items:center;background:var(--surface);color:var(--muted);cursor:pointer;
-  box-shadow:0 1px 4px rgba(25,37,45,.18), inset 0 0 0 1px var(--line)}
-.field-clear::before{content:"";position:absolute;inset:-9px}
-.field-clear:hover{color:var(--ink);background:var(--surface-2)}
-.field-clear svg{width:12px;height:12px;stroke-width:2.6}
+.field-side{display:flex;align-items:center;align-self:flex-end;height:48px;flex:none;gap:2px;margin-right:-4px}
+.field-clear{position:relative;height:26px;min-height:0;padding:0 10px;margin:0;border:0;border-radius:13px;flex:none;
+  display:inline-flex;align-items:center;background:var(--sunken);color:var(--muted);cursor:pointer;
+  font:inherit;font-size:12.5px;font-weight:600;line-height:1;white-space:nowrap;transition:background .15s,color .15s}
+.field-clear::before{content:"";position:absolute;inset:-10px -4px}
+.field-clear:hover{color:var(--ink);background:var(--line)}
 .field-clear[hidden]{display:none}
 
 /* Independent sync processes and personal name presentation. */
