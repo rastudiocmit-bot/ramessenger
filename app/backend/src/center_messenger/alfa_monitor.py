@@ -37,7 +37,7 @@ class AlfaSyncMonitor:
             if value.get("client"):
                 state["last_client"] = deepcopy(value["client"])
             if event:
-                state["recent"].insert(0, {**{key: state.get(key) for key in ("branch_id", "direction", "page")},
+                state["recent"].insert(0, {**{key: state.get(key) for key in ("branch_id", "direction", "page", "flow")},
                                            **event, "id": str(uuid4()),
                                            "at": state["updated_at"], "committed": False})
                 del state["recent"][RECENT_LIMIT:]

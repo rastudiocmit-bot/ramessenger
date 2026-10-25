@@ -8,10 +8,12 @@ TOPIC = "crm.history.page"
 
 
 def record_pages(db, workspace, connection, original, cursor, requests, results):
+    if cursor.get("archive_paused"):
+        return
     for (branch, direction, page), result in zip(requests, results, strict=True):
         key = f"{branch}:{direction}"
         scan = cursor.get(f"scan_id:{key}")
-        if not scan or original.get(f"complete:{key}") or result.get("error"):
+        if not scan or original.get(f"complete:{key}") or result.get("error") or result.get("skipped"):
             continue
         # Catch-up pages belong to the new-message feed, not the initial scan.
         if page != original.get(key, 0):

@@ -83,6 +83,73 @@ def cache_status(db, workspace, connection, cards, contact, version):
                      if any(job.get("error") for job in jobs) else None}
 
 
+def current(db, workspace, connection):
+    """Only a leased, current-source job can be displayed as processing now."""
+    row = db.execute(text("""
+      SELECT e.payload,c.name AS student_name,coalesce(nullif(c.legal_name,''),d.display_name,c.name) AS name
+      FROM outbox_events e JOIN alfa_settings s ON s.workspace_id=e.workspace_id
+        AND s.connection_id=:conn AND s.secret_ciphertext IS NOT NULL
+      JOIN alfa_sync_control sc ON sc.workspace_id=s.workspace_id AND sc.connection_id=s.connection_id
+      JOIN alfa_customers c ON c.workspace_id=s.workspace_id AND c.run_id=sc.published_id
+        AND c.branch_id::text=e.payload->>'branch' AND c.external_id::text=e.payload->>'customer'
+        AND c.contact_id::text=e.payload->>'contact' AND c.student_id::text=e.payload->>'student'
+      JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND b.connection_id=s.connection_id
+        AND b.external_id=c.branch_id AND b.available
+      LEFT JOIN alfa_directory d ON d.workspace_id=c.workspace_id AND d.run_id=c.run_id AND d.contact_id=c.contact_id
+      WHERE e.workspace_id=:w AND e.topic=:topic AND e.state='pending'
+        AND e.payload->>'connection'=CAST(:conn AS text) AND e.payload->>'version'=s.version::text
+        AND e.payload->>'lease_owner' IS NOT NULL AND (e.payload->>'lease_until')::timestamptz>now()
+      ORDER BY e.created_at,e.id LIMIT 1
+    """), {"w": workspace, "conn": connection, "topic": TOPIC}).mappings().one_or_none()
+    if not row:
+        return None
+    job = row["payload"]
+    return {"name": row["name"], "student_name": row["student_name"],
+            "customer_id": job["customer"], "branch_id": job["branch"],
+            "started_at": job.get("started_at"), "lease_until": job["lease_until"],
+            "manual": bool(job.get("manual")), "operation": "reading_card"}
+
+
+def progress(db, workspace, connection, snapshot):
+    """Count families needing an answer, without multiplying branch source cards."""
+    at = datetime.now(UTC).isoformat()
+    empty = {"configured": bool(snapshot), "total": 0, "ready": 0, "cached": 0,
+             "queued": 0, "errors": 0, "next_retry_at": None, "interval_minutes": 30, "as_of": at}
+    if not snapshot or snapshot["connection_id"] != connection:
+        return empty
+    row = db.execute(text("""
+      WITH families AS (
+        SELECT c.contact_id,
+          bool_and(f.customer_id IS NOT NULL) AS cached,
+          bool_and(f.customer_id IS NOT NULL AND f.refreshed_at>now()-interval '30 minutes'
+            AND NOT """ + MAPPING_STALE_SQL + """) AS ready
+        FROM alfa_customers c JOIN alfa_branches b ON b.workspace_id=c.workspace_id
+          AND b.connection_id=:conn AND b.external_id=c.branch_id AND b.available
+        JOIN alfa_settings s ON s.workspace_id=c.workspace_id AND s.connection_id=:conn
+          AND s.secret_ciphertext IS NOT NULL
+        LEFT JOIN alfa_family_details f ON f.workspace_id=c.workspace_id AND f.connection_id=:conn
+          AND f.branch_id=c.branch_id AND f.customer_id=c.external_id AND f.settings_version=s.version
+        WHERE c.workspace_id=:w AND c.run_id=:run AND c.contact_id IS NOT NULL AND c.student_id IS NOT NULL
+          AND EXISTS(SELECT 1 FROM conversations q WHERE q.workspace_id=c.workspace_id
+            AND q.contact_id=c.contact_id AND q.kind='direct' AND q.needs_reply)
+        GROUP BY c.contact_id
+      ), jobs AS (
+        SELECT e.payload FROM outbox_events e JOIN alfa_settings s ON s.workspace_id=e.workspace_id
+          AND s.connection_id=:conn AND s.secret_ciphertext IS NOT NULL
+        WHERE e.workspace_id=:w AND e.topic=:topic AND e.state='pending'
+          AND e.payload->>'connection'=CAST(:conn AS text) AND e.payload->>'version'=s.version::text
+          AND EXISTS(SELECT 1 FROM families f WHERE f.contact_id::text=e.payload->>'contact')
+      )
+      SELECT (SELECT count(*) FROM families) AS total,
+        (SELECT count(*) FROM families WHERE ready) AS ready,
+        (SELECT count(*) FROM families WHERE cached) AS cached,
+        (SELECT count(DISTINCT payload->>'contact') FROM jobs) AS queued,
+        (SELECT count(DISTINCT payload->>'contact') FROM jobs WHERE payload ? 'error') AS errors,
+        (SELECT min((payload->>'available_at')::timestamptz) FROM jobs WHERE payload ? 'error') AS next_retry_at
+    """), {"w": workspace, "conn": connection, "run": snapshot["run"], "topic": TOPIC}).mappings().one()
+    return empty | dict(row)
+
+
 class _TariffCache:
     """Only branch tariff metadata is shared; client money is always read live."""
     def __init__(self, client, cache, scope):
@@ -126,7 +193,8 @@ class FamilyCacheWorker:
             if not row:
                 return None
             job = dict(row["payload"])
-            job.update(lease_owner=self.owner, lease_until=(datetime.now(UTC) + LEASE).isoformat())
+            job.update(lease_owner=self.owner, lease_until=(datetime.now(UTC) + LEASE).isoformat(),
+                       started_at=datetime.now(UTC).isoformat())
             db.execute(text("UPDATE outbox_events SET payload=CAST(:p AS jsonb) WHERE workspace_id=:w AND id=:id"),
                        {"w": workspace, "id": row["id"], "p": json.dumps(job)})
             return {**job, "id": row["id"]}

@@ -66,17 +66,21 @@ class SyncInput(InputModel):
     branch_id: int | None = Field(default=None, gt=0, le=2147483647)
     direction: Literal["receive", "sent"] | None = None
     review_active: bool = False
+    archive_paused: bool | None = None
 
 
 @router.post("/sync", status_code=202)
 def sync(workspace_id: UUID, request: Request, model: SyncInput | None = None):
     service(request)
     model = model or SyncInput()
-    if (model.branch_id is None) != (model.direction is None) or (model.review_active and model.branch_id is not None):
+    if ((model.branch_id is None) != (model.direction is None)
+        or (model.review_active and model.branch_id is not None)
+        or (model.archive_paused is not None and (model.review_active or model.branch_id is not None))):
         from center_messenger.auth_security import AuthError
-        raise AuthError(422, "Укажите один журнал или проверку действующих.")
+        raise AuthError(422, "Выберите одно действие: журнал, проверку действующих или паузу архива.")
     return request.app.state.alfa_max.sync(identity(request, mutation=True), workspace_id,
-        branch=model.branch_id, direction=model.direction, review_active=model.review_active)
+        branch=model.branch_id, direction=model.direction, review_active=model.review_active,
+        archive_paused=model.archive_paused)
 
 
 @router.get("/sync-progress")
