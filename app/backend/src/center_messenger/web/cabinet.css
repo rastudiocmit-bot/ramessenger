@@ -821,7 +821,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* Client card. One panel, two entrances: a drawer floating at the right edge from 720px,
    a bottom sheet on a phone. The content is one column either way, so it reads the same. */
 .family-drawer{position:fixed;margin:0;padding:0;border:0;background:transparent;color:var(--ink);
-  max-width:none;max-height:none;overflow:visible}
+  max-width:none;max-height:none;overflow:visible;box-shadow:none}
 .family-drawer::backdrop{background:rgba(12,24,32,.3);backdrop-filter:blur(2px);animation:family-fade .24s ease-out}
 .family-drawer.is-closing::backdrop{animation:family-fade-out .2s ease-in forwards}
 .family-panel{display:flex;flex-direction:column;height:100%;background:var(--surface);color:var(--ink);overflow:hidden;
