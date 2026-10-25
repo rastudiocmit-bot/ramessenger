@@ -19,6 +19,11 @@ from center_messenger.auth_security import AuthError
 TOPIC = "crm.card.refresh"
 INTERVAL = timedelta(minutes=30)
 LEASE = timedelta(seconds=90)
+MAPPING_STALE_SQL = """(EXISTS(SELECT 1 FROM jsonb_array_elements(f.subscriptions) item
+    WHERE NOT(item ? 'subject_ids') OR NOT(item ? 'lesson_type_ids'))
+    OR EXISTS(SELECT 1 FROM jsonb_array_elements(f.lessons) item
+    WHERE NOT(item ? 'branch_id') OR NOT(item ? 'subject_id') OR NOT(item ? 'lesson_type_id')
+      OR NOT(item ? 'customer_id') OR NOT(item ? 'customer_verified')))"""
 
 
 def enqueue(db, workspace, snapshot, *, contact=None, force=False):
@@ -38,7 +43,7 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False):
         AND (CAST(:contact AS uuid) IS NULL OR c.contact_id=CAST(:contact AS uuid))
         AND (:manual OR EXISTS(SELECT 1 FROM conversations q WHERE q.workspace_id=c.workspace_id
           AND q.contact_id=c.contact_id AND q.kind='direct' AND q.needs_reply))
-        AND (:force OR f.refreshed_at IS NULL OR f.refreshed_at<=now()-interval '30 minutes')
+        AND (:force OR f.refreshed_at IS NULL OR f.refreshed_at<=now()-interval '30 minutes' OR """ + MAPPING_STALE_SQL + """)
       ON CONFLICT (workspace_id,topic,event_key) DO UPDATE SET
         state='pending',payload=CASE WHEN outbox_events.state='pending'
           AND outbox_events.payload->>'version'=EXCLUDED.payload->>'version'
@@ -64,13 +69,15 @@ def cache_status(db, workspace, connection, cards, contact, version):
     keys = {(card["branch_id"], card["id"]) for card in sources}
     jobs = [job for job in jobs if (job["branch"], job["customer"]) in keys]
     ready = len(times) == len(sources) and bool(sources)
+    mapping_pending = any(card.get("needs_mapping_refresh") for card in sources)
     updated = min(times) if ready else None
     automatic = db.execute(text("SELECT EXISTS(SELECT 1 FROM conversations WHERE workspace_id=:w "
         "AND contact_id=:c AND needs_reply AND kind='direct')"), {"w": workspace, "c": contact}).scalar_one()
     return {"auto_refresh": bool(automatic), "ready": ready, "refreshing": bool(jobs), "updated_at": updated.isoformat() if updated else None,
             "next_refresh_at": (updated + INTERVAL).isoformat() if updated else None,
             "interval_minutes": 30, "sources": len(sources), "cached_sources": len(times),
-            "overdue": not ready or updated + INTERVAL <= datetime.now(UTC),
+            "mapping_pending": mapping_pending,
+            "overdue": not ready or mapping_pending or updated + INTERVAL <= datetime.now(UTC),
             "retry_at": min((job["available_at"] for job in jobs), default=None),
             "error": "Не удалось обновить CRM. Сохранены последние полученные сведения."
                      if any(job.get("error") for job in jobs) else None}
