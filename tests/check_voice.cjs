@@ -283,7 +283,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     // «Очистить» in the composer clears the field; hidden while it is empty.
     assert.equal(await phone.locator('#chat-clear').isHidden(), true);
     const clipEmpty = await phone.locator('#chat-attachment').boundingBox(), bolt = await phone.locator('#chat-templates').boundingBox();
-    assert.ok(Math.abs((clipEmpty.y + clipEmpty.height) - (bolt.y + bolt.height)) < 1, 'paperclip opposite the bolt');
+    assert.ok(Math.abs((clipEmpty.y + clipEmpty.height / 2) - (bolt.y + bolt.height / 2)) < 1, 'paperclip opposite the bolt');
     await phone.locator('#chat-input').fill('Черновик');
     await phone.waitForSelector('#chat-clear:not([hidden])'); await save(phone, 'composer-clear-short');
     const clipShort = await phone.locator('#chat-attachment').boundingBox();
@@ -291,9 +291,13 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await phone.locator('#chat-input').fill('Черновик, который не нужен, и ещё одна строка текста');
     await phone.waitForSelector('#chat-clear:not([hidden])'); await save(phone, 'composer-clear');
     const clearBox = await phone.locator('#chat-clear').boundingBox(), clipBox = await phone.locator('#chat-attachment').boundingBox();
-    assert.equal((await phone.locator('#chat-clear').textContent()).trim(), 'Очистить');
-    assert.ok(clearBox.x + clearBox.width <= clipBox.x + 1, '«Очистить» left of the paperclip');
-    assert.ok(Math.abs((clearBox.y + clearBox.height / 2) - (clipBox.y + clipBox.height / 2)) < 2, 'on the paperclip row');
+    // On a phone it is a small ✕ at the top of the field, right above the paperclip,
+    // and it does not narrow the text.
+    assert.ok(clearBox.width <= 26 && clearBox.height <= 26, 'a small ✕ on the phone');
+    assert.ok(Math.abs((clearBox.x + clearBox.width / 2) - (clipBox.x + clipBox.width / 2)) < 2, '✕ above the paperclip');
+    assert.ok(clearBox.y + clearBox.height <= clipBox.y + 2, '✕ is above, not beside');
+    const fit = await phone.evaluate(() => { const t = document.querySelector('#chat-input'); return t.scrollHeight - t.clientHeight; });
+    assert.ok(fit <= 1, 'no line of the text is cut off');
     await phone.locator('#chat-clear').tap();
     assert.equal(await phone.locator('#chat-input').inputValue(), '');
     await phone.waitForSelector('#chat-clear', { state: 'hidden' });

@@ -811,7 +811,18 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (width !== entry.contentRect.width) {
         width = entry.contentRect.width; if (width > 0) resizeCompose();
       }
-    }).observe($("#chat-input").parentElement);
+    // Watch the text area itself: it narrows when «Очистить» appears beside it
+    // (the field around it does not change), and the text must re-wrap in full.
+    }).observe($("#chat-input"));
+    // When the composer grows or shrinks (a new line, the ✕ appearing), the newest
+    // message must stay in view above it instead of sliding underneath.
+    const stream = $("#chat-stream");
+    let pinned = true, composeHeight = 0;
+    stream.addEventListener("scroll", () => { pinned = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48; }, { passive: true });
+    new ResizeObserver(([entry]) => {
+      const height = entry.contentRect.height;
+      if (height !== composeHeight) { composeHeight = height; if (pinned) stream.scrollTop = stream.scrollHeight; }
+    }).observe($("#chat-compose"));
   }
   document.fonts?.addEventListener("loadingdone", resizeCompose);
   $("#chat-compose").addEventListener("submit", event => { event.preventDefault(); submit(); });
