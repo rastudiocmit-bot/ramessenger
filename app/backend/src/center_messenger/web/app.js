@@ -3,7 +3,6 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const state = { user: null, csrf: null, workspaces: [], workspace: null, pane: "messages", chatView: "all", invite: null, alfa: null, alfaBusy: false, alfaMax: null, alfaMaxBusy: false, epoch: 0 };
   const roles = { owner: "Владелец", admin: "Администратор", branch_manager: "Руководитель филиала", operator: "Оператор", observer: "Наблюдатель" };
-  let toastTimer;
 
   function node(tag, text, className) {
     const result = document.createElement(tag);
@@ -12,14 +11,22 @@
     return result;
   }
   function show(element, visible = true) { element.hidden = !visible; }
-  function toast(message, error = false) {
-    const target = $("#toast");
-    target.textContent = message;
-    target.classList.toggle("error-toast", error);
-    show(target);
-    clearTimeout(toastTimer);
-    // In the middle of the screen it should not linger: long enough to read.
-    toastTimer = setTimeout(() => show(target, false), Math.min(6500, 2200 + String(message).length * 55));
+  // Routine successes need no notification. Errors stay in the relevant form;
+  // this helper never creates a floating layer, timer or focus change.
+  function feedback(message, error = false, target = null) {
+    if (!message) return;
+    const dialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+    const pane = document.querySelector(`[data-page="${state.pane}"]:not([hidden])`);
+    target ||= dialog?.querySelector("form, .family-scroll, .family-panel") || dialog
+      || (state.pane === "messages" ? (!$("#chat-compose").hidden ? $("#chat-compose") : $("#chat-list-notice")) : pane)
+      || $("#auth");
+    let line = target.querySelector(":scope > .action-feedback");
+    if (!error) { line?.remove(); return; }
+    if (!line) {
+      line = node("p", "", "action-feedback"); line.setAttribute("role", "status");
+      line.setAttribute("aria-live", "polite"); target.append(line);
+    }
+    line.textContent = message;
   }
   function notice(message, target = $("#auth-error")) {
     target.textContent = message || "";
@@ -59,13 +66,14 @@
     cabinet.leave();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
     ["#user-name", "#user-email", "#user-avatar", "#workspace-role", "#workspace-timezone"].forEach(selector => { $(selector).textContent = ""; });
-    $("#invite-url").value = ""; show($("#toast"), false);
+    $("#invite-url").value = "";
+    document.querySelectorAll(".action-feedback").forEach(line => line.remove());
   }
   function clearPasswords() {
     document.querySelectorAll('input[type="password"], .password-field input').forEach(input => { input.value = ""; input.type = "password"; });
     document.querySelectorAll(".reveal").forEach(button => { button.textContent = "Показать"; button.setAttribute("aria-label", "Показать пароль"); button.setAttribute("aria-pressed", "false"); });
   }
-  async function api(path, { method = "GET", data, track = true, timeoutMs = 0 } = {}) {
+  async function api(path, { method = "GET", data, track = true, timeoutMs = 0, signal } = {}) {
     const epoch = state.epoch;
     const headers = { "Accept": "application/json" };
     if (method !== "GET") {
@@ -73,16 +81,23 @@
       if (state.csrf) headers["X-CSRF-Token"] = state.csrf;
     }
     let response, payload = null;
-    const controller = timeoutMs ? new AbortController() : null;
-    const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    const controller = timeoutMs || signal ? new AbortController() : null;
+    let timedOut = false;
+    const abort = () => controller?.abort();
+    if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
+    const timeout = timeoutMs ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs) : null;
     try {
       response = await fetch(`/api${path}`, { method, headers, credentials: "same-origin", cache: "no-store", signal: controller?.signal, body: method === "GET" ? undefined : JSON.stringify(data || {}) });
       if (response.status !== 204) {
         try { payload = await response.json(); } catch (error) { if (controller?.signal.aborted) throw error; }
       }
-    } catch (_) { throw new Error("Не удалось связаться с сервисом. Проверьте соединение."); }
-    finally { if (timeout !== null) clearTimeout(timeout); }
-    if (track && epoch !== state.epoch) throw new DOMException("Устаревший запрос", "AbortError");
+    } catch (_) {
+      if (signal?.aborted || (track && epoch !== state.epoch)) throw new DOMException("Отменено", "AbortError");
+      const error = new Error(timedOut ? "Сервис не ответил вовремя. Попробуйте ещё раз." : "Не удалось связаться с сервисом. Проверьте соединение.");
+      error.name = timedOut ? "TimeoutError" : "NetworkError"; error.code = timedOut ? "timeout" : "network";
+      throw error;
+    } finally { if (timeout !== null) clearTimeout(timeout); signal?.removeEventListener("abort", abort); }
+    if (signal?.aborted || (track && epoch !== state.epoch)) throw new DOMException("Устаревший запрос", "AbortError");
     if (!response.ok) {
       const error = new Error(typeof payload?.detail === "string" ? payload.detail : "Не удалось выполнить действие. Попробуйте позже.");
       error.status = response.status;
@@ -94,11 +109,12 @@
   async function busy(form, action, errorTarget = null) {
     const disabled = [...form.querySelectorAll("input,select,button")].map(control => [control, control.disabled]);
     disabled.forEach(([control]) => { control.disabled = true; });
+    form.querySelectorAll(".action-feedback").forEach(line => line.remove());
     if (errorTarget) notice("", errorTarget);
     try { await action(); }
     catch (error) {
       if (error.name !== "AbortError") {
-        if (errorTarget) notice(error.message, errorTarget); else toast(error.message, true);
+        if (errorTarget) notice(error.message, errorTarget); else feedback(error.message, true, form);
       }
     } finally { disabled.forEach(([control, previous]) => { control.disabled = previous; }); }
   }
@@ -211,7 +227,7 @@
     const workspace = state.workspace;
     await busy($("#members-list"), async () => {
       await api(`/workspaces/${workspace.id}/members/${member.user_id}/role`, { method: "POST", data: { role } });
-      toast("Роль сотрудника обновлена."); await loadMembers();
+      feedback("Роль сотрудника обновлена."); await loadMembers();
     });
   }
   async function loadMembers() {
@@ -251,7 +267,7 @@
     const remove = node("button", "Отозвать доступ", "btn sec danger-text"); remove.type = "button";
     remove.addEventListener("click", async () => {
       if (!await confirm("Отозвать доступ?", `${member.display_name} потеряет доступ к этому центру.`, "Отозвать доступ")) return;
-      await busy(dialog, async () => { await api(`/workspaces/${workspace.id}/members/${member.user_id}/remove`, { method: "POST" }); dialog.close(); toast("Доступ сотрудника отозван."); await loadMembers(); });
+      await busy(dialog, async () => { await api(`/workspaces/${workspace.id}/members/${member.user_id}/remove`, { method: "POST" }); dialog.close(); feedback("Доступ сотрудника отозван."); await loadMembers(); });
     }); body.append(remove); dialog.showModal();
   }
   async function loadSessions() {
@@ -264,7 +280,7 @@
       row.append(details);
       if (!session.current) {
         const button = node("button", "Завершить", "secondary"); button.type = "button";
-        button.addEventListener("click", () => busy(row, async () => { await api(`/auth/sessions/${session.id}/revoke`, { method: "POST" }); toast("Сессия завершена."); await loadSessions(); }));
+        button.addEventListener("click", () => busy(row, async () => { await api(`/auth/sessions/${session.id}/revoke`, { method: "POST" }); feedback("Сессия завершена."); await loadSessions(); }));
         row.append(button);
       }
       list.append(row);
@@ -314,7 +330,7 @@
       const data = { token: state.invite };
       if (!state.user) { data.display_name = form.elements.display_name.value; data.password = form.elements.password.value; }
       const payload = await api("/invitations/accept", { method: "POST", data });
-      state.invite = null; await enter(payload); form.reset(); toast("Доступ к центру предоставлен.");
+      state.invite = null; await enter(payload); form.reset(); feedback("Доступ к центру предоставлен.");
     }, $("#auth-error"));
   });
   $("#invite-login").addEventListener("click", async () => {
@@ -341,41 +357,41 @@
     const button = event.target.closest("[data-pane]");
     if (!button || button.disabled) return;
     state.chatView = "all";
-    cabinet.navigate(button.dataset.pane).catch(error => { if (error.name !== "AbortError") toast(error.message, true); });
+    cabinet.navigate(button.dataset.pane).catch(error => { if (error.name !== "AbortError") feedback(error.message, true); });
   });
   $("#workspace-select").addEventListener("change", async event => {
     state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
-    try { await renderPane(state.pane); } catch (error) { if (error.name !== "AbortError") toast(error.message, true); }
+    try { await renderPane(state.pane); } catch (error) { if (error.name !== "AbortError") feedback(error.message, true); }
   });
   $("#workspace-form").addEventListener("submit", event => {
     event.preventDefault(); const form = event.currentTarget, workspace = state.workspace;
-    busy(form, async () => { const name = form.elements.name.value.trim(); await api(`/workspaces/${workspace.id}`, { method: "PATCH", data: { name } }); workspace.name = name; await refreshSession(); toast("Название центра сохранено."); });
+    busy(form, async () => { const name = form.elements.name.value.trim(); await api(`/workspaces/${workspace.id}`, { method: "PATCH", data: { name } }); workspace.name = name; await refreshSession(); feedback("Название центра сохранено."); });
   });
   $("#logout").addEventListener("click", async () => {
     try { await api("/auth/logout", { method: "POST" }); clearSession(); }
-    catch (error) { if (error.name !== "AbortError") toast(error.message, true); }
+    catch (error) { if (error.name !== "AbortError") feedback(error.message, true); }
   });
   $("#password-form").addEventListener("submit", event => {
     event.preventDefault(); const form = event.currentTarget;
-    if (form.elements.new_password.value !== form.elements.confirm_password.value) return toast("Новые пароли не совпадают.", true);
+    if (form.elements.new_password.value !== form.elements.confirm_password.value) return feedback("Новые пароли не совпадают.", true);
     busy(form, async () => { await api("/auth/password", { method: "POST", data: { current_password: form.elements.current_password.value, new_password: form.elements.new_password.value } }); form.reset(); clearSession("Пароль изменён. Войдите с новым паролем."); });
   });
   $("#logout-all").addEventListener("click", async () => {
     if (!await confirm("Выйти на всех устройствах?", "Все текущие сессии будут завершены, включая эту.", "Выйти везде")) return;
-    try { await api("/auth/logout-all", { method: "POST" }); clearSession("Все сессии завершены."); } catch (error) { if (error.name !== "AbortError") toast(error.message, true); }
+    try { await api("/auth/logout-all", { method: "POST" }); clearSession("Все сессии завершены."); } catch (error) { if (error.name !== "AbortError") feedback(error.message, true); }
   });
-  $("#members-refresh").addEventListener("click", () => loadMembers().catch(error => { if (error.name !== "AbortError") toast(error.message, true); }));
+  $("#members-refresh").addEventListener("click", () => loadMembers().catch(error => { if (error.name !== "AbortError") feedback(error.message, true); }));
   $("#member-sections-form").addEventListener("submit", event => {
     event.preventDefault(); const form = event.currentTarget, member = sectionsMember, workspace = state.workspace;
     if (!member) return;
     const selected = [...$("#member-sections-checks").querySelectorAll("input")].filter(input => input.checked).map(input => input.value);
     busy(form, async () => {
       await api(`/workspaces/${workspace.id}/members/${member.user_id}/sections`, { method: "POST", data: { sections: selected } });
-      $("#member-sections-dialog").close(); toast("Права сотрудника сохранены."); await loadMembers();
+      $("#member-sections-dialog").close(); feedback("Права сотрудника сохранены."); await loadMembers();
     }, $("#member-sections-error"));
   });
-  $("#sessions-refresh").addEventListener("click", () => loadSessions().catch(error => { if (error.name !== "AbortError") toast(error.message, true); }));
-  $("#access-refresh").addEventListener("click", () => refreshSession().catch(error => { if (error.name !== "AbortError") toast(error.message, true); }));
+  $("#sessions-refresh").addEventListener("click", () => loadSessions().catch(error => { if (error.name !== "AbortError") feedback(error.message, true); }));
+  $("#access-refresh").addEventListener("click", () => refreshSession().catch(error => { if (error.name !== "AbortError") feedback(error.message, true); }));
   $("#invite-open").addEventListener("click", () => {
     $("#create-invite-form").reset(); show($("#create-invite-form")); show($("#invite-result"), false); notice("", $("#invite-error"));
     $("#admin-role-option").hidden = state.workspace.role !== "owner";
@@ -390,8 +406,8 @@
   });
   $("#invite-copy").addEventListener("click", async () => {
     const input = $("#invite-url");
-    try { await navigator.clipboard.writeText(input.value); toast("Ссылка скопирована."); }
-    catch (_) { input.focus(); input.select(); toast("Ссылка выделена. Скопируйте её через меню или Ctrl+C."); }
+    try { await navigator.clipboard.writeText(input.value); feedback("Ссылка скопирована."); }
+    catch (_) { input.focus(); input.select(); feedback("Ссылка выделена. Скопируйте её через меню или Ctrl+C."); }
   });
   document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => document.getElementById(button.dataset.close).close()));
   $("#invitation-dialog").addEventListener("close", () => { $("#invite-url").value = ""; });
@@ -466,7 +482,7 @@
     try {
       await action(`/workspaces/${workspace.id}/integrations/alfa`);
       directory.reset();
-      await loadAlfa(); toast("Подключение обновлено.");
+      await loadAlfa(); feedback("Подключение обновлено.");
     } catch (error) {
       if (error.name !== "AbortError" && epoch === state.epoch) {
         try { await loadAlfa(); } catch (_) { /* Preserve the original actionable error. */ }
@@ -566,7 +582,7 @@
     try {
       const result = await action("/workspaces/" + workspace.id + "/integrations/alfa-max");
       if (epoch !== state.epoch) return;
-      await loadAlfaMax(); await chat.connections(); toast(typeof success === "function" ? success(result) : success);
+      await loadAlfaMax(); await chat.connections(); feedback(typeof success === "function" ? success(result) : success);
     } catch (error) {
       if (error.name !== "AbortError" && epoch === state.epoch) {
         try { await loadAlfaMax(); } catch (_) { /* Keep the action error visible. */ }
@@ -619,9 +635,9 @@
     } catch (error) { showLogin(error.message); }
   }
   const directory = window.CenterDirectory({ $, state, api, node, show, notice, date });
-  const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast, confirm, renderPane });
-  window.CenterVoice({ $, state, api, toast });
-  const ai = window.CenterAi({ $, state, api, node, show, notice, toast, confirm });
+  const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast: feedback, confirm, renderPane });
+  window.CenterVoice({ $, state, api });
+  const ai = window.CenterAi({ $, state, api, node, show, notice, toast: feedback, confirm });
   const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date, onStatus: (payload, view) => {
     connectionSummary("#alfa-history-summary", view.title, view.mode === "complete" ? "active" : ["error", "offline", "attention"].includes(view.mode) ? "error" : "waiting");
     if (payload && state.alfaMax && payload.state !== state.alfaMax.state) loadAlfaMax().catch(error => { if (error.name !== "AbortError") notice(error.message, $("#alfa-max-error")); });

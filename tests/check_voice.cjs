@@ -98,7 +98,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await page.waitForSelector('#ai-agent-version-list li');
     await save(page, 'ai-settings');
     assert.deepEqual(data.errors, []); assert.deepEqual(data.unexpected, []);
-    await context.close();
+    // Keep the desktop context alive until browser.close (single-process CI Chromium).
 
     // Phone: with an empty field the round button is the microphone, with text it is "send".
     const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['microphone'], isMobile: true, hasTouch: true });
@@ -310,7 +310,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await phone.locator('#chat-voice-cancel').click();
 
     assert.deepEqual(phoneData.errors, []); assert.deepEqual(phoneData.unexpected, []);
-    await phoneContext.close();
+    // Contexts close together with the browser (single-process test runner).
 
     // Observers read only: no microphone. Voice off in the workspace: no microphone either.
     for (const [role, voice] of [['observer', true], ['owner', false]]) {
@@ -321,7 +321,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
       assert.equal(await visible(p, '#chat-voice'), false, `${role}/${voice}: no mic`);
       assert.equal(d.calls.some(c => c.path.endsWith('/voice/transcribe')), false);
       assert.deepEqual(d.errors, []); assert.deepEqual(d.unexpected, []);
-      await ctx.close();
+      // Keep context alive until browser.close.
     }
     console.log(JSON.stringify({ browser: browser.version(), order, bytes, ok: true }, null, 2));
   } finally { await browser.close(); }

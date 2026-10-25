@@ -456,13 +456,6 @@ input,textarea{font:inherit;color:inherit}
 .cta{display:block;width:100%;margin-top:14px;padding:13px;border-radius:12px;background:var(--primary);
   color:#fff;font-size:13.5px;font-weight:650;box-shadow:0 3px 9px rgba(8,77,127,.24)}
 
-/* ── Toast ──────────────────────────────────────────────────────── */
-.toast{position:absolute;left:50%;transform:translate(-50%,-12px);z-index:95;
-  top:calc(var(--sat) + 64px);background:var(--toast-bg);color:#fff;font-size:12.5px;font-weight:600;
-  padding:11px 17px;border-radius:12px;box-shadow:0 10px 35px rgba(21,44,61,.3);opacity:0;
-  pointer-events:none;transition:opacity .2s,transform .2s;max-width:80%;text-align:center;
-  line-height:1.4}
-.toast.on{opacity:1;transform:translate(-50%,0)}
 
 
 .older{align-self:center;margin:4px auto 2px;padding:7px 14px;border-radius:999px;
@@ -708,7 +701,6 @@ body:has(#cabinet[hidden]){overflow:auto}
 .sync-bar{background:var(--surface);border-color:var(--line);margin:14px var(--gut-r) 0 var(--gut-l)}
 .max-channel{background:var(--surface-2);border-color:var(--line)}
 .app .notice.error,.live-sheet .notice.error{background:color-mix(in srgb,var(--danger) 12%,var(--surface));color:var(--danger)}
-.toast:not([hidden]){position:fixed;opacity:1;transform:none;z-index:90}
 @container app (min-width:720px){
   .live-device .panes{display:block;position:relative}
   .messages-page{position:absolute;inset:0}
@@ -1153,7 +1145,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .voice-panel[data-phase="error"] .voice-dot{animation:none}
 @keyframes voice-pulse{50%{opacity:.25}}
 .voice-label{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.voice-panel[data-phase="error"] .voice-label{color:var(--danger);white-space:normal;font-weight:550;font-size:13px;line-height:1.35;padding:6px 0}
+.voice-panel[data-phase="error"] .voice-label,.voice-panel[data-phase="notice"] .voice-label{color:var(--danger);white-space:normal;font-weight:550;font-size:13px;line-height:1.35;padding:6px 0}
 .voice-time{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 .voice-time[hidden],.voice-meter[hidden]{display:none}
 .voice-meter{flex:1;min-width:24px;max-width:120px;height:6px;border-radius:3px;background:var(--sunken);overflow:hidden}
@@ -1213,7 +1205,12 @@ body:has(#cabinet[hidden]){overflow:auto}
   padding:24px 16px calc(24px + env(safe-area-inset-bottom));background:rgba(9,22,34,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
   pointer-events:none;animation:voice-hold-in .14s ease-out}
 .voice-hold[hidden]{display:none}
-.voice-hold[data-phase="preview"]{pointer-events:auto}
+/* After release, preview is part of the composer; the history stays usable. */
+.compose.voice-preview,.compose.voice-inline{flex-wrap:wrap}
+.voice-hold[data-phase="preview"]{position:static;inset:auto;flex:0 0 100%;order:-1;padding:0;background:none;backdrop-filter:none;-webkit-backdrop-filter:none;pointer-events:none;animation:none;z-index:auto}
+.voice-hold[data-phase="preview"] .voice-hold-card{width:100%;pointer-events:auto;border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:var(--card-soft)}
+.voice-hold[data-phase="preview"] .voice-hold-text{font-size:15px;max-height:25vh;margin-bottom:12px}
+.voice-hold[data-phase="preview"] .voice-hold-actions .btn{height:42px;font-size:14px}
 @keyframes voice-hold-in{from{opacity:0}}
 .voice-hold-stage{display:flex;flex-direction:column;align-items:center;gap:16px;color:#fff;text-align:center}
 .voice-hold-orb{--level:0;position:relative;width:168px;height:168px;display:grid;place-items:center}
@@ -1327,16 +1324,6 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 .chat-name-example,#chat-name-save-status{grid-column:1/-1}
 
-/* Toast: a blue card in the middle of the screen, settling in softly. */
-#toast{top:50%;bottom:auto;left:50%;transform:translate(-50%,-50%);width:max-content;max-width:min(340px,calc(100% - 48px));
-  padding:15px 22px;border-radius:18px;background:var(--toast-bg);color:#fff;font-size:15px;font-weight:600;line-height:1.4;
-  text-align:center;letter-spacing:.005em;box-shadow:0 18px 50px rgba(10,24,36,.32),0 2px 6px rgba(10,24,36,.12),inset 0 1px 0 rgba(255,255,255,.14);
-  pointer-events:none;z-index:1100}
-#toast:not([hidden]){display:block;animation:toast-in .28s cubic-bezier(.2,.9,.3,1.15)}
-#toast.error-toast{background:var(--toast-bg)}
-@keyframes toast-in{from{opacity:0;transform:translate(-50%,-50%) scale(.9)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
-@media (prefers-reduced-motion:reduce){#toast:not([hidden]){animation:none}}
-
 /* Dragging the big microphone: it follows the finger; springs back when let go. */
 .voice-hold-stage{transition:transform .28s cubic-bezier(.2,1.4,.4,1)}
 .voice-hold-stage.dragging{transition:none}
@@ -1359,3 +1346,16 @@ body:has(#cabinet[hidden]){overflow:auto}
 #chat-bulk-dialog .dialog-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;padding:16px 0 0}
 #chat-bulk-dialog .bulk-confirm{background:var(--bubble-out);color:var(--st-client-ink);border:1px solid color-mix(in srgb,var(--st-client-ink) 20%,var(--bubble-out))}
 #chat-bulk-dialog .bulk-confirm:hover{filter:brightness(.98)}
+
+/* Quiet feedback occupies its own row, never covers messages or captures touches. */
+.action-feedback{margin:8px 0;color:var(--muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.compose:has(>.action-feedback){flex-wrap:wrap}
+.compose>.action-feedback{flex:0 0 100%;order:5;padding:0 10px}
+.voice-inline .voice-panel{position:static;flex:0 0 100%;order:3;min-height:40px;padding:6px 8px;box-shadow:none;background:none;gap:6px}
+.voice-inline .voice-label{flex:1;white-space:normal;font-size:12px;font-weight:450;line-height:1.4;color:var(--muted)}
+.voice-inline .voice-dot{width:6px;height:6px}
+.voice-panel[data-phase="notice"] .voice-dot{animation:none;background:var(--muted)}
+.voice-inline .voice-actions{gap:0}
+.voice-inline .voice-actions button{font-size:12px;padding:0 8px;min-height:40px}
+.voice-panel[data-phase="starting"] .voice-dot{background:var(--primary)}
+@media(max-width:359px){.voice-inline .voice-panel{flex-wrap:wrap}.voice-inline .voice-label{flex-basis:calc(100% - 16px)}.voice-inline .voice-actions{margin-left:auto}}

@@ -45,6 +45,9 @@ def model_cost(model, input_tokens, output_tokens):
     return (input_tokens * price["input"] + output_tokens * price["output"]) / 1000
 TASKS = {"voice_input": "Голосовой ввод"}
 VOICE_PER_HOUR = 60
+# Uvicorn's configured INFO handler also captures successful/slow attempts;
+# the unconfigured application root logger otherwise drops INFO events.
+VOICE_LOG = logging.getLogger("uvicorn.error.voice")
 
 ERRORS = {
     "unauthorized": (502, "{name} отклонил ключ. Проверьте API-ключ в «Подключениях»."),
@@ -459,6 +462,20 @@ class AiVoice:
                 "tokens": {"input": tokens[0], "output": tokens[1]}}
 
     # ── recognition ────────────────────────────────────────────────────────
+    def diagnostic(self, actor, workspace, data):
+        with self.accounts.transaction(actor, snapshot=True) as db:
+            member = self.accounts._workspace_chat(db, actor, workspace)
+            if member["role"] == "observer":
+                raise AuthError(403, "Наблюдатель не может писать сообщения.")
+        self.accounts.throttle(f"voice-diagnostic:{workspace}:{actor.user_id}", limit=30, minutes=1)
+        # Whitelisted by VoiceDiagnosticInput; no device labels, audio or text.
+        VOICE_LOG.info(
+            "Voice capture workspace=%s attempt=%s outcome=%s stage=%s code=%s audio_state=%s "
+            "elapsed_ms=%s first_frame_ms=%s captured_ms=%s",
+            workspace, data["attempt_id"], data["outcome"], data["stage"], data["code"], data["audio_state"],
+            data["elapsed_ms"], data["first_frame_ms"], data["captured_ms"],
+        )
+
     def transcribe(self, actor, workspace, audio, agent_id=None):
         try:
             seconds = check_audio(audio)
