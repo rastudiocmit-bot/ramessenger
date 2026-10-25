@@ -341,5 +341,27 @@ class AgentRulesTest(unittest.TestCase):
                 v._clean_agent(bad)
 
 
+class VoiceDiagnosticsTest(unittest.TestCase):
+    def test_diagnostic_is_metadata_only_without_usage_or_provider_calls(self):
+        voice, db = service()
+        data = {"attempt_id": uuid4(), "outcome": "error", "stage": "starting", "code": "no_frames",
+                "audio_state": "interrupted", "elapsed_ms": 5200,
+                "first_frame_ms": None, "captured_ms": 0}
+        with self.assertLogs(v.VOICE_LOG.name, level="INFO") as captured:
+            voice.diagnostic(ACTOR, WS, data)
+        self.assertIn("code=no_frames", captured.output[0])
+        self.assertNotIn("audio=", captured.output[0])
+        self.assertEqual(voice.client.calls, [])
+        self.assertEqual(db.usage, [])
+        self.assertEqual(voice.accounts.throttled, 1)
+
+    def test_observer_cannot_submit_diagnostics(self):
+        voice, _ = service(role="observer")
+        with self.assertRaises(AuthError) as caught:
+            voice.diagnostic(ACTOR, WS, {})
+        self.assertEqual(caught.exception.status, 403)
+        self.assertEqual(voice.accounts.throttled, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

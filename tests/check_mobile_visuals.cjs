@@ -5,13 +5,6 @@ const path = require('node:path');
 const { chromium } = require('playwright');
 const { fixture } = require('./browser_fixture.cjs');
 
-function contrast(a, b) {
-  const luminance = color => color.match(/[\d.]+/g).slice(0, 3).map(Number)
-    .map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4)
-    .reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
-  const values = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (values[0] + .05) / (values[1] + .05);
-}
 const nextFrame = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 
 (async () => {
@@ -32,20 +25,7 @@ const nextFrame = page => page.evaluate(() => new Promise(resolve => requestAnim
         fs.mkdirSync(process.env.CM_MOBILE_VISUAL_SCREENSHOT_DIR, {recursive: true});
         await page.screenshot({path: path.join(process.env.CM_MOBILE_VISUAL_SCREENSHOT_DIR, `${width}-${theme}-${suffix}.png`), animations: 'disabled'});
       };
-      const toastColors = [];
-      for (const error of [false, true]) {
-        const colors = await page.evaluate(error => {
-          const toast = document.querySelector('#toast'); toast.hidden = false;
-          toast.classList.toggle('error-toast', error);
-          toast.textContent = error ? 'Речь не распознана. Попробуйте говорить ближе к микрофону.' : 'Карточка клиента обновлена.';
-          const s = getComputedStyle(toast); return {background: s.backgroundColor, ink: s.color};
-        }, error);
-        assert.equal(colors.background, 'rgb(37, 116, 173)');
-        assert.ok(contrast(colors.background, colors.ink) >= 4.5, 'Toast text must remain readable');
-        toastColors.push(colors);
-      }
-      await save('toast'); await page.evaluate(() => { document.querySelector('#toast').hidden = true; });
-      assert.deepEqual(toastColors[0], toastColors[1]);
+      assert.equal(await page.locator('#toast, .toast').count(), 0, 'no global notification overlays');
 
       if (width < 720) {
         await page.locator('#more-tab').click();
@@ -105,7 +85,7 @@ const nextFrame = page => page.evaluate(() => new Promise(resolve => requestAnim
       }
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), width);
       assert.deepEqual(data.errors, []); assert.deepEqual(data.unexpected, []);
-      checks.push({width, theme, menu: width < 720, toastContrast: contrast(toastColors[0].background, toastColors[0].ink), touch: width === 390 && theme === 'light'});
+      checks.push({width, theme, menu: width < 720, noToasts: true, touch: width === 390 && theme === 'light'});
     } finally { await browser.close(); }
   }
   console.log(JSON.stringify({checks}, null, 2));

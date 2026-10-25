@@ -88,6 +88,8 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
           task_title: 'Голосовой ввод', model_title: 'YandexGPT Pro 5.1', version: 1, updated_at: '2026-10-24T20:00:00Z' };
         ai.agents.push(agent); payload = agent;
       } else payload = { agents: ai.agents };
+    } else if (p.endsWith('/voice/diagnostic')) {
+      return route.fulfill({ status: 204, body: '' });
     } else if (p.endsWith('/voice/transcribe')) {
       ai.transcribe.push(entry.body);
       if (ai.failNext > 0) { ai.failNext -= 1; return route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"Yandex Cloud сейчас недоступен. Повторите позже."}' }); }

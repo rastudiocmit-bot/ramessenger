@@ -2,6 +2,8 @@
 
 import base64
 import binascii
+from time import monotonic
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Request
@@ -9,6 +11,7 @@ from pydantic import Field
 
 from center_messenger.accounts_api import identity
 from center_messenger.ai_yandex import MAX_AUDIO_BYTES
+from center_messenger.ai_voice import VOICE_LOG
 from center_messenger.auth_security import AuthError, InputModel
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}")
@@ -48,6 +51,20 @@ class TranscribeInput(InputModel):
     # 16 kHz, 16-bit, mono LPCM, base64: the API accepts JSON bodies only.
     audio: str = Field(min_length=4, max_length=(MAX_AUDIO_BYTES * 4) // 3 + 8)
     agent_id: UUID | None = None
+    attempt_id: UUID | None = None
+
+
+class VoiceDiagnosticInput(InputModel):
+    attempt_id: UUID
+    outcome: Literal["complete", "cancelled", "error"]
+    stage: Literal["starting", "recording", "working", "preview"]
+    code: Literal["none", "permission_denied", "microphone_busy", "microphone_missing",
+                  "permission_timeout", "resume_timeout", "audio_interrupted", "no_frames",
+                  "capture_stalled", "audio_short", "network", "timeout", "http_error", "browser_error"]
+    audio_state: Literal["running", "suspended", "interrupted", "closed", "unknown"]
+    elapsed_ms: int = Field(ge=0, le=300000, strict=True)
+    first_frame_ms: int | None = Field(default=None, ge=0, le=120000, strict=True)
+    captured_ms: int = Field(ge=0, le=30000, strict=True)
 
 
 def voice(request: Request):
@@ -115,8 +132,27 @@ def ai_agent_versions(workspace_id: UUID, agent_id: UUID, request: Request):
 
 @router.post("/voice/transcribe")
 def transcribe(workspace_id: UUID, model: TranscribeInput, request: Request):
+    actor = identity(request, mutation=True)
     try:
         audio = base64.b64decode(model.audio, validate=True)
     except (binascii.Error, ValueError):
         raise AuthError(422, "Запись повреждена. Попробуйте записать ещё раз.") from None
-    return voice(request).transcribe(identity(request, mutation=True), workspace_id, audio, model.agent_id)
+    started, status = monotonic(), 200
+    try:
+        return voice(request).transcribe(actor, workspace_id, audio, model.agent_id)
+    except AuthError as error:
+        status = error.status
+        raise
+    except Exception:
+        status = 500
+        raise
+    finally:
+        VOICE_LOG.info(
+            "Voice request workspace=%s attempt=%s status=%s elapsed_ms=%s",
+            workspace_id, model.attempt_id, status, round((monotonic() - started) * 1000),
+        )
+
+
+@router.post("/voice/diagnostic", status_code=204)
+def voice_diagnostic(workspace_id: UUID, model: VoiceDiagnosticInput, request: Request):
+    voice(request).diagnostic(identity(request, mutation=True), workspace_id, model.model_dump())
