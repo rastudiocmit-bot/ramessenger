@@ -94,7 +94,8 @@ const nextFrame = page => page.evaluate(() => new Promise(resolve => requestAnim
         await touch('touchStart', x, y); await touch('touchMove', x - 55, y); await nextFrame(page);
         assert.equal(await page.locator('.row-wrap.is-swiping').count(), 1);
         assert.equal(await page.locator('.row-action').first().evaluate(e => getComputedStyle(e).visibility), 'visible');
-        await save('swipe'); await touch('touchCancel'); await nextFrame(page);
+        await touch("touchMove", x - 95, y); await nextFrame(page); await save("swipe-armed"); await touch("touchMove", x - 55, y); await nextFrame(page);
+        await save("swipe"); await touch("touchCancel"); await nextFrame(page);
         assert.equal(await page.locator('.row-wrap.is-swiping').count(), 0); assert.equal(handled().length, 0);
         await touch('touchStart', x, y); await touch('touchMove', x - 110, y); await nextFrame(page); await touch('touchEnd');
         await page.waitForFunction(() => !document.querySelector('.chat-row[data-id="client-0"] .avatar-count'));

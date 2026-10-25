@@ -235,6 +235,42 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     assert.equal(phoneData.ai.transcribe.length, listHeard + 1);
     assert.equal(sent().length, listSent + 1, 'a hold on the message list sends too');
 
+    // Drag the big microphone down and let go: the text goes into the field, unsent.
+    // The orb follows the finger.
+    const dragSent = sent().length;
+    await phone.locator('#chat-input').fill(''); await phone.waitForTimeout(300);
+    const dragSpot = await phone.locator('.chat-bubble').nth(1).boundingBox();
+    const from = { x: dragSpot.x + dragSpot.width / 2, y: dragSpot.y + dragSpot.height / 2 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [from] });
+    await phone.waitForSelector('#voice-hold[data-phase="recording"]'); await phone.waitForTimeout(700);
+    const orbStill = await phone.locator('.voice-hold-orb').boundingBox();
+    for (let step = 1; step <= 5; step += 1) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: from.x, y: from.y + step * 18 }] });
+      await phone.waitForTimeout(30);
+    }
+    await phone.waitForSelector('#voice-hold[data-phase="edit"]');
+    const orbDown = await phone.locator('.voice-hold-orb').boundingBox();
+    assert.ok(orbDown.y > orbStill.y + 40, `the orb follows the finger down (${orbStill.y} → ${orbDown.y})`);
+    await save(phone, 'voice-hold-edit');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await phone.waitForSelector('#voice-hold', { state: 'hidden' });
+    await phone.waitForFunction(() => document.querySelector('#chat-input').value === 'Здравствуйте! Завтра занятие в 17:00.');
+    await phone.waitForTimeout(8000); assert.equal(sent().length, dragSent, 'dragged down: never sent');
+    // Drag up: the orb rises with the finger; letting go cancels.
+    await phone.locator('#chat-input').fill(''); await phone.waitForTimeout(300);
+    const heardBefore = phoneData.ai.transcribe.length;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [from] });
+    await phone.waitForSelector('#voice-hold[data-phase="recording"]'); await phone.waitForTimeout(500);
+    for (let step = 1; step <= 6; step += 1) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: from.x, y: from.y - step * 22 }] });
+      await phone.waitForTimeout(30);
+    }
+    await phone.waitForSelector('#voice-hold[data-phase="cancel"]');
+    assert.ok((await phone.locator('.voice-hold-orb').boundingBox()).y < orbStill.y - 60, 'the orb rises with the finger');
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await phone.waitForSelector('#voice-hold', { state: 'hidden' });
+    assert.equal(phoneData.ai.transcribe.length, heardBefore, 'cancelled: nothing recognised');
+
     // ✕ on the preview: the text is dropped, nothing sent, the field untouched.
     const clearSent = sent().length;
     await phone.locator('#chat-input').fill(''); await phone.waitForSelector('#chat-voice:not([hidden])');

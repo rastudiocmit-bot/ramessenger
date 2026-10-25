@@ -18,7 +18,8 @@
     target.classList.toggle("error-toast", error);
     show(target);
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => show(target, false), 6500);
+    // In the middle of the screen it should not linger: long enough to read.
+    toastTimer = setTimeout(() => show(target, false), Math.min(6500, 2200 + String(message).length * 55));
   }
   function notice(message, target = $("#auth-error")) {
     target.textContent = message || "";

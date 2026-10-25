@@ -145,11 +145,30 @@ input,textarea{font:inherit;color:inherit}
 .list{flex:1;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 
 .row-wrap{position:relative;overflow:hidden;background:var(--surface)}
-.row-action{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-end;
-  padding-right:24px;gap:8px;background:var(--toast-bg);color:#fff;font-size:13px;font-weight:650;
+/* Swipe left to mark handled: a blue panel exactly as wide as the swipe grows
+   behind the row; its check fills a ring as the swipe nears the threshold and
+   pops when it is reached. Nothing is visible outside the panel. */
+.row-wrap{--swipe:0px;--swipe-p:0;--swipe-l:0}
+.row-action{position:absolute;top:0;bottom:0;right:0;width:var(--swipe);overflow:hidden;display:flex;align-items:center;justify-content:center;
+  background:color-mix(in srgb,var(--send) calc(55% + var(--swipe-p) * 45%),var(--surface-2));color:#fff;font-size:13px;font-weight:650;
   pointer-events:none;visibility:hidden}
-.row-wrap.is-swiping>.row-action{visibility:visible}
-.row-action svg{width:19px;height:19px}
+.row-wrap.is-swiping>.row-action,.row-wrap.is-settling>.row-action,.row-wrap.is-leaving>.row-action{visibility:visible}
+.row-action-inner{display:flex;flex-direction:column;align-items:center;gap:6px;white-space:nowrap;
+  opacity:calc(var(--swipe-p) * 1.4 - .2);transform:scale(calc(.6 + var(--swipe-p) * .4))}
+.row-action-badge{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;
+  box-shadow:inset 0 0 0 2px rgba(255,255,255,.85);background:rgba(255,255,255,calc(var(--swipe-p) * .18))}
+.row-action-badge svg{width:18px;height:18px;stroke-width:2.6;stroke-dasharray:24;stroke-dashoffset:calc(24 - var(--swipe-p) * 24)}
+.row-action-label{font-size:11.5px;letter-spacing:.02em;opacity:var(--swipe-l,0);max-height:calc(var(--swipe-l,0) * 16px);overflow:hidden;transition:none}
+.row-wrap.is-leaving .row-action-label{opacity:1;max-height:16px}
+.row-wrap.is-armed .row-action{background:var(--send)}
+.row-wrap.is-armed .row-action-badge{background:#fff;color:var(--send);animation:row-pop .32s cubic-bezier(.3,1.6,.5,1)}
+@keyframes row-pop{0%{transform:scale(.8)}60%{transform:scale(1.18)}100%{transform:scale(1)}}
+.row-wrap.is-settling>.row,.row-wrap.is-settling>.row-action{transition:transform .3s cubic-bezier(.2,1.3,.4,1),width .3s cubic-bezier(.2,1.3,.4,1)}
+.row-wrap.is-leaving>.row,.row-wrap.is-leaving>.row-action{transition:transform .26s cubic-bezier(.5,0,.7,.4),width .26s cubic-bezier(.5,0,.7,.4)}
+.row-wrap.is-folding{transition:height .2s ease-in;overflow:hidden}
+.row-wrap.is-returning{animation:row-return .4s cubic-bezier(.2,.9,.3,1)}
+@keyframes row-return{from{opacity:0;transform:translateX(24px)}}
+@media (prefers-reduced-motion:reduce){.row-wrap *,.row-wrap{animation:none!important;transition:none!important}}
 .row{position:relative;width:100%;display:flex;gap:12px;text-align:left;background:var(--surface);
   padding:11px 16px;transition:background .12s;touch-action:pan-y}
 .row:hover{background:var(--surface-2)}
@@ -1237,3 +1256,20 @@ body:has(#cabinet[hidden]){overflow:auto}
 @media(max-width:420px){.sync-service-grid{grid-template-columns:1fr}.sync-service-card{padding:11px}.sync-service-card>span{margin-bottom:4px}}
 
 .chat-name-example,#chat-name-save-status{grid-column:1/-1}
+
+/* Toast: a blue card in the middle of the screen, settling in softly. */
+#toast{top:50%;bottom:auto;left:50%;transform:translate(-50%,-50%);width:max-content;max-width:min(340px,calc(100% - 48px));
+  padding:15px 22px;border-radius:18px;background:var(--toast-bg);color:#fff;font-size:15px;font-weight:600;line-height:1.4;
+  text-align:center;letter-spacing:.005em;box-shadow:0 18px 50px rgba(10,24,36,.32),0 2px 6px rgba(10,24,36,.12),inset 0 1px 0 rgba(255,255,255,.14);
+  pointer-events:none;z-index:1100}
+#toast:not([hidden]){display:block;animation:toast-in .28s cubic-bezier(.2,.9,.3,1.15)}
+#toast.error-toast{background:var(--toast-bg)}
+@keyframes toast-in{from{opacity:0;transform:translate(-50%,-50%) scale(.9)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+@media (prefers-reduced-motion:reduce){#toast:not([hidden]){animation:none}}
+
+/* Dragging the big microphone: it follows the finger; springs back when let go. */
+.voice-hold-stage{transition:transform .28s cubic-bezier(.2,1.4,.4,1)}
+.voice-hold-stage.dragging{transition:none}
+.voice-hold-stage.flying-up{transition:transform .25s ease-in,opacity .25s ease-in;transform:translateY(-220px) scale(.6)!important;opacity:0}
+.voice-hold[data-phase="edit"] .voice-hold-mic{background:#fff;color:var(--send);box-shadow:0 14px 40px rgba(0,0,0,.25)}
+.voice-hold[data-phase="edit"] .voice-hold-ring{background:#fff;opacity:.22}

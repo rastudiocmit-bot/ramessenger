@@ -236,7 +236,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (channels.length > 1) meta.append(node("small", item.channel_name, "muted"));
       if (meta.childNodes.length) body.append(meta);
       row.append(avatar, body); const wrap = node("div", undefined, "row-wrap");
-      const action = node("div", "Обработано", "row-action"); action.prepend(icon("check"));
+      // Behind the row: a blue panel that grows with the swipe. The check sits in a
+      // ring that fills as the swipe nears the threshold, then pops.
+      const action = node("div", undefined, "row-action"), badge = node("span", undefined, "row-action-badge");
+      badge.append(icon("check")); action.append(node("span", undefined, "row-action-inner"));
+      action.firstChild.append(badge, node("span", "Обработано", "row-action-label"));
       wrap.dataset.key = item.id; wrap.listKey = key;
       wrap.append(action, row); wanted.push(wrap); wireSwipe(row, item);
     }
@@ -262,10 +266,27 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function wireSwipe(row, item) {
     let start = null, distance = 0, swiping = false, suppressClick = false;
     const checkpoint = item.seen_checkpoint;
-    const reset = () => {
-      const pointerId = start?.id;
-      start = null; distance = 0; swiping = false; row.style.transform = "";
-      row.parentElement?.classList.remove("is-swiping");
+    const THRESHOLD = 76;
+    const wrap = () => row.parentElement;
+    const paint = offset => {
+      const shown = -offset, progress = Math.min(1, shown / THRESHOLD);
+      row.style.transform = offset ? `translateX(${offset}px)` : "";
+      wrap()?.style.setProperty("--swipe", `${shown}px`);
+      wrap()?.style.setProperty("--swipe-p", progress.toFixed(3));
+      // The word appears only once the panel is wide enough to hold it.
+      wrap()?.style.setProperty("--swipe-l", Math.max(0, Math.min(1, (shown - 88) / 22)).toFixed(3));
+      const armed = shown >= THRESHOLD;
+      if (armed && !wrap()?.classList.contains("is-armed")) navigator.vibrate?.(10);
+      wrap()?.classList.toggle("is-armed", armed);
+    };
+    const reset = (animate = false) => {
+      const pointerId = start?.id, target = wrap();
+      start = null; distance = 0; swiping = false;
+      if (animate && target) {
+        // Spring back: the panel shrinks behind the row as it returns.
+        target.classList.add("is-settling"); target.classList.remove("is-swiping", "is-armed"); paint(0);
+        setTimeout(() => { target.classList.remove("is-settling"); }, 320);
+      } else { paint(0); target?.classList.remove("is-swiping", "is-armed"); }
       if (pointerId !== undefined && row.hasPointerCapture?.(pointerId)) row.releasePointerCapture(pointerId);
     };
     row.addEventListener("pointerdown", event => {
@@ -285,26 +306,48 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         if (event.pointerId !== undefined) row.setPointerCapture?.(event.pointerId);
       }
       distance = Math.min(0, x);
-      row.style.transform = `translateX(${Math.max(-120, distance)}px)`;
+      // Free up to 140px, then resist like a rubber band.
+      const pull = -distance, eased = pull <= 140 ? pull : 140 + (pull - 140) * 0.3;
+      paint(-Math.min(eased, row.clientWidth * 0.8));
     });
     const end = async event => {
       if (!start || event.pointerId !== start.id) return;
-      const handled = swiping && distance <= -70; reset();
-      if (!handled || actionBusy) return;
+      const handled = swiping && distance <= -THRESHOLD && !actionBusy;
+      if (!handled) { reset(swiping); return; }
+      const target = wrap(), pointerId = start.id;
+      start = null; swiping = false;
+      if (row.hasPointerCapture?.(pointerId)) row.releasePointerCapture(pointerId);
+      // Fly off to the left while the panel fills the row, then fold the row away.
+      target.classList.add("is-leaving");
+      paint(-row.clientWidth);
+      const leave = new Promise(resolve => setTimeout(() => {
+        target.style.height = `${target.offsetHeight}px`; void target.offsetHeight;
+        target.classList.add("is-folding"); target.style.height = "0px";
+        setTimeout(resolve, 200);
+      }, 260));
       const epoch = state.epoch, gen = generation;
       actionBusy = true;
       try {
         const result = await api(`${chatPath(item.id)}/handled`, { method: "POST", data: { seen_checkpoint: checkpoint } });
+        await leave;
         if (!valid(epoch, gen)) return;
         if (result.conversation) mergeMeta(result.conversation);
         renderList(true);
+        // Still listed (e.g. «Все»): it comes back quietly, without the badge.
+        const back = [...$("#chat-list").children].find(node => node.dataset.key === item.id);
+        if (back && back !== target) { back.classList.add("is-returning"); setTimeout(() => back.classList.remove("is-returning"), 420); }
         await loadList(false, true, true);
         if (selected === item.id) await loadHistory(item.id);
-      } catch (error) { if (valid(epoch, gen)) fail(error); }
+      } catch (error) {
+        await leave;
+        // Not handled after all: unfold the row back into place.
+        target.classList.remove("is-leaving", "is-folding", "is-armed", "is-swiping"); target.style.height = ""; paint(0);
+        if (valid(epoch, gen)) fail(error);
+      }
       finally { if (valid(epoch, gen)) { actionBusy = false; renderHeader(); } }
     };
     row.addEventListener("pointerup", end);
-    row.addEventListener("pointercancel", event => { if (start && event.pointerId === start.id) { suppressClick = false; reset(); } });
+    row.addEventListener("pointercancel", event => { if (start && event.pointerId === start.id) { suppressClick = false; reset(swiping); } });
     row.addEventListener("lostpointercapture", event => {
       // A button's implicit touch capture is transferred to this row mid-swipe.
       if (event.target === row && start && event.pointerId === start.id) reset();
@@ -730,11 +773,33 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (!acknowledged && error.status === 409) { try { await loadHistory(id); } catch (_) { /* Preserve the draft and error. */ } }
     } finally { if (valid(epoch, gen)) { historyBusy = false; renderHeader(); } }
   }
+  let mirrorNode = null;
+  function composeMirror(input) {
+    const style = getComputedStyle(input);
+    if (!mirrorNode) {
+      mirrorNode = document.createElement("div"); mirrorNode.setAttribute("aria-hidden", "true");
+      Object.assign(mirrorNode.style, { position: "absolute", visibility: "hidden", left: "-9999px", top: "0",
+        whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: "normal" });
+      document.body.append(mirrorNode);
+    }
+    for (const key of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "lineHeight", "textTransform",
+      "paddingTop", "paddingBottom", "paddingLeft", "paddingRight", "borderTopWidth", "borderBottomWidth", "boxSizing", "tabSize"])
+      mirrorNode.style[key] = style[key];
+    mirrorNode.style.borderStyle = "solid"; mirrorNode.style.borderColor = "transparent";
+    mirrorNode.style.borderLeftWidth = style.borderLeftWidth; mirrorNode.style.borderRightWidth = style.borderRightWidth;
+    mirrorNode.style.width = `${input.getBoundingClientRect().width}px`;
+    mirrorNode.textContent = `${input.value}\u200b`;
+    return Math.ceil(mirrorNode.getBoundingClientRect().height);
+  }
   function resizeCompose() {
     const input = $("#chat-input"); if (!input.clientWidth) return;
     const position = rememberScroll();
-    input.style.height = "auto";
-    input.style.height = `${Math.max(input.scrollHeight, 44)}px`;
+    // Height from a mirror of the text rather than scrollHeight alone: Safari on
+    // iPhone reports a taller scrollHeight for an auto-sized textarea, which left
+    // an empty band above the text. scrollHeight still wins if text would clip.
+    const mirror = composeMirror(input);
+    input.style.height = `${Math.max(mirror, 44)}px`;
+    if (input.scrollHeight > input.clientHeight + 1) input.style.height = `${Math.max(input.scrollHeight, 44)}px`;
     restoreScroll(position, { follow: true });
     const canvas = input.closest(".canvas");
     if (canvas && document.activeElement === input && input.selectionEnd === input.value.length)

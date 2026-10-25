@@ -15,7 +15,7 @@
 //   unless the operator taps «Изменить». Anything doubtful (agent fallback, a
 //   warning, nothing recognised) is never sent automatically: it goes to the field.
 window.CenterVoice = ({ $, state, api, toast }) => {
-  const LIMIT = 30, RATE = 16000, HOLD_MS = 220, CANCEL_PX = 90;
+  const LIMIT = 30, RATE = 16000, HOLD_MS = 220, CANCEL_PX = 90, EDIT_PX = { button: 34, stream: 60 };
   // Time to read the dictated text before it goes: about 12 characters a second
   // (an unhurried reading pace for a message one is checking), never under 7 s
   // and never over 30 s.
@@ -49,6 +49,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   layer.querySelector(".voice-hold-mic").append(icon("mic"));
   layer.querySelector(".voice-hold-clear").append(icon("close"));
   document.body.append(layer);
+  const stage = layer.querySelector(".voice-hold-stage");
   const orb = layer.querySelector(".voice-hold-orb"), holdTime = layer.querySelector(".voice-hold-time");
   const holdHint = layer.querySelector(".voice-hold-hint"), card = layer.querySelector(".voice-hold-card");
   const cardText = layer.querySelector(".voice-hold-text"), bar = layer.querySelector(".voice-hold-bar i");
@@ -66,9 +67,10 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   }
   function unlock() {
     if (!supported() || !state.voiceInput) return;
-    try { const context = audio(); if (context.state !== "running") context.resume().then(() => {
-      if (!recording) context.suspend().catch(() => {});
-    }).catch(() => {}); } catch (_) { /* Not allowed yet: the next gesture tries again. */ }
+    // Once running it stays running: Safari only resumes audio inside a tap, and a
+    // recording may begin outside one (press-and-hold, after the mic prompt).
+    try { const context = audio(); if (context.state !== "running") context.resume().catch(() => {}); }
+    catch (_) { /* Not allowed yet: the next gesture tries again. */ }
   }
   for (const type of ["pointerup", "touchend", "keydown"]) document.addEventListener(type, unlock, { capture: true, passive: true });
 
@@ -116,7 +118,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     recording = null; clearInterval(ticker);
     try { processor.onaudioprocess = null; source.disconnect(); processor.disconnect(); } catch (_) { /* Already detached. */ }
     stream.getTracks().forEach(track => track.stop());
-    context.suspend().catch(() => {});                  // kept for the next recording (see audio())
+    void context;                                        // kept running for the next recording (see unlock())
     return { chunks, rate };
   }
   function reset() {
@@ -127,8 +129,10 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   function holdPhase(kind) {
     layer.hidden = false; layer.dataset.phase = kind;
     card.hidden = kind !== "preview";
-    holdHint.textContent = kind === "recording" ? "Отпустите — отправим\nПроведите вверх — отмена"
-      : kind === "cancel" ? "Отпустите — запись удалится" : kind === "working" ? "Распознаём и улучшаем текст…" : "";
+    holdHint.textContent = kind === "recording" ? "Отпустите — отправим\nВверх — отмена · вниз — в поле"
+      : kind === "cancel" ? "Отпустите — запись удалится"
+      : kind === "edit" ? "Отпустите — текст в поле, без отправки"
+      : kind === "working" ? "Распознаём и улучшаем текст…" : "";
   }
   // While a finger holds (on the list or the microphone) the chat underneath must
   // neither scroll nor select text.
@@ -137,8 +141,19 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     document.documentElement.classList.toggle("voice-holding", on);
     if (on) window.getSelection?.()?.removeAllRanges();
   }
+  // The orb follows the finger vertically, a little behind it, with resistance.
+  function dragOrb(dy) {
+    const eased = Math.sign(dy) * Math.min(170, Math.abs(dy) * 0.85);
+    stage.style.transform = dy ? `translateY(${eased.toFixed(1)}px) scale(${(1 - Math.min(Math.abs(eased), 170) / 900).toFixed(3)})` : "";
+  }
+  function track(event) {
+    if (!hold?.armed || event.pointerId !== hold.id || !recording) return;
+    const dy = event.clientY - hold.y;
+    stage.classList.add("dragging"); dragOrb(dy);
+    holdPhase(-dy > CANCEL_PX ? "cancel" : dy > EDIT_PX[hold.source] ? "edit" : "recording");
+  }
   function closeHold() {
-    lockList(false);
+    lockList(false); stage.classList.remove("dragging"); dragOrb(0);
     if (preview) { clearTimeout(preview.timer); preview = null; }
     hold = null; layer.hidden = true; layer.dataset.phase = ""; card.hidden = true;
   }
@@ -166,9 +181,16 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     }
     mine.released = true;
     if (!recording) return;                              // still waiting for the microphone
-    if (cancelled || layer.dataset.phase === "cancel") { reset(); toast("Запись отменена."); return; }
-    hold = null;
-    finish({ auto: true });
+    if (cancelled || layer.dataset.phase === "cancel") {
+      // The orb flies off upwards, then the layer closes.
+      stopCapture(); run += 1; pending = null; failedAudio = null; hold = null;
+      stage.classList.remove("dragging"); stage.classList.add("flying-up");
+      setTimeout(() => { stage.classList.remove("flying-up"); closeHold(); render(); toast("Запись отменена."); }, 250);
+      return;
+    }
+    const toField = layer.dataset.phase === "edit";
+    hold = null; stage.classList.remove("dragging"); dragOrb(0);
+    finish({ auto: !toField, overlay: true });
   }
   function showPreview(text) {
     const mine = run;
@@ -190,6 +212,9 @@ window.CenterVoice = ({ $, state, api, toast }) => {
 
   async function start() {
     if (!available() || recording || pending) return;
+    // Resume now, while still inside the tap; after awaiting the microphone it is too late on iOS.
+    const context = audio();
+    if (context.state !== "running") context.resume().catch(() => {});
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -199,14 +224,13 @@ window.CenterVoice = ({ $, state, api, toast }) => {
         : "Микрофон недоступен на этом устройстве.", true);
       return;
     }
-    const context = audio();
-    try { await context.resume(); } catch (_) { /* Resumed on the next gesture. */ }
+    if (context.state !== "running") { try { await context.resume(); } catch (_) { /* Checked below. */ } }
     const source = context.createMediaStreamSource(stream), processor = context.createScriptProcessor(4096, 1, 1);
     const chunks = [];
     let frames = 0, peak = 0;
     processor.onaudioprocess = event => {
       const data = event.inputBuffer.getChannelData(0);
-      chunks.push(new Float32Array(data)); frames += data.length;
+      chunks.push(new Float32Array(data)); frames += data.length; if (recording) recording.frames = frames;
       let sum = 0; for (let i = 0; i < data.length; i += 1) sum += data[i] * data[i];
       peak = Math.max(peak * 0.85, Math.sqrt(sum / data.length));
       if (frames / context.sampleRate >= LIMIT) { const auto = Boolean(hold); hold = null; finish({ auto }); }
@@ -214,8 +238,14 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     source.connect(processor); processor.connect(context.destination);
     const started = performance.now();
     recording = { stream, context, source, processor, chunks, rate: context.sampleRate, started,
+      frames: 0,
       ticker: setInterval(() => {
         if (!available()) { reset(); return; }
+        // No sound at all after 1.5 s: the browser did not start audio. Say so,
+        // instead of a misleading «too short» when the operator lets go.
+        if (recording && !recording.frames && performance.now() - started > 1500) {
+          reset(); toast("Микрофон не передаёт звук. Коснитесь экрана и попробуйте ещё раз.", true); return;
+        }
         time.textContent = `${clock((performance.now() - started) / 1000)} / ${clock(LIMIT)}`;
         level.style.transform = `scaleX(${Math.min(1, peak * 6).toFixed(3)})`;
         if (!layer.hidden) {
@@ -256,10 +286,10 @@ window.CenterVoice = ({ $, state, api, toast }) => {
     if (!inserted || input.value === before) { input.value = before + joined; input.dispatchEvent(new Event("input", { bubbles: true })); }
   }
 
-  async function send(audio, { auto = false } = {}) {
+  async function send(audio, { auto = false, overlay = auto } = {}) {
     const mine = ++run;
     pending = audio; failedAudio = null; phase("working", "Распознаём речь и улучшаем текст…"); render();
-    if (auto) holdPhase("working");
+    if (overlay) holdPhase("working");
     try {
       const result = await api(`/workspaces/${state.workspace.id}/voice/transcribe`, { method: "POST", data: { audio: base64(audio) }, timeoutMs: 35000 });
       if (mine !== run) return;
@@ -274,14 +304,14 @@ window.CenterVoice = ({ $, state, api, toast }) => {
       phase("error", error.message || "Не удалось распознать запись."); render();
     }
   }
-  function finish({ auto = false } = {}) {
+  function finish({ auto = false, overlay = auto } = {}) {
     const captured = stopCapture(); if (!captured) return;
     const audio = encode(captured.chunks, captured.rate);
     if (audio.length < RATE * 2 * 0.3) {
       closeHold(); render();
-      toast(auto ? "Слишком коротко: удерживайте микрофон, пока говорите." : "Запись слишком короткая.", true); return;
+      toast(overlay ? "Слишком коротко: держите палец, пока говорите." : "Запись слишком короткая.", true); return;
     }
-    send(audio, { auto });
+    send(audio, { auto, overlay });
   }
 
   // Keyboard and assistive "click" (no pointer) keep the tap behaviour.
@@ -320,7 +350,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
       return;
     }
     if (hold.scrollTop != null && scroller.scrollTop !== hold.scrollTop) scroller.scrollTop = hold.scrollTop;
-    if (recording) holdPhase(hold.y - event.clientY > CANCEL_PX ? "cancel" : "recording");
+    track(event);
   });
   stream.addEventListener("pointerup", event => { if (hold?.source === "stream" && event.pointerId === hold.id) endHold(false); });
   stream.addEventListener("pointercancel", event => {
@@ -338,10 +368,7 @@ window.CenterVoice = ({ $, state, api, toast }) => {
   scroller.addEventListener("touchmove", event => { if (hold?.armed && event.cancelable) event.preventDefault(); }, { passive: false });
   document.addEventListener("selectstart", event => { if (hold) event.preventDefault(); }, true);
   stream.addEventListener("contextmenu", event => { if (hold?.source === "stream") event.preventDefault(); });
-  button.addEventListener("pointermove", event => {
-    if (!hold?.armed || event.pointerId !== hold.id || !recording) return;
-    holdPhase(hold.y - event.clientY > CANCEL_PX ? "cancel" : "recording");
-  });
+  button.addEventListener("pointermove", track);
   button.addEventListener("pointerup", event => { if (hold && event.pointerId === hold.id) endHold(false); });
   button.addEventListener("pointercancel", event => { if (hold && event.pointerId === hold.id) endHold(true); });
   button.addEventListener("contextmenu", event => event.preventDefault());
