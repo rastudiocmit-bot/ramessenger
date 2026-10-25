@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app/backend/src"))
 
 from center_messenger.alfa_max import AlfaMaxConnections, AlfaMaxWorker
-from center_messenger.alfa_history import PROJECTION_VERSION, RECHECK_INTERVAL, advance_history, history_coverage, history_pending, plan_history, retry_history, verify_saved_pages
+from center_messenger.alfa_history import PROJECTION_VERSION, RECHECK_INTERVAL, advance_history, history_coverage, history_pending, plan_history, retry_history, verify_saved_pages, next_history_delay
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser, _message_time, parse_history_html
 from bs4 import BeautifulSoup
 from center_messenger.chat_api import ChatReader, SendInput, HandleInput
@@ -207,6 +207,76 @@ class PageTests(unittest.TestCase):
         automatic = parse('data-campaign-id="13"', 'Здравствуйте')
         self.assertEqual(automatic['actor_type'], 'automation')
         self.assertEqual(automatic['actor_evidence']['reason'], 'crm_automation')
+
+
+class LoaderPlanningTests(unittest.TestCase):
+    def test_all_heads_and_catchups_precede_old_archive_pages(self):
+        cursor, requests = plan_history({"1:receive": 9, "1:sent": 4,
+            "catchup:1:receive": 2}, [1, 2])
+        self.assertEqual(requests[:4], [(1, "receive", 0), (1, "sent", 0), (2, "receive", 0), (2, "sent", 0)])
+        self.assertEqual(requests[4], (1, "receive", 2))
+        self.assertEqual(requests[5:], [(1, "receive", 9), (1, "sent", 4)])
+
+    def test_archive_pause_keeps_heads_and_live_catchup_and_does_not_move_saved_history(self):
+        original = {"archive_paused": True, "1:receive": 9, "catchup:1:receive": 2,
+                    "complete:1:sent": True, "finished:1:sent": datetime.now(UTC).isoformat()}
+        cursor, requests = plan_history(original, [1])
+        self.assertEqual(requests, [(1, "receive", 0), (1, "sent", 0), (1, "receive", 2)])
+        advance_history(cursor, [(1, "receive", 0)], [{"messages": [{"record_id": "30"}], "has_more": True}])
+        self.assertEqual(cursor["1:receive"], 9)
+        self.assertTrue(cursor["complete:1:sent"])
+        self.assertIn("live_checked:1:receive", cursor)
+
+    def test_one_saved_archive_page_does_not_mark_other_journals_live_or_advance_them(self):
+        cursor, _ = plan_history({"1:receive": 4, "1:sent": 7}, [1, 2])
+        advance_history(cursor, [(1, "receive", 4)], [{"messages": [], "has_more": True}])
+        self.assertEqual(cursor["1:receive"], 5)
+        self.assertEqual(cursor["1:sent"], 7)
+        self.assertNotIn("live_checked:1:receive", cursor)
+        self.assertNotIn("live_checked:2:sent", cursor)
+
+    def test_failed_page_has_its_own_retry_and_cannot_delay_healthy_heads(self):
+        now = datetime.now(UTC)
+        cursor, _ = plan_history({"1:receive": 4, "complete:1:sent": True}, [1], now)
+        advance_history(cursor, [(1, "receive", 4)], [{"error": "crm_unavailable"}], now)
+        cursor, requests = plan_history(cursor, [1], now + timedelta(seconds=1))
+        self.assertNotIn((1, "receive", 4), requests)
+        self.assertIn((1, "receive", 0), requests)
+        self.assertIn((1, "sent", 0), requests)
+        self.assertEqual(next_history_delay(cursor, now), 15)
+        retry = retry_history(cursor, ["1:receive"])
+        self.assertNotIn("retry_archive:1:receive", retry)
+        self.assertEqual(retry["1:receive"], 4)
+        self.assertTrue(retry["complete:1:sent"])
+
+    def test_browser_commits_a_page_before_reading_the_next_and_skips_paused_archive(self):
+        manager, browser, context, page = [Mock() for _ in range(4)]
+        context.storage_state.return_value = {}
+        timeline = []
+        def read(page, origin, branch, direction, number):
+            timeline.append(("read", direction, number))
+            return {"messages": [], "has_more": True}
+        def commit(request, result, state):
+            timeline.append(("skip" if result.get("skipped") else "commit", request[1], request[2]))
+        with patch.object(AlfaMaxBrowser, "_open", return_value=(manager, browser, context, page)), \
+             patch.object(AlfaMaxBrowser, "_read_history_page", side_effect=read):
+            results, _ = AlfaMaxBrowser().read_histories("https://test.s20.online", {},
+                [(1, "receive", 0), (1, "receive", 4), (1, "sent", 0)],
+                before_read=lambda request: request[2] == 0, on_result=commit)
+        self.assertEqual(timeline, [("read", "receive", 0), ("commit", "receive", 0),
+            ("skip", "receive", 4), ("read", "sent", 0), ("commit", "sent", 0)])
+        self.assertTrue(results[1]["skipped"])
+
+    def test_callback_database_error_is_not_mislabelled_as_a_browser_failure(self):
+        manager, browser, context, page = [Mock() for _ in range(4)]
+        context.storage_state.return_value = {}
+        failure = RuntimeError("save failed")
+        with patch.object(AlfaMaxBrowser, "_open", return_value=(manager, browser, context, page)), \
+             patch.object(AlfaMaxBrowser, "_read_history_page", return_value={"messages": [], "has_more": False}):
+            with self.assertRaises(RuntimeError) as raised:
+                AlfaMaxBrowser().read_histories("https://test.s20.online", {}, [(1, "receive", 0)],
+                    on_result=Mock(side_effect=failure))
+        self.assertIs(raised.exception, failure)
 
 
 @unittest.skipUnless(os.environ.get("CM_TEST_DATABASE_URL"), "isolated PostgreSQL URL required")
@@ -677,6 +747,8 @@ class MessageSyncTests(unittest.TestCase):
         cursor = {"projection_version": PROJECTION_VERSION, "1:receive": 4}
         with patch.object(self.service, "_project_page"):
             for _ in range(3):
+                if cursor.get("retry_archive:1:receive"):
+                    cursor["retry_archive:1:receive"]["next_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
                 cursor = self.run_worker(cursor, page_result=page)
                 self.assertEqual(cursor["1:receive"], 4)
                 self.assertEqual(cursor["error:1:receive"], "history_projection")
@@ -806,7 +878,8 @@ class MessageSyncTests(unittest.TestCase):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 4}, browser_effect=read)
         self.assertTrue(all(report["phase"] == "reading" for report in reports))
         self.assertEqual([report["completed_pages"] for report in reports], list(range(len(reports))))
-        self.assertEqual(reports[1]["page"], 4)
+        self.assertTrue(all(report["page"] == 0 for report in reports[:4]))
+        self.assertEqual(reports[-1]["page"], 4)
         self.assertEqual(cursor["activity"]["phase"], "waiting")
         self.assertEqual(cursor["activity"]["completed_pages"], len(reports))
 
@@ -2133,6 +2206,160 @@ class MessageSyncTests(unittest.TestCase):
             with self.assertRaises(WorkCancelled):sync._step(self.workspace,uuid4())
             full_job.assert_called_once()
 
+
+    def test_same_account_reauthentication_retains_history_and_pause_but_not_live_activity(self):
+        saved = {"sync_policy": 1, "1:receive": 19, "complete:1:sent": True, "archive_paused": True,
+                 "activity": {"client": {"name": "Old operation"}}, "live_cycle": {"added_records": 1}}
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:p AS jsonb) WHERE workspace_id=:w"),
+                        {"w": self.workspace, "p": json.dumps(saved)})
+        connection, version = self.service._ensure_channel(None, self.workspace, "test@example.test", self.crm)
+        cursor = self.db.execute(text("SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w"), {"w": self.workspace}).scalar_one()
+        self.assertEqual(connection, self.channel)
+        self.assertEqual(version, 2)
+        self.assertEqual(cursor["1:receive"], 19)
+        self.assertTrue(cursor["complete:1:sent"])
+        self.assertTrue(cursor["archive_paused"])
+        self.assertNotIn("activity", cursor)
+        self.assertNotIn("live_cycle", cursor)
+
+    def test_different_account_does_not_inherit_history_checkpoints(self):
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:p AS jsonb) WHERE workspace_id=:w"),
+                        {"w": self.workspace, "p": json.dumps({"complete:1:sent": True, "archive_paused": True})})
+        self.service._ensure_channel(None, self.workspace, "other@example.test", self.crm)
+        cursor = self.db.execute(text("SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w"), {"w": self.workspace}).scalar_one()
+        self.assertEqual(cursor, {})
+
+    def streaming_browser(self, page, before=None, after=None):
+        def read(origin, session, requests, **kwargs):
+            results = []
+            for request in requests:
+                if before:
+                    before(request)
+                if not kwargs["before_read"](request):
+                    result = {"skipped": True}
+                else:
+                    kwargs["on_progress"]()
+                    result = page(request)
+                results.append(result)
+                kwargs["on_result"](request, result, {})
+                if after:
+                    after(request, result)
+            return results, {}
+        return read
+
+    def test_streamed_heads_are_visible_before_a_later_browser_failure(self):
+        def page(request):
+            if request[2] == 4:
+                self.assertEqual(len(self.messages()), 1, "head was not committed before archive IO")
+                raise AlfaBrowserError("crm_unavailable")
+            return {"messages": [self.row("701")] if request == (1, "receive", 0) else [], "has_more": True}
+        cursor = self.run_worker({"1:receive": 4}, browser_effect=self.streaming_browser(page))
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(cursor["1:receive"], 4)
+        self.assertIn("live_checked:2:sent", cursor)
+
+    def test_page_failure_retries_only_that_journal_while_healthy_feed_runs_at_normal_interval(self):
+        def page(request):
+            return {"error": "crm_unavailable"} if request == (1, "receive", 4) else {"messages": [], "has_more": False}
+        cursor = self.run_worker({"1:receive": 4, "complete:1:sent": True,
+            "complete:2:receive": True, "complete:2:sent": True}, browser_effect=self.streaming_browser(page))
+        seconds = self.db.execute(text("SELECT EXTRACT(EPOCH FROM due_at-clock_timestamp()) FROM alfa_max_sync_queue WHERE workspace_id=:w"),
+                                  {"w": self.workspace}).scalar_one()
+        self.assertLessEqual(float(seconds), 15.1)
+        self.assertGreater(float(seconds), 10)
+        self.assertIn("retry_archive:1:receive", cursor)
+        cursor = self.run_worker(cursor, browser_effect=self.streaming_browser(page))
+        requests = self.service.browser.read_histories.call_args.args[2]
+        self.assertNotIn((1, "receive", 4), requests)
+        self.assertIn((2, "sent", 0), requests)
+        self.assertEqual(cursor["1:receive"], 4)
+
+    def test_pause_requested_during_io_preserves_checkpoint_but_keeps_new_heads(self):
+        actor = SimpleNamespace(user_id=self.user)
+        calls = []
+        def before(request):
+            if request[2] > 0:
+                result = self.service.sync(actor, self.workspace, archive_paused=True)
+                self.assertTrue(result["archive_paused"])
+        def page(request):
+            calls.append(request)
+            return {"messages": [], "has_more": True}
+        cursor = self.run_worker({"1:receive": 4}, browser_effect=self.streaming_browser(page, before=before))
+        self.assertTrue(cursor["archive_paused"])
+        self.assertEqual(cursor["1:receive"], 4)
+        self.assertNotIn((1, "receive", 4), calls)
+        self.assertTrue(all(f"live_checked:{b}:{direction}" in cursor for b in (1, 2) for direction in ("receive", "sent")))
+        self.service.sync(actor, self.workspace, archive_paused=False)
+        saved = self.db.execute(text("SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w"), {"w": self.workspace}).scalar_one()
+        self.assertFalse(saved["archive_paused"])
+        self.assertEqual(saved["1:receive"], 4)
+
+    def test_retry_requested_during_active_read_is_durable_and_does_not_rewind_completed_journals(self):
+        requested = False
+        def after(request, result):
+            nonlocal requested
+            if not requested:
+                requested = True
+                reply = self.service.sync(SimpleNamespace(user_id=self.user), self.workspace, branch=1, direction="receive")
+                self.assertTrue(reply["already_running"])
+        initial = {"1:receive": 4, "paused:1:receive": (datetime.now(UTC) + RECHECK_INTERVAL).isoformat(),
+                   "error:1:receive": "invalid_response", "complete:2:sent": True}
+        cursor = self.run_worker(initial, browser_effect=self.streaming_browser(
+            lambda request: {"messages": [], "has_more": True}, after=after))
+        self.assertIn("1:receive", cursor["retry_requests"])
+        cursor = self.run_worker(cursor, browser_effect=self.streaming_browser(
+            lambda request: {"messages": [], "has_more": False}))
+        self.assertNotIn("retry_requests", cursor)
+        self.assertIn((1, "receive", 4), self.service.browser.read_histories.call_args.args[2])
+        self.assertTrue(cursor["complete:2:sent"])
+        self.assertNotIn((2, "sent", 1), self.service.browser.read_histories.call_args.args[2])
+
+    def prepare_card_monitor(self):
+        student = uuid4()
+        self.db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES(:w,:s,'Child')"),
+                        {"w": self.workspace, "s": student})
+        self.db.execute(text("UPDATE alfa_customers SET student_id=:s WHERE workspace_id=:w"),
+                        {"w": self.workspace, "s": student})
+        self.db.execute(text("INSERT INTO alfa_sync_control(workspace_id,connection_id,requested_by,published_id) VALUES(:w,:c,:u,:r)"),
+                        {"w": self.workspace, "c": self.crm, "u": self.user, "r": self.run})
+        return student
+
+    def test_card_monitor_counts_one_family_and_requires_all_branch_sources_fresh(self):
+        from center_messenger import family_cache
+        self.add_customer(self.contact, 2, 7)
+        self.prepare_card_monitor()
+        self.project(self.row())
+        for branch in (1, 2):
+            self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,"
+                "settings_version,balance,paid_lesson_count,subscriptions,lessons) "
+                "VALUES(:w,:c,:b,7,1,0,0,'[]','[]')"),
+                {"w": self.workspace, "c": self.crm, "b": branch})
+            report = family_cache.progress(self.db, self.workspace, self.crm, self.snapshot)
+            self.assertEqual(report["total"], 1)
+            self.assertEqual(report["ready"], int(branch == 2))
+        self.db.execute(text("UPDATE alfa_family_details SET refreshed_at=now()-interval '31 minutes' WHERE workspace_id=:w AND branch_id=2"),
+                        {"w": self.workspace})
+        report = family_cache.progress(self.db, self.workspace, self.crm, self.snapshot)
+        self.assertEqual(report["cached"], 1)
+        self.assertEqual(report["ready"], 0)
+
+    def test_card_monitor_only_exposes_a_current_leased_source_and_ignores_old_settings(self):
+        from center_messenger import family_cache
+        self.prepare_card_monitor()
+        self.project(self.row())
+        family_cache.enqueue(self.db, self.workspace, self.snapshot | {"version": 1})
+        worker = family_cache.FamilyCacheWorker(SimpleNamespace(accounts=self.accounts))
+        job = worker.claim(self.workspace)
+        current = family_cache.current(self.db, self.workspace, self.crm)
+        self.assertEqual(current["customer_id"], "7")
+        self.assertEqual(current["name"], "Parent")
+        report = family_cache.progress(self.db, self.workspace, self.crm, self.snapshot)
+        self.assertEqual(report["queued"], 1)
+        self.db.execute(text("UPDATE outbox_events SET payload=jsonb_set(payload,'{lease_until}',to_jsonb(CAST(:at AS text))) WHERE id=:id"),
+                        {"at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(), "id": job["id"]})
+        self.assertIsNone(family_cache.current(self.db, self.workspace, self.crm))
+        self.db.execute(text("UPDATE alfa_settings SET version=version+1 WHERE workspace_id=:w"), {"w": self.workspace})
+        self.assertEqual(family_cache.progress(self.db, self.workspace, self.crm, self.snapshot)["queued"], 0)
 
 if __name__ == "__main__":
     unittest.main()

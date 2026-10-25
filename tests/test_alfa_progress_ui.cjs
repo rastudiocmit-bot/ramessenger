@@ -77,7 +77,7 @@ test("completion continues periodic checks for later history changes", async t =
   const ui = setup(t, () => report({ history_complete: true, backfill_pending: false, syncing: true,
     streams: [{ branch_id: "1", direction: "receive", source_rows: 10, expected_rows: 10, complete: true, missing_rows: 0 }] }));
   await ui.app.start();
-  assert.equal(ui.$('[data-sync-step="archive"]').dataset.state,"done");
+  assert.equal(ui.$('#alfa-loader-history-badge').textContent,"Сохранена");
   assert.equal([...ui.timers.values()][0].delay, 1000);
 });
 test("concurrent refresh calls share one in-flight request", async t => {
@@ -117,7 +117,8 @@ test("saved-history repair displays its checkpoint rather than a stalled archive
   const ui = setup(t, () => report({ syncing: true, worker:{phase:"repair"},client_repair: { processed: 60, total: 100, complete: false } }));
   await ui.app.start();
   assert.match(ui.$("#alfa-max-progress-text").textContent, /связи клиентов по ID/);
-  assert.equal(ui.$("#alfa-max-progress-track").getAttribute("aria-valuenow"), "60");
+  assert.match(ui.$('#alfa-loader-repair-note').textContent,/60 из 100/);
+  assert.equal(ui.$('#alfa-max-progress-track').getAttribute("aria-valuemax"), "1");
   assert.equal(ui.timers.size, 1);
 });
 test("visible messages and retained database records have separate counters", async t => {
@@ -134,7 +135,7 @@ test("partial pause stays visible while independent journals continue", async t 
     worker: { phase: 'reading', branch_id: '1', direction: 'receive', page: 3, completed_pages: 1, total_pages: 5 } }));
   await ui.app.start();
   assert.equal(ui.$('#alfa-max-progress').dataset.mode, 'running');
-  assert.match(ui.$('#alfa-max-progress-warning').textContent, /Филиал 2.*приостановлена/);
+  assert.match(ui.$('#alfa-loader-history-alerts').textContent, /Филиал 2.*ожидаем повтор/);
   assert.match(ui.$('#alfa-max-progress-activity').textContent, /страница 4/);
 });
 test("legacy identities require attention after a scan rather than endless loading", async t => {
@@ -161,8 +162,9 @@ test("a current timeout abort retries instead of silently stopping status pollin
 test("unknown repair size never invents a percentage", async t => {
   const ui = setup(t, () => report({ client_repair: { processed: 720, complete: false } }));
   await ui.app.start();
-  assert.equal(ui.$('#alfa-max-progress-track').hasAttribute('aria-valuenow'), false);
-  assert.equal(ui.$("#alfa-max-progress-track").getAttribute("aria-valuetext"), "Общий объём пока неизвестен");
+  assert.match(ui.$('#alfa-loader-repair-note').textContent, /720.*Общий объём пока неизвестен/);
+  assert.equal(ui.$('#alfa-max-progress-track').getAttribute('aria-valuenow'), "0");
+  assert.equal(ui.$('#alfa-max-progress-track').getAttribute('aria-valuemax'), "1");
 });
 test("an expired CRM session remains visible and keeps checking for reconnection", async t => {
   const ui = setup(t, () => report({ state: 'reauth_required' }));
@@ -221,7 +223,7 @@ test("a valid lease with a stale report cannot animate as running", async t=>{
     worker:{live:true,phase:'saving',updated_at:new Date(Date.now()-180000).toISOString()}}));
   await ui.app.start();
   assert.equal(ui.$('#alfa-max-progress').dataset.mode,'stale');
-  assert.match(ui.$('#alfa-max-progress-warning').textContent,/нет нового отчёта/);
+  assert.match(ui.$('#alfa-max-progress-warning').textContent,/Нет свежего подтверждения/);
   assert.doesNotMatch(ui.$('#alfa-max-progress-client-facts').textContent,/ID записи CRM/);
 });
 
@@ -229,8 +231,8 @@ test("loaded journals retain their result while unresolved legacy IDs need atten
   const ui=setup(t,()=>report({history_loaded:true,syncing:false,backfill_pending:false,unidentified_rows:283,
     streams:Array.from({length:8},(_,i)=>({branch_id:String(i/2|0),direction:i%2?'sent':'receive',complete:true,verification:{status:'legacy'}}))}));
   await ui.app.start();
-  assert.equal(ui.$('#alfa-max-progress-value').textContent,'8 из 8');
-  assert.equal(ui.$('#alfa-max-progress-summary').children.length,4);
+  assert.equal(ui.$('#alfa-max-progress-value').textContent,'8 из 8 журналов сохранено');
+  assert.equal(ui.$('#alfa-max-progress-track').children.length,8);
   assert.equal(ui.$('#alfa-max-progress').dataset.mode,'attention');
   assert.match(ui.$('#alfa-max-progress-warning').textContent,/283/);
 });
@@ -243,4 +245,117 @@ test("hidden monitor stops requests and resumes with a fresh full snapshot", asy
   Object.defineProperty(ui.window.document,'hidden',{value:false,configurable:true});
   ui.window.document.dispatchEvent(new ui.window.Event('visibilitychange'));await ui.app.start();
   assert.equal(ui.calls.length,2);assert.equal(ui.calls[1][0].includes('activity_only'),false);
+});
+
+function loaderReport(extra = {}) {
+  const streams = Array.from({length:8},(_,i)=>({branch_id:String(1+(i/2|0)),direction:i%2?'sent':'receive',
+    complete:![3,7].includes(i),source_rows:20,expected_rows:20,verification:{status:![3,7].includes(i)?'verified':'pending'},
+    ...(i===7?{error_code:'crm_unavailable',error:'Не удалось открыть страницу',history_retry_at:'2026-10-25T14:33:00Z'}:{})}));
+  return report({streams,history_loaded:false,archive_paused:false,
+    last_live_cycle:{checked:8,journals:8,failed:0,added_records:7,completed_at:new Date().toISOString()},
+    cards:{configured:true,total:52,ready:47,cached:50,queued:5,errors:0,as_of:new Date().toISOString()},
+    card_worker:{name:'Card parent',customer_id:'9007199254740997',branch_id:'2',manual:false},
+    worker:{flow:'archive',phase:'projecting',operation:'save_message',client:{name:'History parent',cards:[{customer_id:'1248',branch_id:'2'}]},record_id:'38541'},
+    ...extra});
+}
+async function settle(ui) {
+  await new Promise(resolve=>setImmediate(resolve));
+  await ui.app.start();
+  await new Promise(resolve=>setImmediate(resolve));
+}
+test("real cache counters and current card IDs are separate from history and source records", async t=>{
+  const ui=setup(t,()=>loaderReport());
+  await ui.app.start();
+  assert.match(ui.$('#alfa-loader-cards-value').textContent,/47 из 52 клиентов/);
+  assert.match(ui.$('#alfa-loader-cards-current').textContent,/Card parent.*9007199254740997/);
+  assert.match(ui.$('#alfa-max-progress-client-name').textContent,/History parent/);
+  assert.equal(ui.$('#alfa-loader-live-count').textContent,'7');
+  assert.match(ui.$('#alfa-loader-live-count-label').textContent,/записей/);
+  assert.equal(ui.$('#alfa-loader-cards-track').getAttribute('aria-valuemax'),'52');
+});
+test("archive pause is a server mutation and retains all completed journals and live checks", async t=>{
+  let paused=false;const posts=[];
+  const ui=setup(t,(url,options)=>{
+    if(options?.method==='POST'){posts.push(JSON.parse(JSON.stringify(options.data)));paused=options.data.archive_paused;return {queued:true,archive_paused:paused};}
+    return loaderReport({archive_paused:paused});
+  });
+  await ui.app.start();ui.$('#alfa-loader-pause').click();await settle(ui);
+  assert.deepEqual(posts,[{archive_paused:true}]);
+  assert.equal(ui.$('#alfa-loader-pause').textContent,'Продолжить историю');
+  assert.match(ui.$('#alfa-max-progress-value').textContent,/6 из 8/);
+  assert.equal(ui.$('#alfa-loader-live-count').textContent,'7');
+  assert.equal(ui.$('#alfa-loader-cards-badge').textContent,'Обновляются');
+  assert.ok([...ui.window.document.querySelectorAll('[data-retry-branch]')].every(b=>b.disabled));
+  ui.$('#alfa-loader-pause').click();await settle(ui);
+  assert.deepEqual(posts,[{archive_paused:true},{archive_paused:false}]);
+  assert.equal(ui.$('#alfa-loader-pause').getAttribute('aria-pressed'),'false');
+});
+test("retry posts only the selected journal and cannot reset finished history", async t=>{
+  const posts=[];let retried=false;
+  const ui=setup(t,(url,options)=>{
+    if(options?.method==='POST'){posts.push(JSON.parse(JSON.stringify(options.data)));retried=true;return {queued:true,already_running:true,archive_paused:false};}
+    const result=loaderReport();
+    if(retried){delete result.streams[7].error_code;delete result.streams[7].error;delete result.streams[7].history_retry_at;}
+    return result;
+  });
+  await ui.app.start();ui.$('#alfa-loader-history-alerts [data-retry-branch]').click();await settle(ui);
+  assert.deepEqual(posts,[{branch_id:4,direction:'sent'}]);
+  assert.match(ui.$('#alfa-max-progress-value').textContent,/6 из 8/);
+  assert.equal(ui.$('#alfa-loader-history-alerts').children.length,0);
+});
+test("an action failure stays visible after restoring the last successful report", async t=>{
+  const ui=setup(t,(url,options)=>{if(options?.method==='POST')throw new Error('Сначала восстановите подключение.');return loaderReport();});
+  await ui.app.start();ui.$('#alfa-loader-pause').click();await settle(ui);
+  assert.match(ui.$('#alfa-max-progress-warning').textContent,/Сначала восстановите/);
+  assert.equal(ui.$('#alfa-loader-pause').textContent,'Приостановить историю');
+});
+test("a revoked permission on a control removes cached private names and stops polling", async t=>{
+  const ui=setup(t,(url,options)=>{
+    if(options?.method==='POST')throw Object.assign(new Error('Forbidden'),{status:403});
+    return loaderReport({worker:{flow:'archive',client:{name:'Secret history',cards:[]}},card_worker:{name:'Secret card',customer_id:'9',branch_id:'1'}});
+  });
+  await ui.app.start();ui.$('#alfa-loader-pause').click();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.doesNotMatch(ui.$('#alfa-max-progress').textContent,/Secret history|Secret card/);
+  assert.equal(ui.timers.size,0);
+  assert.ok(ui.$('#alfa-max-sync').disabled);
+});
+test("a light update clears an expired card lease without dropping cached totals", async t=>{
+  let count=0;
+  const ui=setup(t,()=>++count===1?loaderReport():{activity_only:true,configured:true,state:'active',syncing:false,card_worker:null,worker:{live:false,phase:'waiting'}});
+  await ui.app.start();await ui.poll();
+  assert.doesNotMatch(ui.$('#alfa-loader-cards-current').textContent,/Card parent/);
+  assert.match(ui.$('#alfa-loader-cards-value').textContent,/47 из 52/);
+});
+test("current operation follows its actual live or archive flow", async t=>{
+  let flow='live';
+  const ui=setup(t,()=>loaderReport({worker:{flow,phase:'projecting',client:{name:'Current',cards:[]}}}));
+  await ui.app.start();assert.ok(ui.$('#alfa-loader-live-operation #alfa-max-progress-client'));
+  flow='archive';await ui.poll();assert.ok(ui.$('#alfa-loader-archive-operation #alfa-max-progress-client'));
+});
+test("no waiting clients has an honest empty cache state without a progress denominator", async t=>{
+  const ui=setup(t,()=>loaderReport({cards:{configured:true,total:0,ready:0,cached:0,queued:0},card_worker:null}));
+  await ui.app.start();assert.match(ui.$('#alfa-loader-cards-value').textContent,/Нет клиентов/);
+  assert.ok(ui.$('#alfa-loader-cards-track').hidden);
+  assert.equal(ui.$('#alfa-loader-cards-track').hasAttribute('aria-valuemax'),false);
+});
+test("status polling preserves keyboard focus on a journal retry", async t=>{
+  const ui=setup(t,()=>loaderReport());
+  await ui.app.start();
+  for(let parent=ui.$('#alfa-max-progress');parent;parent=parent.parentElement)parent.hidden=false;
+  ui.$('#alfa-loader-history-alerts [data-retry-branch]').focus();
+  assert.equal(ui.window.document.activeElement.dataset.retryBranch,'4');
+  await ui.poll();
+  assert.equal(ui.window.document.activeElement.dataset.retryBranch,'4');
+  assert.equal(ui.window.document.activeElement.dataset.retryDirection,'sent');
+});
+test("workspace reset clears cache aggregates and progress bars before an unavailable response", async t=>{
+  let offline=false;const ui=setup(t,()=>{if(offline)throw new Error('network');return loaderReport();});
+  await ui.app.start();ui.state.epoch++;ui.state.workspace={id:'workspace-2'};ui.app.reset();offline=true;
+  await ui.app.start();
+  assert.equal(ui.$('#alfa-loader-cards-queue').textContent,'');
+  assert.equal(ui.$('#alfa-loader-cards-track').hasAttribute('aria-valuenow'),false);
+  assert.equal(ui.$('#alfa-loader-cards-fill').style.width,'0%');
+  assert.equal(ui.$('#alfa-max-progress-value').textContent,'—');
+  assert.doesNotMatch(ui.$('#alfa-max-progress').textContent,/Card parent|History parent|47 из 52/);
 });

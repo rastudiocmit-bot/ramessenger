@@ -595,7 +595,7 @@
     form.reset();
   });
   $("#alfa-max-sync").addEventListener("click", () => alfaMaxAction(path => api(path + "/sync", { method: "POST" }),
-    result => result?.already_running ? "История уже обрабатывается. Текущий проход продолжается." : "Проверка истории поставлена в очередь."));
+    result => result?.already_running ? "Проверка уже выполняется на сервере." : "Проверка новых сообщений поставлена в очередь."));
   $("#alfa-max-disconnect").addEventListener("click", async () => {
     const epoch = state.epoch;
     if (!await confirm("Отключить штатный MAX?", "Зашифрованная веб-сессия AlfaCRM будет удалена. История переписки останется в кабинете.", "Отключить")) return;

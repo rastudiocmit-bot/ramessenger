@@ -904,7 +904,8 @@ class AlfaMaxBrowser:
             raise AlfaBrowserError("crm_unavailable", stage=stage, request=request,
                                    cause=_browser_cause(error), network_error=_browser_network_error(error)) from None
 
-    def read_histories(self, origin, state, requests, *, on_progress=None, continue_on_error=False):
+    def read_histories(self, origin, state, requests, *, on_progress=None, continue_on_error=False,
+                       before_read=None, on_result=None):
         origin = normalize_origin(origin)
         for branch, direction, page_number in requests:
             if (
@@ -914,17 +915,31 @@ class AlfaMaxBrowser:
             ):
                 raise AlfaBrowserError("invalid_response")
         manager = browser = context = None
-        stage, request = "open_browser", None
+        stage, request, in_callback = "open_browser", None, False
         try:
             manager, browser, context, page = self._open(origin, state)
             results = []
             for branch, direction, page_number in requests:
                 request = (branch, direction, page_number)
+                if before_read:
+                    in_callback = True
+                    allowed = before_read(request)
+                    in_callback = False
+                    if not allowed:
+                        result = {"skipped": True}
+                        results.append(result)
+                        if on_result:
+                            in_callback = True
+                            on_result(request, result, state)
+                            in_callback = False
+                        continue
                 if on_progress:
                     # One callback per requested page: the worker advances its
                     # visible page counter here. Bounded retries fit inside its
                     # 300-second lease and must not advance that counter again.
+                    in_callback = True
                     on_progress()
+                    in_callback = False
                 try:
                     for attempt in range(1, HISTORY_READ_ATTEMPTS + 1):
                         try:
@@ -969,6 +984,16 @@ class AlfaMaxBrowser:
                     results.append({"error": error.code, "stage": error.stage, "cause": error.cause,
                                     "http_status": error.http_status, "network_error": error.network_error,
                                     "attempts": error.attempts})
+                if on_result:
+                    try:
+                        state = context.storage_state()
+                    except Exception:
+                        pass
+                    # Commit each page before a slow or failed later page. A
+                    # callback failure is not a navigation/browser failure.
+                    in_callback = True
+                    on_result(request, results[-1], state)
+                    in_callback = False
             stage = "save_session"
             return results, context.storage_state()
         except AlfaBrowserError as error:
@@ -976,6 +1001,8 @@ class AlfaMaxBrowser:
             error.request = error.request or request
             raise
         except Exception as error:
+            if in_callback:
+                raise
             raise AlfaBrowserError("crm_unavailable", stage=stage, cause=_browser_cause(error), request=request,
                                    network_error=_browser_network_error(error)) from None
         finally:

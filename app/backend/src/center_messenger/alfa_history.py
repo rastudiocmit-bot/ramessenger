@@ -17,7 +17,7 @@ def history_pending(cursor):
     if cursor.get("projection_version") != PROJECTION_VERSION or not cursor.get("streams"):
         return True
     return any(
-        (not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"))
+        (not cursor.get("archive_paused") and not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"))
         or cursor.get(f"catchup:{key}", 0) > 0
         for key in cursor["streams"]
     )
@@ -47,7 +47,8 @@ def retry_history(original, keys=None):
     """Retry the failed page only; never rewind a completed import."""
     cursor = dict(original)
     for key in cursor.get("streams", []) if keys is None else keys:
-        for prefix in ("paused", "pause_error", "error", "retries", "failures", "live_error"):
+        for prefix in ("paused", "pause_error", "error", "retries", "failures", "live_error",
+                       "retry_live", "retry_archive", "retry_catchup"):
             cursor.pop(f"{prefix}:{key}", None)
     return cursor
 
@@ -64,7 +65,7 @@ def verify_saved_pages(db, workspace, connection, requests, results):
     """Never advance past a read source ID that the projector did not retain."""
     expected = {}
     for (branch, _, _), result in zip(requests, results, strict=True):
-        if result.get("error"):
+        if result.get("error") or result.get("skipped"):
             continue
         for message in result["messages"]:
             base = f"{message['direction']}:{branch}:{message['record_id']}"
@@ -86,7 +87,7 @@ def verify_saved_pages(db, workspace, connection, requests, results):
     saved = {expected[row["external_record_id"]] for row in rows
              if expected[row["external_record_id"]] == (row["branch"], row["record"], row["direction"])}
     for (branch, _, _), result in zip(requests, results, strict=True):
-        if result.get("error"):
+        if result.get("error") or result.get("skipped"):
             continue
         missing = [str(m["record_id"]) for m in result["messages"]
                    if (str(branch), str(m["record_id"]), m["direction"]) not in saved]
@@ -132,6 +133,9 @@ def history_coverage(db, workspace, connection, cursor, branches, *, saved_rows=
                             "verification": proof, "verified": proof.get("status") == "verified",
                             "new_messages_at": cursor.get(f"live_checked:{key}"),
                             "live_error_code": cursor.get(f"live_error:{key}"),
+                            "live_retry_at": (cursor.get(f"retry_live:{key}") or {}).get("next_at"),
+                            "history_retry_at": (cursor.get(f"retry_archive:{key}") or {}).get("next_at"),
+                            "catchup_retry_at": (cursor.get(f"retry_catchup:{key}") or {}).get("next_at"),
                             "next_page": cursor.get(key, 0),
                             "catchup_page": cursor.get(f"catchup:{key}", 0),
                             "oldest_at": row.get("oldest_at"), "newest_at": row.get("newest_at"),
@@ -149,7 +153,8 @@ def history_coverage(db, workspace, connection, cursor, branches, *, saved_rows=
                                 and not (cursor.get("client_repair") and not cursor["client_repair"].get("complete")),
             "totals_verified": bool(streams) and all(s["verified"] and not s["missing_rows"] and not s["unidentified_rows"] for s in streams),
             "backfill_pending": history_pending(cursor),
-            "history_paused": any(s["paused_until"] for s in streams),
+            "archive_paused": bool(cursor.get("archive_paused")),
+            "history_paused": bool(cursor.get("archive_paused")) or any(s["paused_until"] for s in streams),
             "unidentified_rows": sum(s["unidentified_rows"] for s in streams),
             "client_repair": cursor.get("client_repair")}
 
@@ -157,46 +162,95 @@ def history_coverage(db, workspace, connection, cursor, branches, *, saved_rows=
 def plan_history(original, branches, now=None):
     now = now or datetime.now(UTC)
     cursor = adopt_history(original, branches)
-    requests = []
+    heads, catchups, archives = [], [], []
     for branch in branches:
         for direction in ("receive", "sent"):
             key = f"{branch}:{direction}"
             paused = cursor.get(f"paused:{key}")
             if paused and now >= datetime.fromisoformat(paused):
                 cursor = retry_history(cursor, [key])
-            if not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"):
+            if not cursor.get("archive_paused") and not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"):
                 if not cursor.get(f"scan_id:{key}"):
                     cursor[f"scan_id:{key}"] = str(uuid4())
                     cursor[f"receipt_start:{key}"] = cursor.get(key, 0)
                     cursor[f"started:{key}"] = now.isoformat()
                     cursor[f"scan_pages:{key}"] = 0
-            requests.append((branch, direction, 0))
-            for page in (0 if cursor.get(f"paused:{key}") else cursor.get(key, 0), cursor.get(f"catchup:{key}", 0)):
-                request = (branch, direction, page)
-                if page > 0 and request not in requests:
-                    requests.append(request)
+            if retry_ready(cursor, key, "live", now):
+                heads.append((branch, direction, 0))
+            page = cursor.get(f"catchup:{key}", 0)
+            if page > 0 and retry_ready(cursor, key, "catchup", now):
+                catchups.append((branch, direction, page))
+            page = cursor.get(key, 0)
+            if (page > 0 and not cursor.get("archive_paused") and not cursor.get(f"complete:{key}")
+                    and not cursor.get(f"paused:{key}") and retry_ready(cursor, key, "archive", now)):
+                archives.append((branch, direction, page))
+    # Read every journal's head before spending time on old pages.
+    requests = list(dict.fromkeys(heads + catchups + archives))
     return cursor, requests
 
 
-def advance_history(cursor, requests, results, now=None):
+def retry_ready(cursor, key, kind, now):
+    value = (cursor.get(f"retry_{kind}:{key}") or {}).get("next_at")
+    return not value or datetime.fromisoformat(value) <= now
+
+
+def _retry_result(cursor, key, kind, result, now):
+    token = f"retry_{kind}:{key}"
+    if result.get("error"):
+        attempt = (cursor.get(token) or {}).get("attempts", 0) + 1
+        delay = min(300, 60 * 2 ** min(attempt - 1, 3))
+        cursor[token] = {"attempts": attempt, "error": result["error"],
+                         "next_at": (now + timedelta(seconds=delay)).isoformat()}
+    else:
+        cursor.pop(token, None)
+
+
+def next_history_delay(cursor, now=None):
+    """A failed journal never imposes its backoff on healthy journals."""
+    now = now or datetime.now(UTC)
+    waits = []
+    for key in cursor.get("streams", []):
+        kinds = [("live", 15)]
+        if cursor.get(f"catchup:{key}", 0):
+            kinds.append(("catchup", 2))
+        if not cursor.get("archive_paused") and not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"):
+            kinds.append(("archive", 2))
+        for kind, normal in kinds:
+            value = (cursor.get(f"retry_{kind}:{key}") or {}).get("next_at")
+            waits.append(max(1, (datetime.fromisoformat(value) - now).total_seconds()) if value else normal)
+        paused = cursor.get(f"paused:{key}")
+        if paused and not cursor.get("archive_paused"):
+            waits.append(max(1, (datetime.fromisoformat(paused) - now).total_seconds()))
+    return min(waits, default=15)
+
+
+def advance_history(cursor, requests, results, now=None, *, allow_archive=True):
     """Advance only successful pages; return all successfully read source rows."""
     now = now or datetime.now(UTC)
     pages = dict(zip(requests, results, strict=True))
     updates = [(branch, result["messages"]) for (branch, _, _), result in pages.items()
-               if not result.get("error")]
+               if not result.get("error") and not result.get("skipped")]
     for key in cursor["streams"]:
         branch, direction = key.split(":")
         branch = int(branch)
-        current = pages[(branch, direction, 0)]
+        received = {page: result for (b, d, page), result in pages.items()
+                    if b == branch and d == direction and not result.get("skipped")}
+        if not received:
+            continue
+        current = received.get(0)
         target = cursor.get(key, 0)
-        archive = pages.get((branch, direction, target))
+        archive = received.get(target) if allow_archive and not cursor.get("archive_paused") else None
         failed = [result["error"] for (b, d, _), result in pages.items()
                   if b == branch and d == direction and result.get("error")]
-        if current.get("error"):
-            cursor[f"live_error:{key}"] = current["error"]
-        else:
-            cursor.pop(f"live_error:{key}", None)
-            cursor[f"live_checked:{key}"] = now.isoformat()
+        if current is not None:
+            _retry_result(cursor, key, "live", current, now)
+            if current.get("error"):
+                cursor[f"live_error:{key}"] = current["error"]
+            else:
+                cursor.pop(f"live_error:{key}", None)
+                cursor[f"live_checked:{key}"] = now.isoformat()
+        if archive is not None and not cursor.get(f"complete:{key}"):
+            _retry_result(cursor, key, "archive", archive, now)
         if failed and not cursor.get(f"complete:{key}"):
             cursor[f"error:{key}"] = failed[0]
             missing = [m for (b, d, _), result in pages.items() if b == branch and d == direction
@@ -210,16 +264,16 @@ def advance_history(cursor, requests, results, now=None):
                     cursor[f"pause_error:{key}"] = archive["error"]
         elif cursor.get(f"paused:{key}"):
             cursor[f"error:{key}"] = cursor.get(f"pause_error:{key}", "history_gap")
-        elif not cursor.get(f"gap:{key}"):
+        elif not cursor.get(f"gap:{key}") and archive is not None:
             cursor.pop(f"error:{key}", None)
             if not cursor.get(f"complete:{key}") and archive and not archive.get("error"):
                 cursor.pop(f"missing_ids:{key}", None)
-        else:
+        elif cursor.get(f"gap:{key}"):
             cursor[f"error:{key}"] = "history_incomplete"
         # An unrelated journal or failed old page cannot discard a healthy head.
         # New bursts have a separate cursor and never reset the archive.
         catchup = cursor.get(f"catchup:{key}", 0)
-        if not current.get("error"):
+        if current is not None and not current.get("error"):
             identities = [str(m["record_id"]) for m in current["messages"]]
             previous_head = cursor.get(f"head:{key}")
             if previous_head and current["has_more"] and previous_head not in identities and not current.get("known_ids"):
@@ -233,8 +287,10 @@ def advance_history(cursor, requests, results, now=None):
             if current.get("total") is not None:
                 cursor[f"total:{key}"] = current["total"]
         if catchup:
-            result = pages.get((branch, direction, catchup))
-            if result and not result.get("error"):
+            result = received.get(catchup)
+            if result is not None:
+                _retry_result(cursor, key, "catchup", result, now)
+            if result is not None and not result.get("error"):
                 identities = {str(m["record_id"]) for m in result["messages"]}
                 if not result["has_more"] or cursor.get(f"until:{key}") in identities or result.get("known_ids"):
                     queued = cursor.pop(f"queued:{key}", None)
