@@ -82,9 +82,10 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
   }
   const duration = value => value === null || value === undefined ? "—" : value < 60 ? Math.round(value) + " с" : Math.round(value / 60) + " мин";
   async function metadata() {
-    const epoch = state.epoch, workspace = state.workspace?.id;
+    const epoch = state.epoch, workspace = state.workspace?.id, preferenceRevision = state.chatPreferenceRevision || 0;
     const result = await api(`/workspaces/${workspace}/chats/context`);
     if (epoch !== state.epoch || workspace !== state.workspace?.id) return;
+    document.dispatchEvent(new CustomEvent("cm:chat-preferences", {detail:{preferences:result.preferences,epoch,revision:preferenceRevision}}));
     context = result; contextEpoch = epoch;
     $("#profile-channels").textContent = `${(result.channels || []).filter(c => c.enabled).length} активных`;
     const branches = $("#organization-branches");

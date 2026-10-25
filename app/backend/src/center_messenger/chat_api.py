@@ -19,6 +19,7 @@ from center_messenger.chat_store import changed, refresh_unread
 from center_messenger.chat_queue import PROJECTION_VERSION, queue_state_sql, cached_state_sql, preview as queue_preview, materialize_legacy_handled
 from center_messenger.crm_api import DirectoryReader, search_query
 from center_messenger.chat_list_window import ListWindows
+from center_messenger import chat_preferences
 from center_messenger.max_client import ERRORS as MAX_ERRORS
 from center_messenger.max_client import MaxChannelInput, MaxSettingsInput
 from center_messenger.max_connections import fingerprint
@@ -68,6 +69,10 @@ class LinkInput(InputModel):
     contact_id: UUID | None
 
 
+class ChatPreferencesInput(InputModel):
+    name_order: Literal["parent_first", "child_first"]
+
+
 class ChatReader:
     def __init__(self, messaging):
         self.messaging, self.max = messaging, messaging.max
@@ -97,7 +102,8 @@ class ChatReader:
                 "(cn.kind='alfa_max_browser' AND EXISTS(SELECT 1 FROM alfa_max_settings s "
                 "WHERE s.workspace_id=cn.workspace_id AND s.connection_id=cn.id))) ORDER BY cn.created_at,cn.id"
             ), {"w": workspace}).mappings().all()
-            return {"channels": [{"id": str(row["id"]), "name": row["name"], "kind": row["kind"],
+            return {"preferences": chat_preferences.read(db, workspace, actor.user_id),
+                    "channels": [{"id": str(row["id"]), "name": row["name"], "kind": row["kind"],
                                   "status": row["status"], "enabled": bool(row["enabled"])} for row in rows],
                     "branches": DirectoryReader._branches(db, workspace), "can_write": writable,
                     "send_attachments": False,
@@ -401,6 +407,8 @@ class ChatReader:
                     "ORDER BY connection_id,external_id)::text,'')) FROM alfa_branches WHERE workspace_id=:w)"),
                     {"w": workspace}).scalar_one()
                 fingerprint += ':' + str(snapshot['run'] if snapshot else '')
+                fingerprint += ':' + str(db.execute(text("SELECT coalesce(max(payload->>'updated_at'),'') "
+                    "FROM outbox_events WHERE workspace_id=:w AND topic='crm.active.review'"), {"w": workspace}).scalar())
                 previous = self.list_windows.previous(window_token, window_scope)
                 unchanged = self.list_windows.unchanged(previous, fingerprint, window)
                 if unchanged:
@@ -506,7 +514,9 @@ class ChatReader:
                     for row in db.execute(
                         text(
                             "SELECT a.contact_id,(array_agg(DISTINCT a.name ORDER BY "
-                            "a.name))[1:4] AS names,"
+                            "a.name))[1:50] AS names,"
+                            "bool_or(nullif(a.legal_name,'') IS NOT NULL) AS has_parent,"
+                            "jsonb_agg(DISTINCT jsonb_build_object('id',coalesce(a.student_id::text,a.branch_id::text||':'||a.external_id::text),'name',a.name,'crm_id',a.external_id::text)) AS children,"
                             "max(CASE a.status WHEN 'client' THEN 3 WHEN 'lead' THEN 2 ELSE "
                             "1 END) AS weight "
                             "FROM alfa_customers a WHERE a.workspace_id=:w AND a.run_id=:run "
@@ -530,6 +540,8 @@ class ChatReader:
                         "name": row["display_name"],
 
                         "students": family.get("names", []),
+                        "parent_name": row["display_name"] if family.get("has_parent") else None,
+                        "children": family.get("children", []),
                         "unread": row["effective_unread"],
                         "unread_count": row["unanswered_count"],
                         "handled": row["handled_inbound_id"] == row["latest_inbound_id"]
@@ -900,6 +912,14 @@ def chats(
 def chat_context(workspace_id: UUID, request: Request):
     _, reader = components(request)
     return reader.context(identity(request), workspace_id)
+
+
+@router.put("/chats/preferences")
+def chat_display_preferences(workspace_id: UUID, model: ChatPreferencesInput, request: Request):
+    _, reader = components(request)
+    actor = identity(request, mutation=True)
+    with reader.max.chat_transaction(actor, workspace_id) as db:
+        return chat_preferences.save(db, workspace_id, actor.user_id, model.name_order)
 
 
 @router.get("/summary")

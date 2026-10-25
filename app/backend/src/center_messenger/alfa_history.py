@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
+from uuid import uuid4
 
 PROJECTION_VERSION = 3
 RECHECK_INTERVAL = timedelta(hours=6)
@@ -22,42 +23,41 @@ def history_pending(cursor):
     )
 
 
+def adopt_history(original, branches):
+    """Upgrade the policy without rewinding any imported data or unfinished page."""
+    cursor = dict(original)
+    cursor["projection_version"] = PROJECTION_VERSION
+    cursor["streams"] = [f"{b}:{d}" for b in branches for d in ("receive", "sent")]
+    if cursor.get("sync_policy") != 1:
+        for key in cursor["streams"]:
+            if cursor.get(f"finished:{key}") or cursor.get(f"complete:{key}"):
+                cursor[f"imported:{key}"] = True
+                cursor[f"complete:{key}"] = True
+                cursor[key] = 0
+                cursor.setdefault(f"proof:{key}", {"status": "legacy", "reason": "previous_scan"})
+                # Old numeric gaps compared raw source rows with distinct IDs.
+                if cursor.get(f"error:{key}") in {"history_gap", "history_incomplete"} and not cursor.get(f"missing_ids:{key}"):
+                    for prefix in ("error", "gap", "paused", "pause_error", "retries"):
+                        cursor.pop(f"{prefix}:{key}", None)
+        cursor["sync_policy"] = 1
+    return cursor
+
+
 def retry_history(original, keys=None):
-    """A manual retry resumes paused archives without rewinding healthy ones."""
+    """Retry the failed page only; never rewind a completed import."""
     cursor = dict(original)
     for key in cursor.get("streams", []) if keys is None else keys:
-        if cursor.get(f"paused:{key}"):
-            cursor[key] = 0
-            cursor[f"complete:{key}"] = False
-            for prefix in ("paused", "pause_error", "error", "retries", "gap", "scan_pages", "failures", "missing_ids"):
-                cursor.pop(f"{prefix}:{key}", None)
+        for prefix in ("paused", "pause_error", "error", "retries", "failures", "live_error"):
+            cursor.pop(f"{prefix}:{key}", None)
     return cursor
 
 
 def reconcile_history(cursor, original, coverage, now=None):
-    """Bound verification passes and retain an explicit, durable gap state."""
-    now = now or datetime.now(UTC)
+    """Source ambiguity is attention, not a reason to loop over the whole archive."""
     for stream in coverage["streams"]:
         key = f"{stream['branch_id']}:{stream['direction']}"
-        if not cursor.get(f"finished:{key}") or cursor[f"finished:{key}"] == original.get(f"finished:{key}"):
-            continue
-        if not stream["missing_rows"]:
-            for prefix in ("paused", "gap", "retries"):
-                cursor.pop(f"{prefix}:{key}", None)
-            if cursor.get(f"error:{key}") in {"history_incomplete", "history_gap"}:
-                cursor.pop(f"error:{key}", None)
-            continue
-        cursor[key] = 0
-        cursor[f"complete:{key}"] = False
-        cursor[f"gap:{key}"] = stream["missing_rows"]
-        retries = cursor.get(f"retries:{key}", 0)
-        if retries < MAX_GAP_RETRIES:
-            cursor[f"retries:{key}"] = retries + 1
-            cursor[f"error:{key}"] = "history_incomplete"
-        else:
-            cursor[f"paused:{key}"] = (now + RECHECK_INTERVAL).isoformat()
-            cursor[f"pause_error:{key}"] = "history_gap"
-            cursor[f"error:{key}"] = "history_gap"
+        if cursor.get(f"finished:{key}"):
+            cursor[f"imported:{key}"] = True
 
 
 def verify_saved_pages(db, workspace, connection, requests, results):
@@ -95,7 +95,7 @@ def verify_saved_pages(db, workspace, connection, requests, results):
             result["missing_ids"] = missing
 
 
-def history_coverage(db, workspace, connection, cursor, branches):
+def coverage_rows(db, workspace, connection):
     """Read coverage evidence without exposing clients or message contents."""
     rows = db.execute(text(
         "SELECT m.payload->>'branch_id' AS branch,m.direction,"
@@ -107,6 +107,12 @@ def history_coverage(db, workspace, connection, cursor, branches):
         "AND c.id=m.conversation_id WHERE m.workspace_id=:w AND c.connection_id=:c "
         "AND (m.payload->>'superseded_by' IS NULL OR m.payload->>'crm_mirror'='true') GROUP BY 1,2"
     ), {"w": workspace, "c": connection}).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def history_coverage(db, workspace, connection, cursor, branches, *, saved_rows=None):
+    cursor = adopt_history(cursor, branches)
+    rows = coverage_rows(db, workspace, connection) if saved_rows is None else saved_rows
     saved = {(row["branch"], row["direction"]): row for row in rows}
     streams = []
     for branch in branches:
@@ -115,14 +121,17 @@ def history_coverage(db, workspace, connection, cursor, branches):
             row = saved.get((str(branch), "in" if direction == "receive" else "out"), {})
             count = row.get("source_rows", 0)
             expected = cursor.get(f"total:{key}")
-            missing = max(0, expected - count) if expected is not None else None
-            complete = (cursor.get("projection_version") == PROJECTION_VERSION
-                        and bool(cursor.get(f"complete:{key}"))
-                        and not cursor.get(f"catchup:{key}") and not cursor.get(f"error:{key}"))
+            missing = len(cursor.get(f"missing_ids:{key}", []))
+            complete = bool(cursor.get(f"imported:{key}") or cursor.get(f"complete:{key}"))
+            proof = cursor.get(f"proof:{key}", {"status": "pending"})
             streams.append({"branch_id": str(branch), "direction": direction,
                             "source_rows": count, "expected_rows": expected,
                             "unidentified_rows": row.get("unidentified_rows", 0),
                             "missing_rows": missing, "complete": complete,
+                            "row_difference": max(0, expected - count) if expected is not None else None,
+                            "verification": proof, "verified": proof.get("status") == "verified",
+                            "new_messages_at": cursor.get(f"live_checked:{key}"),
+                            "live_error_code": cursor.get(f"live_error:{key}"),
                             "next_page": cursor.get(key, 0),
                             "catchup_page": cursor.get(f"catchup:{key}", 0),
                             "oldest_at": row.get("oldest_at"), "newest_at": row.get("newest_at"),
@@ -135,10 +144,10 @@ def history_coverage(db, workspace, connection, cursor, branches):
                             "missing_ids": cursor.get(f"missing_ids:{key}", []),
                             "error_code": cursor.get(f"error:{key}")})
     return {"streams": streams,
-            "history_complete": bool(streams) and all(s["complete"] and not s["missing_rows"] and not s["unidentified_rows"] for s in streams)
+            "history_loaded": bool(streams) and all(s["complete"] for s in streams),
+            "history_complete": bool(streams) and all(s["complete"] and s["verified"] and not s["missing_rows"] and not s["unidentified_rows"] for s in streams)
                                 and not (cursor.get("client_repair") and not cursor["client_repair"].get("complete")),
-            "totals_verified": bool(streams) and all(s["expected_rows"] is not None and not s["missing_rows"]
-                                                     and not s["unidentified_rows"] for s in streams),
+            "totals_verified": bool(streams) and all(s["verified"] and not s["missing_rows"] and not s["unidentified_rows"] for s in streams),
             "backfill_pending": history_pending(cursor),
             "history_paused": any(s["paused_until"] for s in streams),
             "unidentified_rows": sum(s["unidentified_rows"] for s in streams),
@@ -147,10 +156,7 @@ def history_coverage(db, workspace, connection, cursor, branches):
 
 def plan_history(original, branches, now=None):
     now = now or datetime.now(UTC)
-    cursor = dict(original) if original.get("projection_version") == PROJECTION_VERSION else {
-        key: original[key] for key in ("client_repair",) if key in original}
-    cursor["projection_version"] = PROJECTION_VERSION
-    cursor["streams"] = [f"{branch}:{direction}" for branch in branches for direction in ("receive", "sent")]
+    cursor = adopt_history(original, branches)
     requests = []
     for branch in branches:
         for direction in ("receive", "sent"):
@@ -158,15 +164,12 @@ def plan_history(original, branches, now=None):
             paused = cursor.get(f"paused:{key}")
             if paused and now >= datetime.fromisoformat(paused):
                 cursor = retry_history(cursor, [key])
-            finished = cursor.get(f"finished:{key}")
-            if finished and cursor.get(f"complete:{key}"):
-                if now - datetime.fromisoformat(finished) >= RECHECK_INTERVAL:
-                    cursor[key] = 0
-                    cursor[f"complete:{key}"] = False
-                    cursor.pop(f"retries:{key}", None)
-            if not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}") and cursor.get(key, 0) == 0:
-                cursor[f"started:{key}"] = now.isoformat()
-                cursor[f"scan_pages:{key}"] = 0
+            if not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"):
+                if not cursor.get(f"scan_id:{key}"):
+                    cursor[f"scan_id:{key}"] = str(uuid4())
+                    cursor[f"receipt_start:{key}"] = cursor.get(key, 0)
+                    cursor[f"started:{key}"] = now.isoformat()
+                    cursor[f"scan_pages:{key}"] = 0
             requests.append((branch, direction, 0))
             for page in (0 if cursor.get(f"paused:{key}") else cursor.get(key, 0), cursor.get(f"catchup:{key}", 0)):
                 request = (branch, direction, page)
@@ -189,7 +192,12 @@ def advance_history(cursor, requests, results, now=None):
         archive = pages.get((branch, direction, target))
         failed = [result["error"] for (b, d, _), result in pages.items()
                   if b == branch and d == direction and result.get("error")]
-        if failed:
+        if current.get("error"):
+            cursor[f"live_error:{key}"] = current["error"]
+        else:
+            cursor.pop(f"live_error:{key}", None)
+            cursor[f"live_checked:{key}"] = now.isoformat()
+        if failed and not cursor.get(f"complete:{key}"):
             cursor[f"error:{key}"] = failed[0]
             missing = [m for (b, d, _), result in pages.items() if b == branch and d == direction
                        for m in result.get("missing_ids", [])]
@@ -204,7 +212,8 @@ def advance_history(cursor, requests, results, now=None):
             cursor[f"error:{key}"] = cursor.get(f"pause_error:{key}", "history_gap")
         elif not cursor.get(f"gap:{key}"):
             cursor.pop(f"error:{key}", None)
-            cursor.pop(f"missing_ids:{key}", None)
+            if not cursor.get(f"complete:{key}") and archive and not archive.get("error"):
+                cursor.pop(f"missing_ids:{key}", None)
         else:
             cursor[f"error:{key}"] = "history_incomplete"
         # An unrelated journal or failed old page cannot discard a healthy head.
@@ -213,7 +222,7 @@ def advance_history(cursor, requests, results, now=None):
         if not current.get("error"):
             identities = [str(m["record_id"]) for m in current["messages"]]
             previous_head = cursor.get(f"head:{key}")
-            if previous_head and current["has_more"] and previous_head not in identities:
+            if previous_head and current["has_more"] and previous_head not in identities and not current.get("known_ids"):
                 if catchup:
                     cursor.setdefault(f"queued:{key}", previous_head)
                 else:
@@ -227,7 +236,7 @@ def advance_history(cursor, requests, results, now=None):
             result = pages.get((branch, direction, catchup))
             if result and not result.get("error"):
                 identities = {str(m["record_id"]) for m in result["messages"]}
-                if not result["has_more"] or cursor.get(f"until:{key}") in identities:
+                if not result["has_more"] or cursor.get(f"until:{key}") in identities or result.get("known_ids"):
                     queued = cursor.pop(f"queued:{key}", None)
                     cursor[f"catchup:{key}"] = 1 if queued else 0
                     if queued:
@@ -245,4 +254,5 @@ def advance_history(cursor, requests, results, now=None):
             cursor[f"complete:{key}"] = not archive["has_more"]
             if not archive["has_more"]:
                 cursor[f"finished:{key}"] = now.isoformat()
+                cursor[f"imported:{key}"] = True
     return updates

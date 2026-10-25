@@ -18,6 +18,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   let channels = [], items = [], selected = null, page = 0, hasMore = false;
   let timer, searchTimer, linkTimer, pollBusy = false, actionBusy = false, historyBusy = false, listLoading = false, listRetryRequired = false;
   let notifyTimer, notifySeq = null, notifyEpoch = null, notifyTarget = null, notifyBusy = false;
+  let nameOrder = "parent_first", preferenceBusy = false;
   let lastList = "", linkConversation = null, tokenChannel = null, soundContext = null;
   const cache = new Map();
   const active = () => state.user && state.workspace && state.pane === "messages";
@@ -34,6 +35,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   function reset() {
     state.voiceInput = false; document.dispatchEvent(new CustomEvent("cm:voice-availability"));
+    nameOrder = "parent_first"; preferenceBusy = false;
+    state.chatPreferenceRevision = (state.chatPreferenceRevision || 0) + 1;
+    $("#chat-name-order").disabled = false; $("#chat-name-order").value = nameOrder; renderNameExample();
+    $("#chat-name-save-status").textContent = ""; show($("#chat-name-save-status"), false);
     generation += 1; listSeq += 1; selectionSeq += 1; linkSeq += 1; cardSeq += 1; detailsSeq += 1; family = null; familySelected = null; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     clearTimeout(timer); clearTimeout(searchTimer); clearTimeout(linkTimer); clearTimeout(notifyTimer);
     notifyTimer = null; notifyBusy = false; notifySeq = null; notifyEpoch = null; notifyTarget = null; show($("#chat-new-marker"), false);
@@ -157,9 +162,43 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (left !== right) return left === null ? 1 : right === null ? -1 : left > right ? -1 : 1;
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   }
+  function displayNames(item) {
+    const parent = item.parent_name === undefined ? item.name : item.parent_name;
+    const children = item.children?.length ? [...new Map([...item.children].sort((a,b) => a.name.localeCompare(b.name,"ru") || String(a.id).localeCompare(String(b.id))).map(c => [c.id,c])).values()].map(c => c.name).join(" · ") : (item.students || []).join(" · ");
+    if (!parent) return { primary: children || item.name, secondary: children ? "Родитель не указан" : "Связь с CRM не подтверждена" };
+    if (!children) return { primary: parent, secondary: "Ребёнок не указан" };
+    return nameOrder === "child_first" ? { primary: children, secondary: parent } : { primary: parent, secondary: children };
+  }
+  function renderNameExample() {
+    const sample = $("#chat-name-example");
+    sample.querySelector("strong").textContent = nameOrder === "child_first" ? "Ребёнок: Анна Иванова" : "Родитель: Мария Иванова";
+    sample.querySelector("small").textContent = nameOrder === "child_first" ? "Родитель: Мария Иванова" : "Ребёнок: Анна Иванова";
+  }
+  function applyPreferences(preferences) {
+    nameOrder = preferences?.name_order === "child_first" ? "child_first" : "parent_first";
+    $("#chat-name-order").value = nameOrder; renderNameExample(); renderList(true);
+  }
+  $("#chat-name-order").addEventListener("change", async () => {
+    if (preferenceBusy || !state.workspace) return;
+    const epoch = state.epoch, gen = generation, previous = nameOrder;
+    state.chatPreferenceRevision = (state.chatPreferenceRevision || 0) + 1;
+    preferenceBusy = true; $("#chat-name-order").disabled = true;
+    applyPreferences({ name_order: $("#chat-name-order").value });
+    const status = $("#chat-name-save-status"); status.textContent = "Сохраняем…"; show(status);
+    try {
+      const result = await api(`${chatPath()}/preferences`, { method: "PUT", data: { name_order: nameOrder } });
+      if (!valid(epoch, gen)) return;
+      applyPreferences(result); status.textContent = "Сохранено для вашего аккаунта";
+    } catch (error) {
+      if (valid(epoch, gen)) { applyPreferences({name_order:previous}); status.textContent = error.message; }
+    } finally { if (valid(epoch, gen)) { preferenceBusy = false; $("#chat-name-order").disabled = false; } }
+  });
+  document.addEventListener("cm:chat-preferences", event => {
+    if (event.detail.epoch === state.epoch && event.detail.revision === (state.chatPreferenceRevision || 0) && !preferenceBusy) applyPreferences(event.detail.preferences);
+  });
   function renderList(force = false) {
     items.sort(compareConversations);
-    const signature = JSON.stringify([items, selected]); if (!force && signature === lastList) return; lastList = signature;
+    const signature = JSON.stringify([items, selected, nameOrder]); if (!force && signature === lastList) return; lastList = signature;
     const list = $("#chat-list"), scroller = $(".chat-list-scroll"), top = scroller.scrollTop;
     const bounds = scroller.getBoundingClientRect();
     const anchor = [...list.children].find(row => row.getBoundingClientRect().bottom > bounds.top);
@@ -167,13 +206,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const existing = new Map([...list.children].map(row => [row.dataset.key, row]));
     const wanted = [];
     for (const item of items) {
-      const key = JSON.stringify([item, item.id === selected, dayKey(new Date())]);
+      const key = JSON.stringify([item, item.id === selected, dayKey(new Date()), nameOrder]);
       const previous = existing.get(item.id);
       if (previous?.listKey === key) { wanted.push(previous); continue; }
       const row = node("div", undefined, `row chat-row${item.unread ? " unread waiting" : ""}${item.id === selected ? " selected" : ""}`); row.dataset.id = item.id; row.setAttribute("aria-current", String(item.id === selected));
+      const names = displayNames(item);
       const avatar = button("", `contact-avatar ava ${item.status}${item.unread ? " pulsing" : ""} status-${item.status}`, () => openCards(item));
       avatar.title = item.contact_id ? `Открыть карточку АльфаCRM: ${item.name}` : "Связать диалог с контактом АльфаCRM"; avatar.setAttribute("aria-label", avatar.title);
-      const letter = item.name.trim().split(/\s+/).slice(0, 2).map(part => part.slice(0, 1)).join("").toLocaleUpperCase("ru");
+      const letter = names.primary.trim().split(/\s+/).slice(0, 2).map(part => part.slice(0, 1)).join("").toLocaleUpperCase("ru");
       avatar.append(node("span", letter, "avatar-letter"), node("span", item.contact_id ? "↗" : "+", "avatar-open"));
       if (item.unread_count > 0) {
         const count = node("span", String(Math.min(item.unread_count, 99)), "avatar-count ava-n");
@@ -184,9 +224,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const heading = node("span", undefined, "row-top"), timestamp = node("time", listTime(item), "row-time");
       if (item.last_message_at) { timestamp.dateTime = item.last_message_at; timestamp.title = date(item.last_message_at); }
       if (item.unread && item.waiting_since) timestamp.title += " · Ожидает ответа с " + date(item.waiting_since);
-      heading.append(node("strong", item.name, "row-name"), timestamp);
+      const name = node("strong", names.primary, "row-name"); name.title = names.primary;
+      heading.append(name, timestamp);
       body.append(heading);
-      if (item.students.length) body.append(node("span", item.students.join(" · "), "row-kids contact-students"));
+      const secondary = node("span", names.secondary, "row-kids contact-students"); secondary.title = names.secondary; body.append(secondary);
       const bottom = node("span", undefined, "row-bot");
       bottom.append(node("span", item.preview || "Переписка ещё не началась", "row-prev"));
       if (item.last_direction === "out" && !item.unread && item.last_state) { const tick = node("span", undefined, "tick" + (item.last_state === "read" ? " read" : "")); tick.title = sendLabels[item.last_state] || ""; tick.append(icon(["read", "delivered"].includes(item.last_state) ? "checks" : "check")); bottom.append(tick); }
@@ -632,8 +673,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const epoch = state.epoch, gen = generation;
     clearTimeout(timer); notice("", $("#chat-error"));
     try {
+      const preferenceRevision = state.chatPreferenceRevision || 0;
       const context = await api(`${chatPath()}/context`);
       if (!valid(epoch, gen) || !active()) return;
+      if (preferenceRevision === (state.chatPreferenceRevision || 0) && !preferenceBusy) applyPreferences(context.preferences);
       state.voiceInput = Boolean(context.voice_input);
       document.dispatchEvent(new CustomEvent("cm:voice-availability"));
       channels = context.channels || [];
