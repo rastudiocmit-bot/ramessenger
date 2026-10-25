@@ -148,6 +148,7 @@ input,textarea{font:inherit;color:inherit}
 .list-card{height:100%;background:var(--surface);border-radius:18px;box-shadow:var(--card);
   overflow:hidden;display:flex;flex-direction:column}
 .list{flex:1;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.chat-list-spacer{height:0;flex:none;pointer-events:none}
 
 .row-wrap{position:relative;overflow:hidden;background:var(--surface)}
 /* Swipe left to mark handled: a blue panel exactly as wide as the swipe grows
@@ -1120,6 +1121,8 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* Keep offscreen dialog rows cheap; updates retain the existing keyed nodes. */
 .chat-list-scroll { overflow-anchor: none; }
 .chat-list .row-wrap, #chat-list > .row-wrap { content-visibility: auto; contain-intrinsic-size: auto 102px; }
+/* Windowed rows already have a bounded DOM. Measure their real heights, including overscan. */
+#chat-list.windowed-list > .row-wrap { content-visibility:visible; contain-intrinsic-size:none; }
 
 /* ── Voice input ────────────────────────────────────────────────────────────────
    Desktop: a light disc left of "send". Phone, empty field: the round button IS the

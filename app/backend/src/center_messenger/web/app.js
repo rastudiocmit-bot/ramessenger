@@ -54,7 +54,7 @@
   }
   function clearSession(message = "") {
     state.epoch += 1; state.user = null; state.csrf = null; state.workspaces = []; state.workspace = null;
-    state.pane = "messages"; state.chatView = "all";
+    state.pane = "messages"; state.chatView = "all"; state.chatProtocol = 1;
     document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
     clearPasswords();
     clearPrivateViews();
@@ -131,7 +131,7 @@
   function setSession(payload) {
     if (state.user && state.user.id !== payload.user.id) clearPrivateViews();
     const previousWorkspace = state.workspace?.id;
-    state.epoch += 1; state.user = payload.user; state.csrf = payload.csrf; state.workspaces = payload.workspaces;
+    state.epoch += 1; state.user = payload.user; state.csrf = payload.csrf; state.workspaces = payload.workspaces; state.chatProtocol = payload.chat_protocol || 1;
     state.workspace = state.workspaces.find(item => item.id === state.workspace?.id) || state.workspaces[0] || null;
     if (previousWorkspace !== state.workspace?.id) { resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset(); }
   }
@@ -153,7 +153,11 @@
     else select.append(node("option", "Нет доступных центров"));
     await renderPane(state.pane);
   }
-  async function refreshSession() { await enter(await api("/auth/session")); }
+  async function refreshSession() { await enter(await api("/auth/session", { timeoutMs: 20000 })); }
+  let accessRefresh = null;
+  const refreshAccess = () => { accessRefresh ||= refreshSession().catch(() => {}).finally(() => { accessRefresh = null; }); };
+  document.addEventListener("cm:chat-access-lost", refreshAccess);
+  document.addEventListener("cm:chat-permissions-changed", refreshAccess);
   function grantedSections() {
     const workspace = state.workspace;
     const none = { overview: false, team: false, messages: false, clients: false, connections: false, security: true };
@@ -622,10 +626,10 @@
     const raw = new URLSearchParams(location.hash.slice(1)).get("invite");
     if (raw) { history.replaceState(null, "", location.pathname + location.search); if (/^[A-Za-z0-9_-]{43}$/.test(raw)) state.invite = raw; }
     try {
-      const status = await api("/auth/status");
       let payload = null;
-      try { payload = await api("/auth/session"); } catch (error) { if (error.status !== 401) throw error; }
+      try { payload = await api("/auth/session", { timeoutMs: 20000 }); } catch (error) { if (error.status !== 401) throw error; }
       if (payload) return await enter(payload);
+      const status = await api("/auth/status", { timeoutMs: 20000 });
       if (state.invite) return await showInvitation();
       if (status.setup_required && status.setup_enabled) {
         showLogin(); show($("#login-form"), false); show($("#setup-form"));

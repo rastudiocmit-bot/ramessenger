@@ -66,6 +66,7 @@ def signed_in(request: Request, response: Response, raw: str) -> dict:
     )
     return {
         "user": actor.public_user(),
+        "chat_protocol": 2,
         "csrf": csrf_token(raw),
         "workspaces": accounts.workspaces(actor),
     }
@@ -106,6 +107,7 @@ def session(request: Request):
     actor = identity(request)
     return {
         "user": actor.public_user(),
+        "chat_protocol": 2,
         "csrf": csrf_token(actor.raw_session),
         "workspaces": service(request).workspaces(actor),
     }

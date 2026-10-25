@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0016_crm_card_preference"
+SCHEMA_REVISION = "0017_chat_read_versions"
 
 
 def log_database_error(logger, error, *, operation):
@@ -78,6 +78,7 @@ TENANT_TABLES = (
     "connections",
     "conversations",
     "messages",
+    "chat_read_versions",
     "source_records",
     "inbound_events",
     "send_commands",

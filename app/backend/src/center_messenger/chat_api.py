@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Query, Request
 from pydantic import Field, field_validator
 from sqlalchemy import text
+from starlette.concurrency import run_in_threadpool
 
 from center_messenger.accounts import audit
 from center_messenger.accounts_api import identity, service
@@ -21,7 +22,7 @@ from center_messenger.crm_api import DirectoryReader, search_query
 from center_messenger import card_preference
 from center_messenger.chat_list_window import ListWindows
 from center_messenger import chat_preferences
-from center_messenger import bulk_handled
+from center_messenger import bulk_handled, chat_revision
 from center_messenger.max_client import ERRORS as MAX_ERRORS
 from center_messenger.max_client import MaxChannelInput, MaxSettingsInput
 from center_messenger.max_connections import fingerprint
@@ -109,12 +110,32 @@ class ChatReader:
                 "(cn.kind='alfa_max_browser' AND EXISTS(SELECT 1 FROM alfa_max_settings s "
                 "WHERE s.workspace_id=cn.workspace_id AND s.connection_id=cn.id))) ORDER BY cn.created_at,cn.id"
             ), {"w": workspace}).mappings().all()
-            return {"preferences": chat_preferences.read(db, workspace, actor.user_id),
+            return {"version": chat_revision.fingerprint(db, workspace),
+                    "preferences": chat_preferences.read(db, workspace, actor.user_id),
                     "channels": [{"id": str(row["id"]), "name": row["name"], "kind": row["kind"],
                                   "status": row["status"], "enabled": bool(row["enabled"])} for row in rows],
                     "branches": DirectoryReader._branches(db, workspace), "can_write": writable,
                     "send_attachments": False,
                     "voice_input": writable and AiVoice.voice_available(db, workspace)}
+
+    def bootstrap(self, actor, workspace, **filters):
+        context = self.context(actor, workspace)
+        listing = self.listing(actor, workspace, through_page=0, window=90, **filters)
+        first = listing["conversations"][0] if listing["conversations"] else None
+        history = None
+        if first:
+            try:
+                history = self.history(actor, workspace, UUID(first["id"]), limit=40)
+            except AuthError as error:
+                if error.status != 404:
+                    raise
+        return {"context": context, "listing": listing, "history": history}
+
+    def event_revision(self, actor, workspace):
+        with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
+            revision, card_revision = chat_revision.versions(db, workspace)
+            return {"version": revision + ":" + datetime.now(UTC).strftime("%Y-%m-%d"),
+                    "card_version": card_revision, "write_access": self._can_write(db, actor, workspace)}
 
     def updates(self, actor, workspace, after=None):
         with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
@@ -410,25 +431,7 @@ class ChatReader:
                 # Check authorization on every request, even unchanged views.
                 # This is bounded to lightweight indexed/derived rows; no message
                 # policy or finance requests run on an unchanged poll.
-                fingerprint = db.execute(text("SELECT "
-                    "(SELECT coalesce(max(seq),0)::text FROM message_changes WHERE workspace_id=:w)||':'||"
-                    "(SELECT md5(coalesce(jsonb_agg(jsonb_build_array(c.id,c.peer_name,c.contact_id,p.display_name,"
-                    "c.revision,c.needs_reply,c.last_message_at,c.inbound_seq) ORDER BY c.id)::text,'')) "
-                    "FROM conversations c LEFT JOIN contacts p ON p.workspace_id=c.workspace_id AND p.id=c.contact_id "
-                    "WHERE c.workspace_id=:w)||':'||"
-                    "(SELECT md5(coalesce(jsonb_agg(jsonb_build_array(cn.id,cn.name,cn.kind,cn.status,cn.capabilities,"
-                    "s.enabled,s.subscription_confirmed,am.state,am.crm_connection_id,am.session_ciphertext IS NOT NULL,"
-                    "am.history_cursor,am.last_error_code,ax.version,ax.secret_ciphertext IS NOT NULL) ORDER BY cn.id)::text,'')) "
-                    "FROM connections cn LEFT JOIN max_settings s ON s.workspace_id=cn.workspace_id AND s.connection_id=cn.id "
-                    "LEFT JOIN alfa_max_settings am ON am.workspace_id=cn.workspace_id AND am.connection_id=cn.id "
-                    "LEFT JOIN alfa_settings ax ON ax.workspace_id=cn.workspace_id AND ax.connection_id=cn.id "
-                    "WHERE cn.workspace_id=:w)||':'||"
-                    "(SELECT md5(coalesce(jsonb_agg(jsonb_build_array(connection_id,external_id,available,name) "
-                    "ORDER BY connection_id,external_id)::text,'')) FROM alfa_branches WHERE workspace_id=:w)"),
-                    {"w": workspace}).scalar_one()
-                fingerprint += ':' + str(snapshot['run'] if snapshot else '')
-                fingerprint += ':' + str(db.execute(text("SELECT coalesce(max(payload->>'updated_at'),'') "
-                    "FROM outbox_events WHERE workspace_id=:w AND topic='crm.active.review'"), {"w": workspace}).scalar())
+                fingerprint = chat_revision.fingerprint(db, workspace)
                 previous = self.list_windows.previous(window_token, window_scope)
                 unchanged = self.list_windows.unchanged(previous, fingerprint, window)
                 if unchanged:
@@ -583,6 +586,7 @@ class ChatReader:
                     }
                 )
             payload = {
+                "version": fingerprint,
                 "conversations": result,
                 "total": counts["total"],
                 "unread": counts["unread"],
@@ -593,8 +597,10 @@ class ChatReader:
             return self.list_windows.publish(previous, window_scope, fingerprint, window, payload) if window is not None else payload
 
     def history(
-        self, actor, workspace, conversation, *, before_time=None, before_id=None, after_seq=None
+        self, actor, workspace, conversation, *, before_time=None, before_id=None, after_seq=None, limit=20
     ):
+        if not 20 <= limit <= 60:
+            raise AuthError(422, "Размер страницы истории должен быть от 20 до 60 сообщений.")
         with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
             row = self._conversation(db, workspace, conversation)
             conversation = row["id"]
@@ -607,10 +613,7 @@ class ChatReader:
                 params,
             ).scalar_one()
             where = "m.workspace_id=:w AND m.conversation_id=:c"
-            total = db.execute(
-                text("SELECT count(*) FROM messages m WHERE " + where +
-                     " AND m.payload->>'superseded_by' IS NULL"), params,
-            ).scalar_one()
+            total = row["stored_message_count"]
             removed_ids = []
             reset = after_seq is not None and after_seq > end
             if reset:
@@ -659,10 +662,10 @@ class ChatReader:
                                   "<(:before_time,:before_order,:before_id)")
                 where += " AND m.payload->>'superseded_by' IS NULL"
                 records = self._messages(
-                    db, where, params, "ORDER BY " + message_order(descending=True) + " LIMIT 21"
+                    db, where, params | {"limit": limit + 1}, "ORDER BY " + message_order(descending=True) + " LIMIT :limit"
                 )
-                has_more = len(records) > 20
-                records = list(reversed(records[:20]))
+                has_more = len(records) > limit
+                records = list(reversed(records[:limit]))
                 next_seq = end
             return {
                 "conversation": self._meta(row) | {"can_send": bool(self._meta(row)["can_send"] and self._can_write(db, actor, workspace))},
@@ -959,6 +962,15 @@ def chat_context(workspace_id: UUID, request: Request):
     return reader.context(identity(request), workspace_id)
 
 
+@router.get("/chats/bootstrap")
+def chat_bootstrap(workspace_id: UUID, request: Request,
+                   connection: UUID | None = None, q: str = Query(default="", max_length=200),
+                   branch: int | None = Query(default=None, gt=0, le=9223372036854775807),
+                   status: Literal["client", "lead", "archive"] | None = None):
+    _, reader = components(request)
+    return reader.bootstrap(identity(request), workspace_id, connection=connection, query=q, branch=branch, status=status)
+
+
 @router.put("/chats/preferences")
 def chat_display_preferences(workspace_id: UUID, model: ChatPreferencesInput, request: Request):
     _, reader = components(request)
@@ -980,6 +992,14 @@ def updates(
 ):
     _, reader = components(request)
     return reader.updates(identity(request), workspace_id, after_seq)
+
+
+@router.get("/chat-events")
+async def chat_events(workspace_id: UUID, request: Request):
+    from center_messenger.chat_events import response
+    _, reader = components(request)
+    actor = await run_in_threadpool(identity, request)
+    return await response(request, reader, actor, workspace_id)
 
 
 def _chat_contact_role(request, workspace):
@@ -1040,6 +1060,7 @@ def history(
     before_time: datetime | None = None,
     before_id: UUID | None = None,
     after_seq: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=20, ge=20, le=60),
 ):
     _, reader = components(request)
     if after_seq is not None and (before_time is not None or before_id is not None):
@@ -1051,11 +1072,14 @@ def history(
         before_time=before_time,
         before_id=before_id,
         after_seq=after_seq,
+        limit=limit,
     )
 
 
 @router.get("/chats/{conversation_id}/family")
-def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request, auto: bool = False, cached_only: bool = False):
+def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request, auto: bool = False,
+                cached_only: bool = False, compact: bool = False,
+                known_version: str | None = Query(default=None, pattern="^[0-9a-f]{64}$")):
     _, reader = components(request)
     actor = identity(request)
     with reader.max.chat_transaction(actor, workspace_id, snapshot=True) as db:
@@ -1063,11 +1087,12 @@ def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request, aut
         contact, conversation = row["contact_id"], row["id"]
         if contact is None:
             raise AuthError(404, "Диалог пока не связан с карточкой CRM.")
-    return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, auto=auto, cached_only=cached_only)
+    return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, auto=auto,
+                                               cached_only=cached_only, compact=compact, known_version=known_version)
 
 
 @router.post("/chats/{conversation_id}/family/refresh", status_code=202)
-def refresh_chat_family(workspace_id: UUID, conversation_id: UUID, request: Request):
+def refresh_chat_family(workspace_id: UUID, conversation_id: UUID, request: Request, compact: bool = False):
     _, reader = components(request)
     actor = identity(request, mutation=True)
     with reader.max.chat_transaction(actor, workspace_id, snapshot=True) as db:
@@ -1075,7 +1100,7 @@ def refresh_chat_family(workspace_id: UUID, conversation_id: UUID, request: Requ
         contact, conversation = row["contact_id"], row["id"]
         if contact is None:
             raise AuthError(404, "Диалог пока не связан с карточкой CRM.")
-    return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, force=True)
+    return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, force=True, compact=compact)
 
 
 @router.post("/chats/{conversation_id}/messages", status_code=202)
