@@ -1210,13 +1210,14 @@ body:has(#cabinet[hidden]){overflow:auto}
   display:grid;place-items:center;background:var(--sunken);color:var(--muted)}
 .voice-hold-clear:hover{background:var(--line);color:var(--ink)}
 .voice-hold-clear svg{width:16px;height:16px}
-/* Composer ✕ above the paperclip. */
-.field-side{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;align-self:stretch;flex:none}
-.field-clear{position:relative;width:22px;height:22px;min-height:0;padding:0;margin:4px 0 0;border:0;border-radius:50%;flex:none;
-  display:grid;place-items:center;background:var(--sunken);color:var(--muted);cursor:pointer}
-.field-clear::before{content:"";position:absolute;inset:-8px}
-.field-clear:hover{background:var(--line);color:var(--ink)}
+/* Composer ✕: top-right corner of the field, over the paperclip, which keeps its
+   place opposite the quick-replies bolt. Both sit 4px further right. */
+.field{position:relative}
+.field-side{display:flex;align-items:flex-end;align-self:flex-end;flex:none;margin-right:-4px}
+.field-clear{position:absolute;top:-8px;right:10px;z-index:1;width:22px;height:22px;min-height:0;padding:0;margin:0;border:0;border-radius:50%;
+  display:grid;place-items:center;background:var(--surface);color:var(--muted);cursor:pointer;
+  box-shadow:0 1px 4px rgba(25,37,45,.18), inset 0 0 0 1px var(--line)}
+.field-clear::before{content:"";position:absolute;inset:-9px}
+.field-clear:hover{color:var(--ink);background:var(--surface-2)}
 .field-clear svg{width:12px;height:12px;stroke-width:2.6}
 .field-clear[hidden]{display:none}
-.field-side .field-clear:not([hidden])+.iconbtn{height:26px;margin-bottom:11px}
-.field-side .field-clear:not([hidden]){margin-bottom:auto}

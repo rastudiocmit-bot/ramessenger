@@ -246,11 +246,18 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
 
     // ✕ in the composer clears the field; hidden while it is empty.
     assert.equal(await phone.locator('#chat-clear').isHidden(), true);
+    const clipEmpty = await phone.locator('#chat-attachment').boundingBox(), bolt = await phone.locator('#chat-templates').boundingBox();
+    assert.ok(Math.abs((clipEmpty.y + clipEmpty.height) - (bolt.y + bolt.height)) < 1, 'paperclip opposite the bolt');
+    await phone.locator('#chat-input').fill('Черновик');
+    await phone.waitForSelector('#chat-clear:not([hidden])'); await save(phone, 'composer-clear-short');
+    const clipShort = await phone.locator('#chat-attachment').boundingBox();
+    assert.deepEqual(clipShort, clipEmpty, 'the ✕ does not move the paperclip');
     await phone.locator('#chat-input').fill('Черновик, который не нужен');
     await phone.waitForSelector('#chat-clear:not([hidden])'); await save(phone, 'composer-clear');
     const clearBox = await phone.locator('#chat-clear').boundingBox(), clipBox = await phone.locator('#chat-attachment').boundingBox();
-    assert.ok(clearBox.y + clearBox.height <= clipBox.y + 2 && Math.abs((clearBox.x + clearBox.width / 2) - (clipBox.x + clipBox.width / 2)) < 3,
-      '✕ sits right above the paperclip');
+    const field = await phone.locator('#chat-compose .field').boundingBox();
+    assert.ok(Math.abs((clearBox.x + clearBox.width / 2) - (clipBox.x + clipBox.width / 2)) < 3, '✕ above the paperclip');
+    assert.ok(clearBox.y < field.y + 16 && clearBox.y + clearBox.height > field.y, '✕ in the top-right corner of the field');
     await phone.locator('#chat-clear').tap();
     assert.equal(await phone.locator('#chat-input').inputValue(), '');
     await phone.waitForSelector('#chat-clear', { state: 'hidden' });
