@@ -19,8 +19,8 @@
   --bubble-in:#ffffff; --bubble-out:#eaf6e4; --bubble-ink:#163047;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(16,27,35,.16));
   --glass:rgba(255,255,255,.72); --glass-line:rgba(255,255,255,.6);
-  /* System plates: clearly translucent, with blue-grey ink over the wallpaper. */
-  --sys-bg:rgba(255,255,255,.26); --sys-line:rgba(255,255,255,.4); --sys-ink:#34495a;
+  /* White glass: 90% transparency. Any hue comes from the wallpaper behind it. */
+  --sys-bg:rgba(255,255,255,.1); --sys-line:rgba(255,255,255,.4); --sys-ink:#34495a;
   --sys-btn:rgba(255,255,255,.4); --sys-btn-line:rgba(59,77,90,.3);
   --wall:#6eb8f0; --veil:transparent;
   --card:0 4px 24px rgba(25,37,45,.10);
@@ -54,7 +54,7 @@
   --bubble-in:#1a2a31; --bubble-out:#24382c; --bubble-ink:#e2f0e5;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(0,0,0,.4));
   --glass:rgba(19,31,36,.74); --glass-line:rgba(255,255,255,.07);
-  --sys-bg:rgba(10,20,26,.3); --sys-line:rgba(255,255,255,.1); --sys-ink:#c6d1d9;
+  --sys-bg:rgba(255,255,255,.1); --sys-line:rgba(255,255,255,.1); --sys-ink:#c6d1d9;
   --sys-btn:rgba(255,255,255,.1); --sys-btn-line:rgba(198,209,217,.32);
   --wall:#1b3d55; --veil:rgba(8,18,24,.62);
   --card:0 4px 24px rgba(0,0,0,.38);
@@ -261,7 +261,7 @@ input,textarea{font:inherit;color:inherit}
   background:var(--amber)}
 /* Automation messages collapse to one line with a +/− toggle, as in the cabinet. */
 .sys{align-self:flex-end;max-width:min(88%,520px);margin-top:6px;cursor:pointer;
-  background:var(--sys-bg);-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px);border-radius:11px;
+  background:var(--sys-bg);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border-radius:11px;
   box-shadow:0 2px 8px rgba(25,37,45,.06), inset 0 0 0 1px var(--sys-line);
   padding:4px 5px 4px 10px;animation:in .14s ease-out;transition:box-shadow .15s}
 .sys:hover{box-shadow:0 3px 14px rgba(25,37,45,.18), inset 0 0 0 1px var(--sys-btn-line)}
@@ -1002,6 +1002,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 .family-foot{flex:none;display:flex;align-items:center;gap:7px;padding:7px 14px;border-top:1px solid var(--line-soft);
   font-size:11px;color:var(--faint);background:var(--surface)}
+.family-sync{display:block;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4}
 .family-foot-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--ok)}
 .is-refreshing .family-foot-dot{background:var(--amber);animation:pulse-unread 1.4s ease-out infinite}
 .is-loading .family-foot{visibility:hidden}
@@ -1347,10 +1348,9 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-panel:focus{outline:none}
 /* System notices: frosted glass — more see-through, blurred and tinted by the
    wallpaper behind, no bright edge or drop shadow, so they do not glare. */
-.sys,.chat-bubble.system.sys{background:rgba(255,255,255,.1);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
-  box-shadow:inset 0 0 0 .5px rgba(255,255,255,.28)}
+.sys,.chat-bubble.system.sys{box-shadow:inset 0 0 0 .5px rgba(255,255,255,.28)}
 .sys:hover{box-shadow:inset 0 0 0 1px rgba(255,255,255,.38)}
-:root[data-theme="dark"] .sys,:root[data-theme="dark"] .chat-bubble.system.sys{background:rgba(255,255,255,.1);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.08)}
+:root[data-theme="dark"] .sys,:root[data-theme="dark"] .chat-bubble.system.sys{box-shadow:inset 0 0 0 .5px rgba(255,255,255,.08)}
 
 #chat-handled{touch-action:manipulation;-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}
 #chat-handled[aria-busy="true"]{background:var(--bubble-out);color:var(--st-client-ink);cursor:progress}
