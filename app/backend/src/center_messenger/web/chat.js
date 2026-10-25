@@ -1241,8 +1241,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (detailsDialog.open) { quietCloses += 1; detailsDialog.close(); }
     detailsDialog.dataset.mode = docked ? "docked" : "overlay";
     detailsDialog.classList.toggle("docked", docked);
-    if (docked) { chatLayout.append(detailsDialog); detailsDialog.show(); }
-    else { document.body.append(detailsDialog); detailsDialog.showModal(); }
+    // Opening focuses the panel itself (autofocus), never the refresh arrow, so no
+    // button lights up. A docked card sits beside the chat: keep the operator's focus.
+    const before = document.activeElement;
+    if (docked) {
+      chatLayout.append(detailsDialog); detailsDialog.show();
+      if (before && before !== document.body && before.isConnected && !detailsDialog.contains(before)) before.focus({ preventScroll: true });
+    } else { document.body.append(detailsDialog); detailsDialog.showModal(); }
     renderPin();
   }
   function syncDetailsMode() {
