@@ -8,14 +8,14 @@ import logging
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
 from center_messenger.alfa_client import AlfaError
 from center_messenger.alfa_family import fetch_family_finance, fetch_family_lessons, merge_family_lessons
 from center_messenger.auth_security import AuthError
-from center_messenger import group_links
+from center_messenger import group_links, card_preference
 
 TOPIC = "crm.card.refresh"
 LESSONS = "crm.card.lessons"
@@ -56,7 +56,7 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS
 
 def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale):
     # SQL fragments below come only from the fixed policy in enqueue().
-    return db.execute(text(f"""
+    return db.execute(text("WITH pending_families AS MATERIALIZED (" + card_preference.pending_sql(snapshot) + ") " + f"""
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
       SELECT :w,gen_random_uuid(),:topic,concat(:conn,':',c.branch_id,':',c.external_id),
         jsonb_build_object('connection',CAST(:conn AS text),'branch',c.branch_id::text,
@@ -70,8 +70,7 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
         AND f.branch_id=c.branch_id AND f.customer_id=c.external_id AND f.settings_version=:version
       WHERE c.workspace_id=:w AND c.run_id=:run AND c.contact_id IS NOT NULL AND c.student_id IS NOT NULL
         AND (CAST(:contact AS uuid) IS NULL OR c.contact_id=CAST(:contact AS uuid))
-        AND (:manual OR EXISTS(SELECT 1 FROM conversations q WHERE q.workspace_id=c.workspace_id
-          AND q.contact_id=c.contact_id AND q.kind='direct' AND q.needs_reply))
+        AND (:manual OR c.contact_id IN (SELECT contact_id FROM pending_families))
         AND (:finance OR f.customer_id IS NOT NULL)
         AND (:force OR f.{column} IS NULL OR f.{column}<=now()-interval '{interval}' OR {stale})
       ON CONFLICT (workspace_id,topic,event_key) DO UPDATE SET
@@ -92,16 +91,17 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
       """), {"w": workspace, "topic": topic, "conn": snapshot["connection_id"],
                "run": snapshot["run"], "version": snapshot["version"],
                "contact": contact, "manual": contact is not None, "force": force,
-               "finance": topic == TOPIC}).rowcount
+               "finance": topic == TOPIC, **card_preference.params(snapshot)}).rowcount
 
 
-def cache_status(db, workspace, connection, cards, contact, version):
+def cache_status(db, workspace, connection, cards, contact, version, *, contacts=None, snapshot=None):
+    contacts = list(contacts or [contact])
     sources = [card for student in cards for card in student["cards"]]
     times = [datetime.fromisoformat(card["refreshed_at"]) for card in sources if card.get("refreshed_at")]
     jobs = list(db.execute(text("SELECT payload||jsonb_build_object('topic',topic) FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) "
-        "AND state='pending' AND payload->>'connection'=:conn AND payload->>'version'=:v AND payload->>'contact'=:contact"),
+        "AND state='pending' AND payload->>'connection'=:conn AND payload->>'version'=:v AND payload->>'contact'=ANY(CAST(:contacts AS text[]))"),
         {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
-         "conn": str(connection), "v": str(version), "contact": str(contact)}).scalars())
+         "conn": str(connection), "v": str(version), "contacts": list(map(str, contacts))}).scalars())
     keys = {(card["branch_id"], card["id"]) for card in sources}
     jobs = [job for job in jobs if (job["branch"], job["customer"]) in keys]
     ready = len(times) == len(sources) and bool(sources)
@@ -112,8 +112,9 @@ def cache_status(db, workspace, connection, cards, contact, version):
         return min(values) if len(values) == len(sources) and values else None
     lessons_at, history_at = oldest("lessons_refreshed_at"), oldest("lessons_full_refreshed_at")
     groups_at = oldest("groups_refreshed_at")
-    automatic = db.execute(text("SELECT EXISTS(SELECT 1 FROM conversations WHERE workspace_id=:w "
-        "AND contact_id=:c AND needs_reply AND kind='direct')"), {"w": workspace, "c": contact}).scalar_one()
+    automatic = card_preference.is_pending(db, workspace, snapshot, contacts) if snapshot else db.execute(text(
+        "SELECT EXISTS(SELECT 1 FROM conversations WHERE workspace_id=:w AND contact_id=:c AND needs_reply AND kind='direct')"),
+        {"w": workspace, "c": contact}).scalar_one()
     return {"auto_refresh": bool(automatic), "ready": ready, "refreshing": bool(jobs), "updated_at": updated.isoformat() if updated else None,
             "next_refresh_at": (updated + INTERVAL).isoformat() if updated else None,
             "interval_minutes": 30, "sources": len(sources), "cached_sources": len(times),
@@ -174,7 +175,7 @@ def progress(db, workspace, connection, snapshot):
     if not snapshot or snapshot["connection_id"] != connection:
         return empty
     row = db.execute(text("""
-      WITH families AS (
+      WITH pending_families AS MATERIALIZED (""" + card_preference.pending_sql(snapshot) + """), families AS (
         SELECT c.contact_id,
           bool_and(f.customer_id IS NOT NULL) AS cached,
           bool_and(f.customer_id IS NOT NULL AND f.refreshed_at>now()-interval '30 minutes'
@@ -187,8 +188,7 @@ def progress(db, workspace, connection, snapshot):
         LEFT JOIN alfa_family_details f ON f.workspace_id=c.workspace_id AND f.connection_id=:conn
           AND f.branch_id=c.branch_id AND f.customer_id=c.external_id AND f.settings_version=s.version
         WHERE c.workspace_id=:w AND c.run_id=:run AND c.contact_id IS NOT NULL AND c.student_id IS NOT NULL
-          AND EXISTS(SELECT 1 FROM conversations q WHERE q.workspace_id=c.workspace_id
-            AND q.contact_id=c.contact_id AND q.kind='direct' AND q.needs_reply)
+          AND c.contact_id IN (SELECT contact_id FROM pending_families)
         GROUP BY c.contact_id
       ), jobs AS (
         SELECT e.payload FROM outbox_events e JOIN alfa_settings s ON s.workspace_id=e.workspace_id
@@ -204,7 +204,8 @@ def progress(db, workspace, connection, snapshot):
         (SELECT count(DISTINCT payload->>'contact') FROM jobs WHERE payload ? 'error') AS errors,
         (SELECT min((payload->>'available_at')::timestamptz) FROM jobs WHERE payload ? 'error') AS next_retry_at
     """), {"w": workspace, "conn": connection, "run": snapshot["run"],
-             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS}).mappings().one()
+             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
+             **card_preference.params(snapshot)}).mappings().one()
     return empty | dict(row) | {"groups": group_links.progress(db, workspace, snapshot)}
 
 
@@ -241,6 +242,7 @@ class FamilyCacheWorker:
             if snapshot:
                 from center_messenger.family_identity import repair
                 repair(db, workspace, snapshot)
+                card_preference.repair(db, workspace, snapshot)
                 enqueue(db, workspace, snapshot)
 
     def claim(self, workspace):
@@ -287,9 +289,9 @@ class FamilyCacheWorker:
                 job = {**job, "manual": owned.get("manual", False), "force_at": owned.get("force_at")}
                 settings = self.connections._row(db, workspace)
                 source = self._source(db, workspace, job)
-                pending = db.execute(text("SELECT EXISTS(SELECT 1 FROM conversations WHERE workspace_id=:w "
-                    "AND contact_id=CAST(:c AS uuid) AND needs_reply AND kind='direct')"),
-                    {"w": workspace, "c": job["contact"]}).scalar_one()
+                from center_messenger.crm_api import DirectoryReader
+                snapshot = DirectoryReader._published(db, workspace)
+                pending = card_preference.is_pending(db, workspace, snapshot, [UUID(job["contact"])]) if snapshot else False
                 if (not settings or not settings["secret_ciphertext"] or
                     str(settings["connection_id"]) != job["connection"] or settings["version"] != job["version"] or
                     not source or not (job.get("manual") or pending)):

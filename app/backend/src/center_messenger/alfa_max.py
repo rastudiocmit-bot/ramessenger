@@ -621,9 +621,12 @@ class AlfaMaxConnections:
         and manual handling state survive; only proven provider-ID echoes hide.
         The worker holds the workspace lock throughout this operation.
         """
+        if db.execute(text("SELECT crm_link_manual FROM conversations WHERE workspace_id=:w AND id=:c"),
+                      {"w": workspace, "c": canonical}).scalar_one_or_none():
+            return
         old = list(db.execute(
             text("SELECT c.id FROM conversations c WHERE c.workspace_id=:w "
-                 "AND c.connection_id=:channel AND c.contact_id=:contact AND c.id<>:canonical "
+                 "AND c.connection_id=:channel AND c.contact_id=:contact AND c.id<>:canonical AND NOT c.crm_link_manual "
                  "AND (EXISTS(SELECT 1 FROM messages m WHERE m.workspace_id=c.workspace_id "
                  "AND m.conversation_id=c.id) OR EXISTS(SELECT 1 FROM send_commands s "
                  "WHERE s.workspace_id=c.workspace_id AND s.conversation_id=c.id)) "
@@ -734,16 +737,16 @@ class AlfaMaxConnections:
                         on_progress(detail | {"operation": "message_checked" if result else "save_message", "event": event})
                 notify()
                 external = identity
-                conversation_id = db.execute(
+                saved_conversation = db.execute(
                     text(
                         "INSERT INTO conversations(workspace_id,id,connection_id,contact_id,"
                         "external_chat_id,peer_name) VALUES (:w,:id,:c,:contact,:external,:name) "
                         "ON CONFLICT("
                         "workspace_id,connection_id,external_chat_id,external_topic_id) "
-                        "DO UPDATE SET contact_id=coalesce("
-                        "EXCLUDED.contact_id,conversations.contact_id),"
+                        "DO UPDATE SET contact_id=CASE WHEN conversations.crm_link_manual THEN conversations.contact_id ELSE coalesce("
+                        "EXCLUDED.contact_id,conversations.contact_id) END,"
                         "peer_name=CASE WHEN EXCLUDED.peer_name<>'' THEN EXCLUDED.peer_name "
-                        "ELSE conversations.peer_name END RETURNING id"
+                        "ELSE conversations.peer_name END RETURNING id,crm_link_manual"
                     ),
                     {
                         "w": workspace,
@@ -753,8 +756,9 @@ class AlfaMaxConnections:
                         "external": external,
                         "name": display,
                     },
-                ).scalar_one()
-                if customer and customer.get("contact_id") and customer["contact_id"] not in merged_contacts:
+                ).mappings().one()
+                conversation_id = saved_conversation["id"]
+                if not saved_conversation["crm_link_manual"] and customer and customer.get("contact_id") and customer["contact_id"] not in merged_contacts:
                     self._merge_contact_conversations(
                         db, workspace, channel, customer["contact_id"], conversation_id
                     )

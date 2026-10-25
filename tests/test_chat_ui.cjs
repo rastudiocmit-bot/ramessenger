@@ -946,3 +946,23 @@ test('ready card footer shows one update time and its refresh interval', async t
   await ui.app.enter();ui.$('#chat-details').click();await flush();
   assert.equal(ui.$('#chat-details-sync').textContent,'Обновлено 2026-10-24T00:00:00Z · каждые 30 мин');
 });
+
+test('preferred CRM child opens first while an operator child choice survives card polling', async t=>{
+  const first=preparedFamily(1),second=preparedFamily(2);
+  const family={...first,id:identifier(99),source_contact_id:identifier(91),
+    selection:{student:second.students[0].id,signature:'preferred-2'},
+    cache:{...first.cache,auto_refresh:true},students:[...first.students,...second.students]};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return family;
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.match(ui.$('.family-kid[aria-pressed="true"]').textContent,/2/);
+  assert.match(ui.$('#chat-details-student h3').textContent,/Child 2/);
+  ui.$('.family-kid').click();await flush();
+  const watch=[...ui.timers.entries()].find(([,timer])=>timer.delay===60000);
+  assert.ok(watch);ui.timers.delete(watch[0]);await watch[1].callback();await flush();
+  assert.match(ui.$('#chat-details-student h3').textContent,/Child 1/);
+});

@@ -2834,5 +2834,254 @@ class MessageSyncTests(unittest.TestCase):
         self.db.execute(text("UPDATE alfa_settings SET version=version+1 WHERE workspace_id=:w"), {"w": self.workspace})
         self.assertEqual(family_cache.progress(self.db, self.workspace, self.crm, self.snapshot)["queued"], 0)
 
+    def preferred_card_fixture(self):
+        from center_messenger import card_preference
+        reader, worker, _ = self.family_worker_fixture(include_groups=True)
+        now = datetime.now(UTC)
+        self.snapshot.update(finished_at=now-timedelta(hours=2), today=now.date(), timezone='UTC')
+        active, student = uuid4(), uuid4()
+        self.add_customer(active, 2, 9160)
+        self.db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES(:w,:id,'Мария Забунова')"),
+                        {'w':self.workspace,'id':student})
+        self.db.execute(text("UPDATE alfa_customers SET external_id=9161,name='+79990000001',legal_name='+7 (999) 000-00-01',"
+            "status='archive',phones='[\"+79990000001\"]'::jsonb WHERE workspace_id=:w AND contact_id=:source"),
+            {'w':self.workspace,'source':self.contact})
+        self.db.execute(text("UPDATE alfa_customers SET name='Мария Забунова',legal_name='Наталья Забунова',student_id=:student,"
+            "phones='[\"+79990000001\"]'::jsonb WHERE workspace_id=:w AND external_id=9160"),
+            {'w':self.workspace,'student':student})
+        for contact,name in ((self.contact,'+79990000001'),(active,'Наталья Забунова')):
+            self.db.execute(text("UPDATE contacts SET display_name=:name WHERE workspace_id=:w AND id=:c"),
+                            {'w':self.workspace,'c':contact,'name':name})
+            self.db.execute(text("UPDATE alfa_directory SET display_name=:name,phones='[\"+79990000001\"]'::jsonb,search_text=:name "
+                "WHERE workspace_id=:w AND run_id=:r AND contact_id=:c"),
+                {'w':self.workspace,'r':self.run,'c':contact,'name':name})
+        self.db.execute(text("INSERT INTO alfa_groups(workspace_id,run_id,branch_id,external_id,name) VALUES(:w,:r,2,30,'Рисование')"),
+                        {'w':self.workspace,'r':self.run})
+        self.db.execute(text("INSERT INTO alfa_memberships(workspace_id,run_id,branch_id,group_id,external_id,customer_id,b_date,e_date) "
+            "VALUES(:w,:r,2,30,40,9160,:begin,:end)"),
+            {'w':self.workspace,'r':self.run,'begin':now.date()-timedelta(days=30),'end':now.date()+timedelta(days=90)})
+        lesson={'id':50,'customer_id':'9160','branch_id':'2','date':(now+timedelta(days=1)).date().isoformat(),
+                'time':'17:00','status':1,'group_ids':[30],'customer_verified':True,'observed_at':now.isoformat()}
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,"
+            "balance,paid_lesson_count,subscriptions,lessons,lessons_refreshed_at,lessons_full_refreshed_at) "
+            "VALUES(:w,:c,2,9160,1,487.50,1,'[]',CAST(:lessons AS jsonb),:now,:now)"),
+            {'w':self.workspace,'c':self.crm,'lessons':json.dumps([lesson]),'now':now})
+        self.project(self.row(record='700',customer=9161,branch=1,body='Мария сегодня была на занятии'))
+        conversation=self.messages()[0]['conversation_id']
+        return card_preference,reader,worker,active,student,conversation
+
+    def test_card_preference_selects_live_customer_without_rewriting_source_or_reply_target(self):
+        policy,reader,_,active,student,conversation=self.preferred_card_fixture()
+        before=[(m['id'],m['conversation_id'],m['payload']) for m in self.messages()]
+        self.assertEqual(policy.refresh(self.db,self.workspace,self.snapshot,[self.contact]),1)
+        choice=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
+        self.assertEqual((choice['customer'],choice['branch'],choice['reason']),('9160','2','scheduled_lesson'))
+        listed=self.reader.listing(None,self.workspace)['conversations'][0]
+        self.assertEqual(listed['name'],'Наталья Забунова')
+        self.assertEqual(listed['status'],'client')
+        self.assertEqual(listed['students'],['Мария Забунова'])
+        self.assertEqual(listed['contact_id'],str(self.contact))
+        self.assertEqual(listed['family_contact_id'],str(active))
+        meta=self.reader.history(None,self.workspace,conversation)['conversation']
+        self.assertEqual(meta['name'],listed['name'])
+        self.assertEqual(meta['card_selection']['customer'],'9160')
+        family=reader.detail(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(family['id'],str(active))
+        self.assertEqual(family['source_contact_id'],str(self.contact))
+        self.assertEqual(family['selection']['student'],str(student))
+        self.assertEqual(len(family['students']),1)
+        self.assertEqual(family['students'][0]['balance'],'487.50')
+        self.assertTrue(family['students'][0]['cards'][0]['url'].endswith('id=9160'))
+        self.assertTrue(family['cache']['auto_refresh'])
+        target=self.service.send_target(self.workspace,self.channel,conversation)
+        self.assertEqual((target['branch'],target['customer']),(1,9161))
+        self.assertEqual(before,[(m['id'],m['conversation_id'],m['payload']) for m in self.messages()])
+
+    def test_card_preference_open_prepares_only_the_displayed_active_family(self):
+        _,reader,_,active,_,conversation=self.preferred_card_fixture()
+        self.db.execute(text("DELETE FROM alfa_family_details WHERE workspace_id=:w"),{'w':self.workspace})
+        result=reader.prepare(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(result['id'],str(active))
+        jobs=self.family_jobs()
+        self.assertEqual({r['payload']['customer'] for r in jobs},{'9160'})
+        self.assertEqual({r['payload']['contact'] for r in jobs},{str(active)})
+        self.assertTrue(all(r['payload']['manual'] for r in jobs))
+
+    def test_card_preference_background_cache_follows_pending_source_chat(self):
+        from center_messenger import family_cache
+        policy,_,worker,active,_,_=self.preferred_card_fixture()
+        self.db.execute(text("DELETE FROM alfa_family_details WHERE workspace_id=:w"),{'w':self.workspace})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        family_cache.enqueue(self.db,self.workspace,self.snapshot)
+        job=worker.claim(self.workspace)
+        self.assertEqual(job['customer'],'9160')
+        self.assertFalse(job['manual'])
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()) as remote:
+            worker.process(self.workspace,job)
+        remote.assert_called_once()
+        self.assertEqual(remote.call_args.args[1:3],(2,9160))
+        self.assertTrue(policy.is_pending(self.db,self.workspace,self.snapshot,[active]))
+        self.assertFalse(policy.is_pending(self.db,self.workspace,self.snapshot,[self.contact]))
+        report=family_cache.progress(self.db,self.workspace,self.crm,self.snapshot)
+        self.assertEqual(report['total'],1)
+
+    def test_card_preference_fences_phone_changes_before_background_recalculation(self):
+        policy,_,_,active,_,conversation=self.preferred_card_fixture()
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79990000002\"]'::jsonb WHERE workspace_id=:w AND contact_id=:c"),
+                        {'w':self.workspace,'c':active})
+        self.assertIsNone(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact))
+        meta=self.reader.history(None,self.workspace,conversation)['conversation']
+        self.assertEqual(meta['family_contact_id'],str(self.contact))
+
+    def test_card_preference_new_conflicting_phone_owner_invalidates_saved_choice(self):
+        policy,_,_,_,_,conversation=self.preferred_card_fixture()
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        other=uuid4();self.add_customer(other,2,9200)
+        self.db.execute(text("UPDATE alfa_customers SET legal_name='Другой родитель',phones='[\"+79990000001\"]'::jsonb "
+            "WHERE workspace_id=:w AND external_id=9200"),{'w':self.workspace})
+        self.assertIsNone(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact))
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        choice=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
+        self.assertEqual(choice['contact'],str(self.contact))
+        self.assertEqual(choice['ambiguous'],'conflicting_parents')
+
+    def test_card_preference_preserves_manual_links_and_requires_the_source_conversation(self):
+        policy,reader,_,_,_,conversation=self.preferred_card_fixture()
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        self.reader.link(SimpleNamespace(user_id=self.user),self.workspace,conversation,SimpleNamespace(contact_id=self.contact))
+        self.assertIsNone(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact))
+        family=reader.prepare(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(family['id'],str(self.contact))
+        with self.assertRaises(AuthError):
+            reader.detail(None,self.workspace,uuid4(),conversation=conversation)
+        self.assertEqual(self.reader.history(None,self.workspace,conversation)['conversation']['card_selection'],{'mode':'manual'})
+
+    def test_card_preference_keeps_siblings_and_their_balances_separate(self):
+        policy,reader,_,_,_,conversation=self.preferred_card_fixture()
+        other,student=uuid4(),uuid4();self.add_customer(other,2,9162)
+        self.db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES(:w,:id,'Сын')"),{'w':self.workspace,'id':student})
+        self.db.execute(text("UPDATE alfa_customers SET legal_name='Наталья Забунова',name='Сын',student_id=:s,balance=900,"
+            "phones='[\"+79990000001\"]'::jsonb WHERE workspace_id=:w AND external_id=9162"),{'w':self.workspace,'s':student})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        family=reader.detail(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(len(family['students']),2)
+        self.assertEqual({s['name']:s['balance'] for s in family['students']},{'Мария Забунова':'487.50','Сын':'900.00'})
+        self.assertEqual(family['selection']['customer'],'9160')
+        self.assertEqual(set(self.reader.listing(None,self.workspace)['conversations'][0]['students']),{'Мария Забунова','Сын'})
+
+    def test_card_preference_manual_link_survives_new_poll_and_canonical_repair(self):
+        _,_,_,active,_,conversation=self.preferred_card_fixture()
+        self.project(self.row(record='701',customer=9160,branch=2,body='Другой источник'),branch=2)
+        self.reader.link(SimpleNamespace(user_id=self.user),self.workspace,conversation,SimpleNamespace(contact_id=active))
+        self.project(self.row(record='702',customer=9161,branch=1,body='Новое сообщение'))
+        self.project(self.row(record='703',customer=9160,branch=2,body='Новая запись клиента'),branch=2)
+        linked=self.db.execute(text("SELECT contact_id,crm_link_manual FROM conversations WHERE workspace_id=:w AND id=:id"),
+            {'w':self.workspace,'id':conversation}).mappings().one()
+        self.assertEqual(linked['contact_id'],active)
+        self.assertTrue(linked['crm_link_manual'])
+        self.assertEqual(self.reader.history(None,self.workspace,conversation)['conversation']['id'],str(conversation))
+        self.assertEqual({m['text'] for m in self.messages() if m['conversation_id']==conversation},
+                         {'Мария сегодня была на занятии','Новое сообщение'})
+
+    def test_card_preference_uses_real_membership_and_rejects_cancelled_or_other_customer_lessons(self):
+        policy,_,_,_,_,conversation=self.preferred_card_fixture()
+        self.db.execute(text("UPDATE alfa_family_details SET lessons=jsonb_set(lessons,'{0,status}','2') WHERE workspace_id=:w"),
+                        {'w':self.workspace})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        self.assertEqual(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)['reason'],'active_group')
+        self.db.execute(text("UPDATE alfa_memberships SET e_date=:yesterday WHERE workspace_id=:w"),
+                        {'w':self.workspace,'yesterday':self.snapshot['today']-timedelta(days=1)})
+        self.db.execute(text("UPDATE alfa_family_details SET lessons=jsonb_set(jsonb_set(lessons,'{0,status}','1'),'{0,customer_id}','\"9161\"') "
+            "WHERE workspace_id=:w"),{'w':self.workspace})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        self.assertEqual(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)['reason'],'active_client')
+
+    def test_card_preference_is_durable_and_fenced_by_settings_and_workspace(self):
+        policy,_,_,_,_,conversation=self.preferred_card_fixture()
+        policy.repair(self.db,self.workspace,self.snapshot,limit=1)
+        first=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
+        self.assertEqual(first['customer'],'9160')
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        self.assertEqual(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)['selected_at'],first['selected_at'])
+        self.assertIsNone(policy.selected(self.db,uuid4(),self.snapshot,conversation,self.contact))
+        self.db.execute(text("UPDATE alfa_settings SET version=2 WHERE workspace_id=:w"),{'w':self.workspace})
+        self.assertEqual(policy.refresh(self.db,self.workspace,self.snapshot,[self.contact]),0)
+        self.snapshot['version']=2
+        self.assertIsNone(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact))
+
+    def test_card_preference_filters_search_and_updates_use_the_same_active_card(self):
+        policy,_,_,_,_,conversation=self.preferred_card_fixture()
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        self.assertEqual(self.reader.listing(None,self.workspace,status='client')['total'],1)
+        self.assertEqual(self.reader.listing(None,self.workspace,status='archive')['total'],0)
+        self.assertEqual(self.reader.listing(None,self.workspace,branch=2)['total'],1)
+        self.assertEqual(self.reader.listing(None,self.workspace,query='Наталья')['total'],1)
+        updates=self.reader.updates(None,self.workspace,after=0)['updates']
+        self.assertEqual(updates[0]['name'],'Наталья Забунова')
+        self.assertEqual(updates[0]['status'],'client')
+        self.assertEqual(updates[0]['card_selection']['customer'],'9160')
+
+    def test_card_preference_migration_recovers_existing_manual_links_and_is_reversible(self):
+        _,_,_,_,_,conversation=self.preferred_card_fixture()
+        self.db.execute(text("INSERT INTO auth_events(id,workspace_id,user_id,action,subject_id) "
+            "VALUES(:id,:w,:u,'chat_contact_linked',:c)"),
+            {'id':uuid4(),'w':self.workspace,'u':self.user,'c':conversation})
+        path=ROOT/'app/backend/migrations/versions/0016_crm_card_preference.py'
+        spec=importlib.util.spec_from_file_location(path.stem,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        context=MigrationContext.configure(self.db)
+        before=[m['id'] for m in self.messages()]
+        with Operations.context(context):
+            module.downgrade();module.upgrade()
+        self.assertTrue(self.db.execute(text("SELECT crm_link_manual FROM conversations WHERE workspace_id=:w AND id=:c"),
+                                       {'w':self.workspace,'c':conversation}).scalar_one())
+        self.assertEqual(before,[m['id'] for m in self.messages()])
+        self.assertTrue(self.db.execute(text("SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() "
+            "AND indexname='alfa_customers_primary_phone_idx')")).scalar_one())
+
+    def test_card_preference_refresh_invalidates_a_cached_chat_list_window(self):
+        policy,_,_,_,_,_=self.preferred_card_fixture()
+        initial=self.reader.listing(None,self.workspace,window=90)
+        self.assertEqual(initial['conversations'][0]['status'],'archive')
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        updated=self.reader.listing(None,self.workspace,window=90,window_token=initial['window_token'])
+        self.assertFalse(updated.get('not_modified',False))
+        self.assertEqual(updated['conversations'][0]['name'],'Наталья Забунова')
+        unchanged=self.reader.listing(None,self.workspace,window=90,window_token=updated['window_token'])
+        self.assertTrue(unchanged['not_modified'])
+
+    def test_card_preference_global_id_observation_without_phone_keeps_parent_and_schedule(self):
+        policy,_,_,active,student,conversation=self.preferred_card_fixture()
+        self.add_customer(active,1,9160)
+        self.db.execute(text("UPDATE alfa_customers SET name='Мария Забунова',legal_name='',student_id=:s "
+            "WHERE workspace_id=:w AND branch_id=1 AND external_id=9160"),{'w':self.workspace,'s':student})
+        lesson=self.family_facts()['lessons'][0]
+        lesson=dict(lesson,branch_id='1',time='15:00')
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,"
+            "balance,lessons,lessons_refreshed_at) VALUES(:w,:c,1,9160,1,487.50,CAST(:lessons AS jsonb),now())"),
+            {'w':self.workspace,'c':self.crm,'lessons':json.dumps([lesson])})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        choice=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
+        self.assertEqual(choice['name'],'Наталья Забунова')
+        self.assertEqual((choice['customer'],choice['branch'],choice['reason']),('9160','1','scheduled_lesson'))
+
+    def test_card_preference_does_not_treat_shared_business_phone_as_one_family(self):
+        policy,reader,_,_,_,conversation=self.preferred_card_fixture()
+        self.db.execute(text("UPDATE alfa_customers SET legal_type=2 WHERE workspace_id=:w AND external_id=9160"),{'w':self.workspace})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        choice=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
+        self.assertEqual(choice['contact'],str(self.contact))
+        self.assertEqual(choice['ambiguous'],'shared_business_phone')
+        self.assertTrue(reader.detail(None,self.workspace,self.contact,conversation=conversation)['needs_review'])
+
+    def test_card_preference_does_not_follow_a_secondary_phone_chain(self):
+        policy,_,_,_,_,conversation=self.preferred_card_fixture()
+        self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79990000002\",\"+79990000001\"]'::jsonb "
+            "WHERE workspace_id=:w AND external_id=9160"),{'w':self.workspace})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        choice=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
+        self.assertEqual(choice['contact'],str(self.contact))
+        self.assertEqual(choice['customer'],'9161')
+
 if __name__ == "__main__":
     unittest.main()

@@ -216,7 +216,7 @@ def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None, o
         directory = customer_directory(db, workspace, snapshot, ids)
         aliases = db.execute(text(
             "SELECT id,external_chat_id FROM conversations WHERE workspace_id=:w AND connection_id=:c "
-            "AND contact_id IS NULL AND external_chat_id ~ '^alfa-customer:[0-9]+:[0-9]+$' "
+            "AND contact_id IS NULL AND NOT crm_link_manual AND external_chat_id ~ '^alfa-customer:[0-9]+:[0-9]+$' "
             "AND split_part(external_chat_id,':',3)::bigint=ANY(CAST(:ids AS bigint[]))"
         ), {"w": workspace, "c": channel, "ids": ids}).mappings().all()
         for alias in aliases:
