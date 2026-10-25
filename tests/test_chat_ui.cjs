@@ -1097,3 +1097,151 @@ test('date formatter reuse follows the workspace timezone when an unchanged mess
   ui.state.workspace.timezone='Etc/UTC';await ui.poll();
   assert.match(ui.$('.chat-day').textContent,/23 октября/);assert.equal(ui.$('.meta time').textContent,'22:30');
 });
+
+function bootstrapPayload(rows=[conversation(1)],messages=[message(1)]) {
+  return {context:{channels:[{id:'native',name:'CRM',kind:'alfa_max_browser'}],branches:[],preferences:{name_order:'parent_first'}},
+    listing:{conversations:rows,order:rows.map(row=>row.id),window_token:'bootstrap',reset:true,page:0,total:rows.length,unread:rows.filter(row=>row.unread).length,has_more:false},
+    history:rows.length?history(rows[0].id,messages,{conversation:rows[0]}):null};
+}
+async function runTimer(ui,delay) {
+  const entry=[...ui.timers.entries()].find(([,timer])=>timer.delay===delay);
+  assert.ok(entry,`Expected ${delay}ms timer`);ui.timers.delete(entry[0]);await entry[1].callback();await flush();
+}
+function eventSources(ui) {
+  const sources=[];
+  ui.window.EventSource=class extends ui.window.EventTarget {
+    constructor(url){super();this.url=url;this.closed=false;sources.push(this);}
+    close(){this.closed=true;}
+    emit(type){this.dispatchEvent(new ui.window.Event(type));}
+  };
+  return sources;
+}
+
+test('protocol two opens context, first dialogs and messages from one bootstrap request',async t=>{
+  const ui=setup(t,url=>url.pathname.endsWith('/bootstrap')?bootstrapPayload([conversation(1)],[message(1),message(2)]):undefined);
+  ui.state.chatProtocol=2;await ui.app.enter();
+  assert.deepEqual(ui.ids(),[1,2].map(identifier));
+  assert.equal(ui.calls.length,1);assert.ok(ui.calls[0].pathname.endsWith('/bootstrap'));
+  assert.match(ui.$('#chat-person').textContent,/Parent 1/);
+});
+
+test('late bootstrap cannot replace a filter and client chosen while it was loading',async t=>{
+  let release;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))return new Promise(resolve=>{release=()=>resolve(bootstrapPayload());});
+    if(url.pathname.endsWith('/chats'))return {conversations:[conversation(2)],page:0,total:1,unread:1,has_more:false};
+    if(url.pathname.endsWith('/messages'))return history(identifier(2),[message(2)],{conversation:conversation(2)});
+  });
+  ui.state.chatProtocol=2;const opening=ui.app.enter();await flush();
+  ui.$('#chat-status').value='lead';ui.$('#chat-status').dispatchEvent(new ui.window.Event('change'));await flush();
+  release();await opening;assert.deepEqual(ui.ids(),[identifier(2)]);
+  assert.equal(ui.$('#chat-status').value,'lead');assert.match(ui.$('.row-name').textContent,/Parent 2/);
+});
+
+test('protocol two fetches forty rows and preloads upward before the last 180 pixels',async t=>{
+  let before;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))return {...bootstrapPayload(),history:history(identifier(1),[message(2)],{has_more:true})};
+    if(url.pathname.endsWith('/messages')){before=url;return history(identifier(1),[message(1)]);}
+  });
+  ui.state.chatProtocol=2;await ui.app.enter();Object.defineProperty(ui.$('#chat-stream'),'clientHeight',{get:()=>600});
+  ui.$('#chat-stream').scrollTop=700;ui.$('#chat-stream').dispatchEvent(new ui.window.WheelEvent('wheel',{deltaY:-100}));await flush();
+  assert.equal(before.searchParams.get('limit'),'40');assert.equal(before.searchParams.get('before_id'),identifier(2));
+  assert.deepEqual(ui.ids(),[1,2].map(identifier));
+});
+
+test('compact card readiness and unchanged versions retain the selected card',async t=>{
+  const card=preparedFamily(1);card.version='a'.repeat(64);card.cache.auto_refresh=true;card.students[0].subscriptions=[];
+  for(const source of card.students[0].cards){delete source.subscriptions;delete source.lessons;source.subscriptions_ready=true;source.lessons_ready=true;}
+  const row={...conversation(1),contact_id:identifier(91)};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))return bootstrapPayload([row],[]);
+    if(url.pathname.endsWith('/family')){
+      assert.equal(url.searchParams.get('compact'),'true');
+      return url.searchParams.get('known_version')===card.version?{not_modified:true,version:card.version}:JSON.parse(JSON.stringify(card));
+    }
+  });
+  ui.state.chatProtocol=2;dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  const stats=ui.$('.family-stats');assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Готовим подробную карточку/);
+  await runTimer(ui,60000);assert.equal(ui.$('.family-stats'),stats);
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).at(-1).searchParams.get('known_version'),card.version);
+  card.version='b'.repeat(64);card.cache.updated_at='2026-10-24T01:00:00Z';
+  await runTimer(ui,60000);assert.equal(ui.$('.family-stats'),stats);
+  assert.match(ui.$('#chat-details-sync').textContent,/01:00/);
+});
+
+test('event stream changes refresh chats, healthy idle uses a safety timer, and failures restore polling',async t=>{
+  let changed=false;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))return bootstrapPayload();
+    if(url.pathname.endsWith('/chat-updates'))return {next_seq:changed?101:100,updates:[],has_more:false};
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),changed?[message(2)]:[],{next_seq:changed?101:100});
+  });
+  ui.state.chatProtocol=2;const sources=eventSources(ui);await ui.app.enter();ui.app.watch();
+  assert.equal(sources.length,1);sources[0].emit('ready');await flush();await runTimer(ui,100);
+  assert.ok([...ui.timers.values()].some(timer=>timer.delay===45000));
+  assert.equal([...ui.timers.values()].some(timer=>timer.delay===3500),false);
+  changed=true;sources[0].emit('change');await flush();await runTimer(ui,80);assert.deepEqual(ui.ids(),[1,2].map(identifier));
+  sources[0].onerror();assert.equal(sources[0].closed,true);await runTimer(ui,100);
+  assert.ok([...ui.timers.values()].some(timer=>timer.delay===2500));
+  await runTimer(ui,30000);assert.equal(sources.length,2);
+});
+
+test('stream heartbeats cannot cancel notification catchup, and access loss clears private chat data',async t=>{
+  let reads=0;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))return bootstrapPayload();
+    if(url.pathname.endsWith('/chat-updates'))return {next_seq:++reads,updates:[],has_more:reads===1};
+  });
+  ui.state.chatProtocol=2;const sources=eventSources(ui);await ui.app.enter();ui.app.watch();sources[0].emit('ready');await flush();
+  sources[0].emit('pulse');await runTimer(ui,150);assert.equal(reads,2);
+  let revoked=0;ui.window.document.addEventListener('cm:chat-access-lost',()=>revoked++);
+  sources[0].emit('access_lost');assert.equal(sources[0].closed,true);assert.equal(revoked,1);assert.deepEqual(ui.ids(),[]);
+  const count=ui.calls.length;sources[0].emit('change');await flush();assert.equal(ui.calls.length,count);
+});
+
+test('a connecting stream without a first frame falls back quietly and retries later',async t=>{
+  const ui=setup(t,url=>url.pathname.endsWith('/chat-updates')?{next_seq:1,updates:[],has_more:false}:undefined);
+  ui.state.chatProtocol=2;const sources=eventSources(ui);ui.app.watch();await runTimer(ui,6000);
+  assert.equal(sources[0].closed,true);assert.equal(ui.$('#chat-error').textContent,'');
+  assert.ok([...ui.timers.values()].some(timer=>timer.delay===30000));
+});
+
+test('a healthy stream retries failed notification reads without requiring a new event',async t=>{
+  let reads=0;
+  const ui=setup(t,url=>{if(url.pathname.endsWith('/chat-updates')){if(++reads===1)throw new Error('Temporary outage');return {next_seq:1,updates:[],has_more:false};}});
+  ui.state.chatProtocol=2;const sources=eventSources(ui);ui.app.watch();sources[0].emit('ready');await flush();
+  sources[0].emit('pulse');await runTimer(ui,10000);assert.equal(reads,2);assert.equal(ui.$('#chat-error').textContent,'');
+});
+
+test('a long dialog list renders a bounded window and preserves its visible client when priorities change',async t=>{
+  let rows=Array.from({length:600},(_,n)=>conversation(n+1));
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))return bootstrapPayload(rows,[]);
+    if(url.pathname.endsWith('/chats'))return {conversations:rows,page:0,total:rows.length,unread:rows.length,has_more:false};
+  },{autoFrames:true});
+  ui.state.chatProtocol=2;
+  const scroll=ui.$('.chat-list-scroll'),list=ui.$('#chat-list');
+  Object.defineProperties(scroll,{clientHeight:{get:()=>600},clientWidth:{get:()=>360}});
+  scroll.getBoundingClientRect=()=>({top:0,bottom:600,width:360,height:600});
+  const original=ui.window.HTMLElement.prototype.getBoundingClientRect;
+  ui.window.HTMLElement.prototype.getBoundingClientRect=function(){
+    if(this===list)return {top:-scroll.scrollTop,bottom:0,width:360,height:0};
+    if(this.classList.contains('row-wrap')){
+      let top=-scroll.scrollTop;for(let previous=this.previousElementSibling;previous;previous=previous.previousElementSibling)top+=previous.dataset.key?84:parseFloat(previous.style.height)||0;
+      return {top,bottom:top+84,width:360,height:84};
+    }
+    return original.call(this);
+  };
+  await ui.app.enter();assert.ok(list.querySelectorAll('.chat-row').length<100);
+  scroll.scrollTop=15000;scroll.dispatchEvent(new ui.window.Event('scroll'));await flush();
+  assert.ok(list.querySelectorAll('.chat-row').length<100);
+  const anchor=[...list.children].find(row=>row.dataset.key&&row.getBoundingClientRect().bottom>0),top=anchor.getBoundingClientRect().top;
+  const id=anchor.dataset.key;
+  rows=rows.map((row,n)=>n===599?{...row,last_message_at:'2026-10-26T12:00:00Z'}:row);
+  await ui.poll();const retained=list.querySelector(`[data-key="${id}"]`);
+  assert.ok(retained);assert.equal(retained.getBoundingClientRect().top,top);
+  assert.equal(ui.$('#chat-visible-count').textContent,'600 из 600');
+  scroll.scrollTop=0;scroll.dispatchEvent(new ui.window.Event('scroll'));await flush();
+  assert.equal(list.querySelector('.chat-row').dataset.id,identifier(600));
+});

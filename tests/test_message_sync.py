@@ -344,6 +344,11 @@ class MessageSyncTests(unittest.TestCase):
 
         @contextmanager
         def transaction(*args, **kwargs):
+            if kwargs.get("snapshot"):
+                # Requests use separate committed transactions in production.
+                # This rollback fixture flushes their deferred invalidations before a read.
+                self.db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+                self.db.execute(text("SET CONSTRAINTS ALL DEFERRED"))
             with self.db.begin_nested():
                 yield self.db
 
@@ -1924,6 +1929,7 @@ class MessageSyncTests(unittest.TestCase):
         self.assertIsNone(self.family_facts()['lessons_full_refreshed_at'])
 
     def test_card_migration_keeps_existing_lesson_read_times_and_is_reversible(self):
+        self.db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
         path=ROOT/'app/backend/migrations/versions/0015_family_refresh_tiers.py'
         spec=importlib.util.spec_from_file_location('family_tiers',path)
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
@@ -3029,6 +3035,7 @@ class MessageSyncTests(unittest.TestCase):
             {'id':uuid4(),'w':self.workspace,'u':self.user,'c':conversation})
         path=ROOT/'app/backend/migrations/versions/0016_crm_card_preference.py'
         spec=importlib.util.spec_from_file_location(path.stem,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        self.db.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
         context=MigrationContext.configure(self.db)
         before=[m['id'] for m in self.messages()]
         with Operations.context(context):
@@ -3082,6 +3089,95 @@ class MessageSyncTests(unittest.TestCase):
         choice=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
         self.assertEqual(choice['contact'],str(self.contact))
         self.assertEqual(choice['customer'],'9161')
+
+    def test_stored_history_count_tracks_superseding_moves_and_rollback(self):
+        self.project(self.row('1'), self.row('2'), self.row('3'))
+        first = self.conversation()['id']
+        self.assertEqual(self.reader.history(None, self.workspace, first)['total'], 3)
+        message = self.messages()[0]['id']
+        self.db.execute(text("UPDATE messages SET payload=payload||jsonb_build_object('superseded_by','synthetic') WHERE id=:m"), {'m':message})
+        self.assertEqual(self.reader.history(None, self.workspace, first)['total'], 2)
+        self.db.execute(text("UPDATE messages SET payload=payload-'superseded_by' WHERE id=:m"), {'m':message})
+        self.add_customer(uuid4(), 1, 8)
+        self.project(self.row('4', customer=8))
+        second = self.db.execute(text('SELECT id FROM conversations WHERE workspace_id=:w AND id<>:c'), {'w':self.workspace,'c':first}).scalar_one()
+        self.db.execute(text('UPDATE messages SET conversation_id=:c WHERE id=:m'), {'c':second,'m':message})
+        self.assertEqual(self.reader.history(None,self.workspace,first)['total'],2)
+        self.assertEqual(self.reader.history(None,self.workspace,second)['total'],2)
+        with self.assertRaises(RuntimeError), self.db.begin_nested():
+            self.project(self.row('5',customer=8))
+            raise RuntimeError('rollback')
+        self.assertEqual(self.reader.history(None,self.workspace,second)['total'],2)
+
+    def test_bootstrap_returns_the_filtered_first_chat_and_forty_chronological_messages(self):
+        self.project(*[self.row(str(n), body=f'Message {n}', at=self.at+timedelta(minutes=n)) for n in range(1,61)])
+        actor=SimpleNamespace(user_id=self.user)
+        result=self.reader.bootstrap(actor,self.workspace,branch=1)
+        self.assertIn('preferences',result['context'])
+        self.assertEqual(result['listing']['total'],1)
+        history=result['history']
+        self.assertEqual(len(history['messages']),40)
+        self.assertEqual(history['total'],60)
+        boundary=history['messages'][0]
+        earlier=self.reader.history(None,self.workspace,UUID(history['conversation']['id']),
+            before_id=UUID(boundary['id']),before_time=boundary['occurred_at'],limit=40)
+        self.assertEqual(len(earlier['messages']),20)
+        self.assertFalse(earlier['has_more'])
+        ids=[m['id'] for m in earlier['messages']+history['messages']]
+        self.assertEqual(len(set(ids)),60)
+        empty=self.reader.bootstrap(actor,self.workspace,branch=2)
+        self.assertEqual(empty['listing']['conversations'],[])
+        self.assertIsNone(empty['history'])
+
+    def test_unchanged_list_uses_a_small_version_read_without_aggregating_all_chat_rows(self):
+        self.project(self.row())
+        first=self.reader.listing(None,self.workspace,window=90)
+        statements=[]
+        original=self.db.execute
+        def record(statement,*args,**kwargs):
+            statements.append(str(statement));return original(statement,*args,**kwargs)
+        with patch.object(self.db,'execute',side_effect=record):
+            same=self.reader.listing(None,self.workspace,window=90,window_token=first['window_token'])
+        self.assertTrue(same['not_modified'])
+        self.assertTrue(any('chat_read_versions' in sql for sql in statements))
+        self.assertFalse(any('jsonb_agg' in sql or 'count(*) FROM messages' in sql for sql in statements))
+        before=self.reader.event_revision(None,self.workspace)
+        self.db.execute(text("UPDATE contacts SET display_name='Renamed' WHERE workspace_id=:w"),{'w':self.workspace})
+        self.assertNotEqual(self.reader.event_revision(None,self.workspace)['version'],before['version'])
+
+    def test_compact_card_keeps_cached_reads_small_and_checks_contact_access_before_cache_hits(self):
+        reader, worker, _=self.family_worker_fixture()
+        self.project(self.row())
+        conversation=self.conversation()['id']
+        result=reader.prepare(None,self.workspace,self.contact,conversation=conversation,compact=True)
+        self.assertIn('version',result)
+        self.assertNotIn('lessons',result['students'][0]['cards'][0])
+        with patch.object(reader,'detail',wraps=reader.detail) as full:
+            same=reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True,
+                compact=True,known_version=result['version'])
+            self.assertTrue(same['not_modified'])
+            full.assert_not_called()
+        with self.assertRaises(AuthError):
+            reader.prepare(None,self.workspace,uuid4(),conversation=conversation,cached_only=True,
+                compact=True,known_version=result['version'])
+        self.db.execute(text("UPDATE contacts SET display_name='Changed family' WHERE workspace_id=:w AND id=:c"),
+            {'w':self.workspace,'c':self.contact})
+        with patch.object(reader,'detail',wraps=reader.detail) as full:
+            reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True,
+                compact=True,known_version=result['version'])
+            full.assert_called_once()
+
+    def test_read_version_migration_is_reversible_and_backfills_existing_message_counts(self):
+        self.project(self.row())
+        before=[m['id'] for m in self.messages()]
+        self.db.execute(text('SET CONSTRAINTS ALL IMMEDIATE'))
+        path=ROOT/'app/backend/migrations/versions/0017_chat_read_versions.py'
+        spec=importlib.util.spec_from_file_location(path.stem,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        with Operations.context(MigrationContext.configure(self.db)):
+            module.downgrade();module.upgrade()
+        self.assertEqual([m['id'] for m in self.messages()],before)
+        self.assertEqual(self.reader.history(None,self.workspace,self.conversation()['id'])['total'],1)
+        self.assertTrue(self.db.execute(text("SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='messages_chat_order_idx')")).scalar_one())
 
 if __name__ == "__main__":
     unittest.main()

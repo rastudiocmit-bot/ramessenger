@@ -55,6 +55,8 @@ def search_query(value):
 class DirectoryReader:
     def __init__(self, connections):
         self.connections = connections
+        from center_messenger.chat_card_view import CardViews
+        self.card_views = CardViews()
 
     @staticmethod
     def _published(db, workspace):
@@ -478,7 +480,7 @@ class DirectoryReader:
                 "has_more": len(cards) > 1000 or len(members) == 5000,
             }
 
-    def prepare(self, actor, workspace, contact_id, *, conversation, auto=False, force=False, cached_only=False):
+    def prepare(self, actor, workspace, contact_id, *, conversation, auto=False, force=False, cached_only=False, compact=False, known_version=None):
         # An ordinary chat selection must not prepare a read client's full card.
         # Both cache hits and requests retain the same chat membership checks.
         from center_messenger.chat_queue import state
@@ -500,7 +502,28 @@ class DirectoryReader:
                 selection = card_preference.selected(db, workspace, snapshot, conversation, contact_id)
                 for target in selection["contacts"] if selection else [contact_id]:
                     enqueue(db, workspace, snapshot, contact=target, force=force)
+        if compact:
+            return self.prepared_view(actor, workspace, contact_id, conversation, known_version=known_version)
         return self.detail(actor, workspace, contact_id, conversation=conversation)
+
+    def prepared_view(self, actor, workspace, contact_id, conversation, *, known_version=None):
+        from center_messenger.chat_revision import versions
+        with self.connections.chat_transaction(actor, workspace, snapshot=True) as db:
+            if not db.execute(text("SELECT 1 FROM conversations c JOIN connections cn ON "
+                "cn.workspace_id=c.workspace_id AND cn.id=c.connection_id WHERE c.workspace_id=:w "
+                "AND c.id=:c AND c.contact_id=:contact AND c.kind='direct' "
+                "AND cn.kind IN ('max_bot','alfa_max_browser')"),
+                {"w": workspace, "c": conversation, "contact": contact_id}).scalar_one_or_none():
+                raise AuthError(404, "Контакт недоступен в этом диалоге.")
+            snapshot = self._published(db, workspace)
+            if snapshot is None:
+                raise AuthError(404, "Контакт недоступен.")
+            key = (str(workspace), str(getattr(actor, "user_id", None)), str(conversation), str(contact_id),
+                   versions(db, workspace)[1], str(snapshot["run"]), snapshot["version"], str(snapshot["today"]))
+        value = self.card_views.get(key)
+        if value is None:
+            value = self.card_views.put(key, self.detail(actor, workspace, contact_id, conversation=conversation))
+        return self.card_views.reply(value, known_version)
 
     def refresh_card(self, actor, workspace, contact_id, student_id, branch_id, customer_id):
         """Refresh one source card without holding a transaction over network IO."""

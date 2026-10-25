@@ -14,16 +14,21 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   let family = null, familySelected = null, familyBusy = false, familyChildChoice = false;
   let familyTimer = null, familyRenderKey = "";
   const familyCache = new Map(), familyRequests = new Map();
-  let listToken = null, listTask = null;
+  let listToken = null, listTask = null, bootstrapBusy = false;
   let channels = [], items = [], selected = null, page = 0, hasMore = false;
   let timer, searchTimer, linkTimer, pollBusy = false, actionBusy = false, historyBusy = false, listLoading = false, listRetryRequired = false;
   let listPollAfter = 0, listPollError = null, historyPollError = null;
   let notifyTimer, notifySeq = null, notifyEpoch = null, notifyTarget = null, notifyBusy = false;
+  let stream = null, streamTimer = null, streamRetry = null, streamLastSeen = 0, streamHealthy = false, notifyAgain = false;
+  let streamVersion = null, lastViewVersion = null;
   let nameOrder = "parent_first", preferenceBusy = false;
   const bulkDialog = $("#chat-bulk-dialog");
   let bulkOperation = null, bulkLoading = false, bulkBusy = false, bulkSeq = 0, bulkOpenedSeq = -1;
   let handledTimer = null, handledPointer = null, handledConsumed = false;
   let lastList = "", linkConversation = null, tokenChannel = null, soundContext = null;
+  const listHeights = new Map();
+  let listGeometry = null, listViewportFrame = 0, listViewportWidth = 0, listRenderRevision = 0, listMeasureRevision = 0, lastViewportKey = "";
+  let listTopSpacer = null, listBottomSpacer = null;
   const cache = new Map();
   const active = () => state.user && state.workspace && state.pane === "messages";
   const valid = (epoch, gen) => state.epoch === epoch && generation === gen;
@@ -47,6 +52,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     for (const child of [...parent.children]) if (!retained.has(child)) child.remove();
   }
   function reset() {
+    stopStream(); bootstrapBusy = false; notifyAgain = false;
+    streamVersion = null; lastViewVersion = null;
     bulkSeq += 1; bulkOperation = null; bulkLoading = false; bulkBusy = false;
     clearTimeout(handledTimer); handledTimer = null; handledPointer = null; handledConsumed = false;
     if (bulkDialog.open) bulkDialog.close();
@@ -64,6 +71,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     notifyTimer = null; notifyBusy = false; notifySeq = null; notifyEpoch = null; notifyTarget = null; show($("#chat-new-marker"), false);
     for (const data of cache.values()) data.controller?.abort();
     cache.clear(); familyCache.clear(); familyRequests.clear(); familyRenderKey = ""; listToken = null; listTask = null; channels = []; items = []; selected = null; page = 0; hasMore = false;
+    listHeights.clear(); listGeometry = null; listViewportFrame = 0; lastViewportKey = "";
     listPollAfter = 0; listPollError = null; historyPollError = null;
     pollBusy = false; actionBusy = false; historyBusy = false; listLoading = false; listRetryRequired = false; lastList = ""; linkConversation = null; tokenChannel = null;
     ["#chat-list", "#chat-history", "#chat-link-results", "#max-channels"].forEach(id => $(id).replaceChildren());
@@ -218,17 +226,70 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   document.addEventListener("cm:chat-preferences", event => {
     if (event.detail.epoch === state.epoch && event.detail.revision === (state.chatPreferenceRevision || 0) && !preferenceBusy) applyPreferences(event.detail.preferences);
   });
-  function renderList(force = false) {
-    items.sort(compareConversations);
+  function queueListViewport() {
+    if (!active() || state.chatProtocol < 2 || items.length <= 240 || listViewportFrame) return;
+    const epoch = state.epoch, gen = generation;
+    listViewportFrame = requestAnimationFrame(() => {
+      if (!valid(epoch, gen)) return;
+      listViewportFrame = 0; renderList(false, true);
+    });
+  }
+  function measureListRows(list) {
+    let changed = false;
+    for (const row of list.children) {
+      if (!row.dataset.key || row.classList.contains("is-folding") || row.classList.contains("is-leaving")) continue;
+      const height = row.getBoundingClientRect().height;
+      if (height > 32 && Math.abs((listHeights.get(row.dataset.key) || 0) - height) > .5) {
+        listHeights.set(row.dataset.key, height); changed = true;
+      }
+    }
+    if (changed) { listGeometry = null; listMeasureRevision++; }
+  }
+  function listOffsets() {
+    if (listGeometry) return listGeometry;
+    const known = [...listHeights.values()];
+    const estimate = known.length ? known.reduce((sum, height) => sum + height, 0) / known.length : 84;
+    const offsets = [0], index = new Map();
+    for (let i = 0; i < items.length; i++) {
+      index.set(items[i].id, i); offsets.push(offsets[i] + (listHeights.get(items[i].id) || estimate));
+    }
+    listGeometry = { offsets, index }; return listGeometry;
+  }
+  function offsetIndex(offsets, value) {
+    let low = 0, high = offsets.length - 1;
+    while (low < high) { const mid = (low + high) >> 1; if (offsets[mid] <= value) low = mid + 1; else high = mid; }
+    return Math.max(0, low - 1);
+  }
+  function renderList(force = false, viewportOnly = false) {
     const today = dayKey(new Date());
-    const signature = JSON.stringify([items, selected, nameOrder, today, state.workspace?.timezone]); if (!force && signature === lastList) return; lastList = signature;
+    if (!viewportOnly) {
+      items.sort(compareConversations);
+      const signature = JSON.stringify([items, selected, nameOrder, today, state.workspace?.timezone]);
+      if (!force && signature === lastList) return;
+      lastList = signature; listRenderRevision++; listGeometry = null;
+    }
     const list = $("#chat-list"), scroller = $(".chat-list-scroll"), top = scroller.scrollTop;
+    list.classList.toggle("windowed-list", state.chatProtocol >= 2);
+    if (viewportOnly && list.querySelector(".is-swiping,.is-settling,.is-leaving,.is-folding")) return;
+    if (scroller.clientWidth !== listViewportWidth) { listViewportWidth = scroller.clientWidth; listHeights.clear(); listGeometry = null; }
     const bounds = scroller.getBoundingClientRect();
-    const anchor = [...list.children].find(row => row.getBoundingClientRect().bottom > bounds.top);
+    const anchor = [...list.children].find(row => row.dataset.key && row.getBoundingClientRect().bottom > bounds.top);
     const position = anchor ? { id: anchor.dataset.key, top: anchor.getBoundingClientRect().top - bounds.top } : null;
-    const existing = new Map([...list.children].map(row => [row.dataset.key, row]));
+    const virtual = state.chatProtocol >= 2 && items.length > 240 && scroller.clientHeight > 0 && scroller.clientWidth > 0;
+    let start = 0, end = items.length;
+    if (virtual) {
+      const geometry = listOffsets(), overscan = Math.max(600, scroller.clientHeight * 2);
+      const index = !viewportOnly && position && top > 0 ? geometry.index.get(position.id) : undefined;
+      const origin = list.getBoundingClientRect().top - bounds.top + top;
+      const target = index !== undefined ? Math.max(0, origin + geometry.offsets[index] - position.top) : top;
+      start = offsetIndex(geometry.offsets, Math.max(0, target - origin - overscan));
+      end = Math.min(items.length, offsetIndex(geometry.offsets, target - origin + scroller.clientHeight + overscan) + 2);
+    }
+    const viewportKey = () => `${listRenderRevision}/${start}/${end}/${scroller.clientWidth}/${scroller.clientHeight}/${listMeasureRevision}`;
+    if (viewportOnly && lastViewportKey === viewportKey()) return;
+    const existing = new Map([...list.children].filter(row => row.dataset.key).map(row => [row.dataset.key, row]));
     const wanted = [];
-    for (const item of items) {
+    for (const item of items.slice(start, end)) {
       const key = JSON.stringify([item, item.id === selected, today, nameOrder, state.workspace?.timezone]);
       const previous = existing.get(item.id);
       if (previous?.listKey === key) { wanted.push(previous); continue; }
@@ -267,15 +328,28 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       wrap.dataset.key = item.id; wrap.listKey = key;
       wrap.append(action, row); wanted.push(wrap); wireSwipe(row, item);
     }
-    let cursor = list.firstChild;
-    for (const row of wanted) {
-      if (row === cursor) cursor = cursor.nextSibling;
-      else list.insertBefore(row, cursor);
+    list.setAttribute("role", "list");
+    for (let i = 0; i < wanted.length; i++) {
+      wanted[i].setAttribute("role", "listitem"); wanted[i].setAttribute("aria-posinset", String(start + i + 1));
+      wanted[i].setAttribute("aria-setsize", String(items.length));
     }
-    const retained = new Set(wanted);
-    for (const row of [...list.children]) if (!retained.has(row)) row.remove();
+    const setSpacers = () => {
+      const offsets = listOffsets().offsets;
+      listTopSpacer.style.height = `${offsets[start]}px`;
+      listBottomSpacer.style.height = `${offsets[items.length] - offsets[end]}px`;
+    };
+    if (virtual) {
+      if (!listTopSpacer) {
+        listTopSpacer = node("div", undefined, "chat-list-spacer"); listBottomSpacer = node("div", undefined, "chat-list-spacer");
+        listTopSpacer.setAttribute("aria-hidden", "true"); listBottomSpacer.setAttribute("aria-hidden", "true");
+      }
+      setSpacers(); wanted.unshift(listTopSpacer); wanted.push(listBottomSpacer);
+    }
+    patchChildren(list, wanted);
+    if (state.chatProtocol >= 2 && scroller.clientWidth > 0) { measureListRows(list); if (virtual) setSpacers(); }
     const restored = position && wanted.find(row => row.dataset.key === position.id);
     scroller.scrollTop = restored && top > 0 ? top + restored.getBoundingClientRect().top - bounds.top - position.top : top;
+    lastViewportKey = viewportKey();
   }
   function listTime(item) {
     if (!item.last_message_at) return "";
@@ -440,7 +514,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     request.finally(() => { if (listTask === request) listTask = null; }).catch(() => {});
     return request;
   }
-  async function loadListPage(append = false, preservePages = false) {
+  async function loadListPage(append = false, preservePages = false, prepared = null, preparedHistory = null) {
     if (append && (listRetryRequired || !hasMore)) return;
     const epoch = state.epoch, gen = generation, seq = ++listSeq;
     const targetPage = append ? page + 1 : preservePages ? page : 0;
@@ -452,8 +526,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     listLoading = true;
     if (append) updateListLoader({ loading: true });
     try {
-      const payload = await api(`${chatPath()}?${params}`, { timeoutMs: 20000 });
+      const payload = prepared || await api(`${chatPath()}?${params}`, { timeoutMs: 20000 });
       if (!valid(epoch, gen) || seq !== listSeq || !active()) return;
+      if (payload.version) lastViewVersion = payload.version;
       if (payload.window_token) {
         listToken = payload.window_token;
         if (!payload.not_modified) {
@@ -484,7 +559,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         // Release scrolling/polling before a slow timeline or card finishes.
         listLoading = false;
         if (hasMore) requestAnimationFrame(maybeLoadMore);
-        await select((items.find(item => item.unread) || items[0]).id, false);
+        const first = (items.find(item => item.unread) || items[0]).id;
+        await select(first, false, preparedHistory?.conversation?.id === first ? preparedHistory : null);
       }
       else if (selected && currentItem()) renderHeader();
     } catch (error) {
@@ -696,6 +772,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   async function loadHistoryPage(id, mode = "delta") {
     const epoch = state.epoch, gen = generation, choice = selectionSeq, data = entry(id);
     const params = new URLSearchParams();
+    if (state.chatProtocol >= 2) params.set("limit", "40");
     if (mode === "delta" && data.loaded) params.set("after_seq", data.next);
     if (mode === "older") {
       // Live updates may include an ancient edited/backfilled row beyond an
@@ -709,6 +786,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     try { result = await api(`${chatPath(id)}/messages?${params}`, { signal: controller.signal, timeoutMs: 20000 }); }
     finally { if (data.controller === controller) data.controller = null; }
     if (!valid(epoch, gen) || cache.get(id) !== data || choice !== selectionSeq || selected !== id) return;
+    await mergeHistory(id, result, mode);
+  }
+  async function mergeHistory(id, result, mode) {
+    const epoch = state.epoch, gen = generation, choice = selectionSeq, data = entry(id);
     if (result.conversation.id !== id) {
       const canonical = entry(result.conversation.id);
       if (data.draft && canonical.draft && canonical.draft !== data.draft) {
@@ -755,8 +836,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     renderMessages(id, { bottom: mode === "initial" || result.reset, older: mode === "older" && !result.reset }); renderList();
     if (result.more_changes && mode !== "older") await loadHistoryPage(id);
   }
-  async function select(id, mobile = true) {
+  async function select(id, mobile = true, preparedHistory = null) {
     cache.get(selected)?.controller?.abort(); historyPollError = null;
+    previousHistoryTop = 0;
     if (id !== selected) document.dispatchEvent(new CustomEvent("cm:chat-selected"));
     const keepDetails = id !== selected && pinnedDocked();
     if (id !== selected && detailsDialog.open && !keepDetails) detailsDialog.close();
@@ -773,15 +855,25 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       $("#chat-person").replaceChildren(node("strong", currentItem()?.name || "MAX"));
     }
     if (keepDetails && selected === id && active()) openDetails({ auto: true }).catch(error => fail(error));
-    try { await loadHistory(id, data.loaded ? "delta" : "initial"); }
+    try { if (preparedHistory) await mergeHistory(id, preparedHistory, "initial"); else await loadHistory(id, data.loaded ? "delta" : "initial"); }
     catch (error) { if (selected === id && active()) fail(error); }
   }
   async function enter() {
     const epoch = state.epoch, gen = generation;
+    const openingListSeq = listSeq;
+    const previousSelection = selected;
     clearTimeout(timer); notice("", $("#chat-error"));
+    const initial = state.chatProtocol >= 2 && !selected && !items.length;
+    if (initial) bootstrapBusy = true;
     try {
       const preferenceRevision = state.chatPreferenceRevision || 0;
-      const context = await api(`${chatPath()}/context`, { timeoutMs: 20000 });
+      let prepared = null;
+      if (initial) {
+        const params = new URLSearchParams();
+        for (const [key, id] of [["q", "chat-search"], ["branch", "chat-branch"], ["status", "chat-status"], ["connection", "chat-channel"]]) if ($(`#${id}`).value) params.set(key, $(`#${id}`).value);
+        prepared = await api(`${chatPath()}/bootstrap?${params}`, { timeoutMs: 20000 });
+      }
+      const context = prepared?.context || await api(`${chatPath()}/context`, { timeoutMs: 20000 });
       if (!valid(epoch, gen) || !active()) return;
       if (preferenceRevision === (state.chatPreferenceRevision || 0) && !preferenceBusy) applyPreferences(context.preferences);
       state.voiceInput = Boolean(context.voice_input);
@@ -795,13 +887,20 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       $("#chat-branch").replaceChildren(new Option("Все филиалы", ""), ...branches.map(b => new Option(b.name, b.id)));
       if (branches.some(b => String(b.id) === old)) $("#chat-branch").value = old;
       renderFilterChip();
-      await loadList();
+      if (prepared) { if (listSeq === openingListSeq) await loadListPage(false, false, prepared.listing, prepared.history); }
+      else await loadList();
       if (selected && !currentItem()) await select(selected, false);
+      else if (previousSelection && selected === previousSelection) await loadHistory(selected);
+      if (selected && family && detailsDialog.open) watchFamily(selected, family.source_contact_id || family.id, epoch, gen, detailsSeq);
     } catch (error) { if (valid(epoch, gen)) fail(error); }
-    finally { if (valid(epoch, gen)) schedule(); }
+    finally { if (valid(epoch, gen)) {
+      bootstrapBusy = false;
+      schedule(streamHealthy && (!streamVersion || !lastViewVersion || streamVersion !== lastViewVersion) ? 100 : 2500);
+    } }
   }
   function schedule(delay = 2500) {
     clearTimeout(timer); if (!active()) return;
+    if (streamHealthy && delay === 2500) delay = 45000;
     timer = setTimeout(poll, delay);
   }
   function renderPollStatus() {
@@ -811,7 +910,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   async function poll() {
     if (!active()) return;
-    if (document.hidden) return schedule(5000);
+    if (document.hidden || bootstrapBusy) return schedule(5000);
     const epoch = state.epoch, gen = generation;
     const tasks = [], now = Date.now();
     // Tick independently of request completion. A slow list must not hold the
@@ -930,8 +1029,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-templates-dialog").showModal();
   });
   $("#chat-input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && matchMedia("(min-width: 761px)").matches) { event.preventDefault(); submit(); } });
-  $("#chat-stream").addEventListener("scroll", () => { if ($("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
-  $("#chat-stream").addEventListener("wheel", event => { if (event.deltaY < 0 && $("#chat-stream").scrollTop <= 180) loadOlder(); }, { passive: true });
+  let previousHistoryTop = 0;
+  const historyThreshold = () => state.chatProtocol >= 2 ? Math.max(180, $("#chat-stream").clientHeight * 1.5) : 180;
+  $("#chat-stream").addEventListener("scroll", () => {
+    const top = $("#chat-stream").scrollTop;
+    if (top <= 180 || (top < previousHistoryTop && top <= historyThreshold())) loadOlder();
+    previousHistoryTop = top;
+  }, { passive: true });
+  $("#chat-stream").addEventListener("wheel", event => { if (event.deltaY < 0 && $("#chat-stream").scrollTop <= historyThreshold()) loadOlder(); }, { passive: true });
   window.addEventListener("resize", () => requestAnimationFrame(() => { resizeCompose(); maybeFillHistory(); }));
   $("#chat-history-more").addEventListener("click", () => loadOlder({ retry: true }));
   // Explicit filters and their reset control stay in Profile.
@@ -949,6 +1054,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   });
   function filtersChanged() {
     renderFilterChip();
+    listHeights.clear(); listGeometry = null; lastViewportKey = "";
     if (selected && cache.has(selected) && !cache.get(selected).pending) cache.get(selected).draft = $("#chat-input").value;
     cache.get(selected)?.controller?.abort(); listPollAfter = 0; listPollError = null; historyPollError = null;
     listToken = null; listTask = null;
@@ -993,6 +1099,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (reload) filtersChanged();
   }
   $(".chat-list-scroll").addEventListener("scroll", maybeLoadMore, { passive: true });
+  $(".chat-list-scroll").addEventListener("scroll", queueListViewport, { passive: true });
+  if (window.ResizeObserver) new ResizeObserver(queueListViewport).observe($(".chat-list-scroll"));
+  document.fonts?.ready.then(() => { listHeights.clear(); listGeometry = null; lastViewportKey = ""; queueListViewport(); });
   $("#chat-retry").addEventListener("click", () => { listRetryRequired = false; loadList(true).catch(error => fail(error)); });
   const handledButton = $("#chat-handled");
   handledButton.title = "Обработать диалог. Удерживайте или нажмите Shift+Enter для всех непрочитанных диалогов";
@@ -1193,7 +1302,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function attendance(student) {
     const groups = student.groups || [];
     if (groups.some(group => group.next_lesson?.date)) return 3;
-    if (activeSubscriptions(student.cards || []).length) return 2;
+    if (activeSubscriptions(student).length) return 2;
     if (groups.length) return 1;
     return 0;
   }
@@ -1217,7 +1326,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     renderFamilySync(students);
     // Queue progress and freshness change more often than the actual card facts.
     // Keep its focused controls, child choice and scroll position when only the footer changes.
-    const { cache: progress, snapshot_at: snapshot, ...facts } = family;
+    const { cache: progress, snapshot_at: snapshot, version: viewVersion, ...facts } = family;
     const key = JSON.stringify([facts, familySelected, familyToday(), state.workspace?.timezone, currentItem()?.status]);
     if (familyRenderKey === key) return;
     const scroll = detailsDialog.querySelector(".family-scroll"), top = scroll.scrollTop;
@@ -1278,9 +1387,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     patchChildren(list, kids);
     const student = students.find(person => person.id === familySelected), cards = student.cards || [];
     const today = familyToday(), subs = activeSubscriptions(student), groups = student.groups || [];
-    const subscriptionsLoaded = cards.every(card => Array.isArray(card.subscriptions)), subscriptionConflict = subs.some(item => item.needs_review);
+    const subscriptionsLoaded = cards.every(card => card.subscriptions_ready ?? Array.isArray(card.subscriptions)), subscriptionConflict = subs.some(item => item.needs_review);
     const subscriptionsReady = subscriptionsLoaded && !subscriptionConflict;
-    const lessonsReady = cards.every(card => Array.isArray(card.lessons));
+    const lessonsReady = cards.every(card => card.lessons_ready ?? Array.isArray(card.lessons));
     const born = familyDate(student.dob);
     detail.append(el("div", "family-kid-head",
       el("div", "family-kid-name", node("h3", student.name), node("p", [familyAge(student.dob), born && `род. ${born}`].filter(Boolean).join(" · "), "family-sub")),
@@ -1351,10 +1460,23 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (familyCache.size >= 40) familyCache.delete(familyCache.keys().next().value);
     familyCache.set(contact, { value, at: Date.now() });
   }
-  function preparedFamilyRequest(conversation, cachedOnly = false) {
-    const path = `${chatPath(conversation)}/family${cachedOnly ? "?cached_only=true" : ""}`;
+  function preparedFamilyRequest(conversation, cachedOnly = false, contact = null) {
+    const params = new URLSearchParams();
+    if (cachedOnly) params.set("cached_only", "true");
+    if (state.chatProtocol >= 2) {
+      params.set("compact", "true");
+      const version = familyCache.get(contact)?.value?.version;
+      if (version) params.set("known_version", version);
+    }
+    const path = `${chatPath(conversation)}/family${params.size ? "?" + params : ""}`;
     if (!familyRequests.has(path)) {
-      const request = api(path, { timeoutMs: 20000 }).finally(() => {
+      const request = api(path, { timeoutMs: 20000 }).then(result => {
+        if (!result.not_modified) return result;
+        const saved = familyCache.get(contact)?.value;
+        if (saved && saved.version === result.version) return saved;
+        params.delete("known_version");
+        return api(`${chatPath(conversation)}/family?${params}`, { timeoutMs: 20000 });
+      }).finally(() => {
         if (familyRequests.get(path) === request) familyRequests.delete(path);
       });
       familyRequests.set(path, request);
@@ -1370,7 +1492,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation || !active()) return;
       if (document.hidden) { watchFamily(conversation, contact, epoch, gen, seq); return; }
       try {
-        const updated = await preparedFamilyRequest(conversation, true);
+        const updated = await preparedFamilyRequest(conversation, true, contact);
         if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation) return;
         family = updated; rememberFamily(contact, updated); renderFamily();
       } catch (_) { /* Keep the last good card during a temporary outage. */ }
@@ -1382,7 +1504,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const epoch = state.epoch, gen = generation, seq = detailsSeq, conversation = selected, contact = family.source_contact_id || family.id;
     familyBusy = true; $("#chat-details-refresh").disabled = true;
     try {
-      const updated = await api(`${chatPath(conversation)}/family/refresh`, { method: "POST" });
+      const updated = await api(`${chatPath(conversation)}/family/refresh${state.chatProtocol >= 2 ? "?compact=true" : ""}`, { method: "POST" });
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation) return;
       family = updated; rememberFamily(contact, updated); renderFamily(); watchFamily(conversation, contact, epoch, gen, seq);
     } catch (error) { if (valid(epoch, gen) && seq === detailsSeq) toast(error.message, true); }
@@ -1427,7 +1549,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     try {
       // An open panel is a request for this client's card, including a pinned
       // panel following a read chat. Background preparation remains server-owned.
-      const result = await preparedFamilyRequest(conversation);
+      const result = await preparedFamilyRequest(conversation, false, contactId);
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
       family = result; rememberFamily(contactId, result); renderFamily();
       watchFamily(conversation, contactId, epoch, gen, seq);
@@ -1649,16 +1771,71 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   document.addEventListener("pointerdown", unlockSound, { passive: true });
 
   // A workspace change cursor covers every conversation, independently of list filters.
+  function stopStream() {
+    const previous = stream; stream = null; streamHealthy = false;
+    clearTimeout(streamTimer); clearTimeout(streamRetry); streamTimer = null; streamRetry = null;
+    previous?.close();
+  }
+  function startStream() {
+    if (state.chatProtocol < 2 || !window.EventSource || stream || streamRetry || !state.user || !state.workspace) return;
+    const epoch = state.epoch, gen = generation;
+    const source = new EventSource(`/api${base()}/chat-events`); stream = source;
+    const current = () => stream === source && valid(epoch, gen);
+    const fallback = () => {
+      if (!current()) return;
+      stopStream();
+      if (active()) schedule(100);
+      if (!notifyBusy) { clearTimeout(notifyTimer); notifyTimer = setTimeout(notifyPoll, 100); }
+      streamRetry = setTimeout(() => { streamRetry = null; if (valid(epoch, gen)) startStream(); }, 30000);
+    };
+    const seen = () => {
+      if (!current()) return false;
+      const connecting = !streamHealthy;
+      streamLastSeen = Date.now(); streamHealthy = true;
+      if (connecting) { clearTimeout(notifyTimer); notifyTimer = null; }
+      return true;
+    };
+    const readEvent = event => {
+      try {
+        const data = JSON.parse(event.data); streamVersion = typeof data.version === "string" ? data.version : null;
+        if (typeof data.write_access === "boolean" && data.write_access !== (state.workspace.role !== "observer")) document.dispatchEvent(new CustomEvent("cm:chat-permissions-changed"));
+      } catch (_) { streamVersion = null; }
+    };
+    source.addEventListener("ready", event => { if (seen()) {
+      readEvent(event);
+      notifyPoll();
+      if (active() && !bootstrapBusy && (!streamVersion || !lastViewVersion || streamVersion !== lastViewVersion)) schedule(100);
+    } });
+    source.addEventListener("change", event => { if (seen()) {
+      readEvent(event);
+      notifyPoll(); if (active()) schedule(80);
+    } });
+    source.addEventListener("pulse", seen);
+    source.addEventListener("retrying", fallback);
+    source.addEventListener("access_lost", () => {
+      if (!current()) return;
+      reset(); document.dispatchEvent(new CustomEvent("cm:chat-access-lost"));
+    });
+    source.onerror = fallback;
+    const health = () => {
+      if (!current()) return;
+      if (!streamHealthy || Date.now() - streamLastSeen > 35000) { fallback(); return; }
+      streamTimer = setTimeout(health, 20000);
+    };
+    streamTimer = setTimeout(health, 6000);
+  }
   function watch() {
-    if (!state.user || !state.workspace || !(["owner", "admin"].includes(state.workspace.role) || state.workspace.sections?.includes("messages"))) { clearTimeout(notifyTimer); notifyTimer = null; return; }
-    if (notifyEpoch !== state.epoch) { clearTimeout(notifyTimer); notifyTimer = null; notifySeq = null; notifyBusy = false; pollBusy = false; historyBusy = false; notifyEpoch = state.epoch; }
-    if (!notifyBusy && (notifyTimer === null || notifyTimer === undefined)) notifyTimer = setTimeout(notifyPoll, 300);
+    if (!state.user || !state.workspace || !(["owner", "admin"].includes(state.workspace.role) || state.workspace.sections?.includes("messages"))) { clearTimeout(notifyTimer); notifyTimer = null; stopStream(); return; }
+    if (notifyEpoch !== state.epoch) { stopStream(); cache.get(selected)?.controller?.abort(); clearTimeout(notifyTimer); notifyTimer = null; notifySeq = null; notifyBusy = false; notifyAgain = false; pollBusy = false; historyBusy = false; notifyEpoch = state.epoch; }
+    startStream();
+    if (!streamHealthy && !notifyBusy && (notifyTimer === null || notifyTimer === undefined)) notifyTimer = setTimeout(notifyPoll, 300);
   }
   async function notifyPoll() {
+    if (notifyBusy) { notifyAgain = true; return; }
     const epoch = state.epoch, gen = generation;
-    notifyTimer = null;
+    clearTimeout(notifyTimer); notifyTimer = null;
     if (!state.user || !state.workspace || !(["owner", "admin"].includes(state.workspace.role) || state.workspace.sections?.includes("messages"))) return;
-    let delay = 3500; notifyBusy = true;
+    let delay = 3500, catchup = false; notifyBusy = true;
     try {
       const result = await api(`${base()}/chat-updates${notifySeq === null ? "" : `?after_seq=${notifySeq}`}`, { timeoutMs: 20000 });
       if (!valid(epoch, gen)) return;
@@ -1679,11 +1856,15 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         else playTone(latest.status);
         if (active()) schedule(100);
       } else if (result.updates.length && active()) schedule(100);
-      if (result.has_more) delay = 150;
+      if (result.has_more) { delay = 150; catchup = true; }
     } catch (error) {
-      delay = 10000;
+      delay = 10000; catchup = true;
       if (error.status === 401 || error.status === 403) { if (valid(epoch, gen)) reset(); return; }
-    } finally { if (valid(epoch, gen)) { notifyBusy = false; if (state.user && state.workspace) notifyTimer = setTimeout(notifyPoll, delay); } }
+    } finally { if (valid(epoch, gen)) {
+      notifyBusy = false;
+      if (state.user && state.workspace && (notifyAgain || catchup || !streamHealthy)) notifyTimer = setTimeout(notifyPoll, notifyAgain ? 100 : delay);
+      notifyAgain = false;
+    } }
   }
   $("#chat-new-marker").addEventListener("click", async () => {
     const id = notifyTarget; if (!id) return;

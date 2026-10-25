@@ -44,7 +44,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     operators: [{ name: 'Мария Петрова', answered: 73, average_response_seconds: 210 }, { name: 'Олег Иванов', answered: 51, average_response_seconds: 270 }] };
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url()), p = url.pathname, method = request.method();
-    if (url.hostname !== 'cabinet.example.test') return route.abort();
+    if (url.hostname !== (options.hostname || 'cabinet.example.test')) return route.abort();
     if (p === '/') return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(web + '/index.html') });
     if (p.startsWith('/assets/')) {
       const file = path.join(web, path.basename(p));
@@ -56,12 +56,15 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     if (method !== 'GET') mutations.push(entry);
     let payload;
     if (p === '/api/auth/status') payload = { setup_required: false };
-    else if (p === '/api/auth/session') payload = { user: { id: 'test', display_name: 'Олег Иванов', email: 'demo@example.test' }, csrf: 'synthetic-csrf',
+    else if (p === '/api/auth/session') payload = { user: { id: 'test', display_name: 'Олег Иванов', email: 'demo@example.test' }, csrf: 'synthetic-csrf',chat_protocol:options.protocol||1,
       workspaces: [{ id: 'test', name: 'Развивайся', role, timezone: 'Europe/Moscow', sections }] };
     else if (p === '/api/auth/sessions') payload = { sessions: [{ id: 'session', current: true, device_label: 'Chrome · Linux', last_seen_at: '2026-10-24T11:00:00Z' }] };
     else if (p === '/api/auth/logout') payload = {};
     else if (p.endsWith('/chats/context')) payload = { preferences, channels, branches, can_write: role !== 'observer', send_attachments: false,
       voice_input: Boolean(options.voice) && role !== 'observer' };
+    else if (p.endsWith('/chats/bootstrap')) payload = {context:{version:'1:2026-10-26',preferences,channels,branches,can_write:role!=='observer',voice_input:Boolean(options.voice)&&role!=='observer'},
+      listing:{version:'1:2026-10-26',conversations:conversations.slice(0,90),total:conversations.length,unread:3,page:0,has_more:conversations.length>90},
+      history:conversations.length?{conversation:conversations[0],messages,next_seq:messages.length,total:messages.length,has_more:false,more_changes:false}:null};
     else if (p.endsWith('/chats/preferences')) { Object.assign(preferences, entry.body); payload=preferences; }
     else if (p.endsWith('/ai/settings')) {
       if (method === 'PUT') Object.assign(ai.settings, { folder_id: entry.body.folder_id, voice_enabled: entry.body.voice_enabled, monthly_limit_rub: entry.body.monthly_limit_rub,
