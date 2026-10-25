@@ -225,7 +225,7 @@ input,textarea{font:inherit;color:inherit}
 
 /* ── Conversation on the wallpapered canvas ─────────────────────── */
 .canvas{flex:1;min-height:0;position:relative;overflow:hidden;
-  background-color:var(--wall);background-image:url(/assets/messenger-wallpaper.webp?v=2);
+  background-color:var(--wall);background-image:url(/assets/chat-wallpaper-20261025.webp?v=1);
   background-size:cover;background-position:center}
 .canvas::before{content:"";position:absolute;inset:0;background:var(--veil);pointer-events:none;z-index:0}
 /* Messages scroll beneath the floating header; this band keeps that edge soft. */
@@ -542,7 +542,7 @@ input,textarea{font:inherit;color:inherit}
    on it as one rounded card, with the conversation beside them. */
 @container app (min-width:720px){
   .app{flex-direction:row;
-    background:linear-gradient(var(--veil),var(--veil)), url(/assets/messenger-wallpaper.webp?v=2) center/cover, var(--wall);
+    background:linear-gradient(var(--veil),var(--veil)), url(/assets/chat-wallpaper-20261025.webp?v=1) center/cover, var(--wall);
     padding:calc(var(--sat) + 10px) max(10px,env(safe-area-inset-right,0px))
             calc(var(--sab) + 10px) max(10px,env(safe-area-inset-left,0px))}
   .panes{display:grid;grid-template-columns:minmax(300px,360px) 1fr;gap:0}
