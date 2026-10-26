@@ -98,7 +98,7 @@ def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False):
         db.execute(text("UPDATE conversations c SET contact_id=:contact WHERE c.workspace_id=:w "
             "AND c.external_chat_id=:external AND NOT c.crm_link_manual AND EXISTS(SELECT 1 FROM alfa_max_settings m "
             "WHERE m.workspace_id=c.workspace_id AND m.connection_id=c.connection_id AND m.crm_connection_id=:crm)"),
-            {"w": workspace, "contact": contact, "external": f"alfa:{branch}:{customer}", "crm": settings["connection_id"]})
+            {"w": workspace, "contact": contact, "external": f"alfa-customer:{branch}:{customer}", "crm": settings["connection_id"]})
         db.execute(text("INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) "
             "VALUES(:w,:id,'crm.identity.repair',:key,CAST(:p AS jsonb),'pending') "
             "ON CONFLICT(workspace_id,topic,event_key) DO UPDATE SET payload=EXCLUDED.payload,state='pending'"),

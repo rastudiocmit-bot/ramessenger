@@ -51,6 +51,8 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Chat interface regression tests
         run: npm test
+      - name: Summary SQL probe with RLS on synthetic history
+        run: python3 tests/summary_load_probe.py --messages 60000 --seconds 10
       - name: Validate Compose
         run: |
           mkdir -p .secrets

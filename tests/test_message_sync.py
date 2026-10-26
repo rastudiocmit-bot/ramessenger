@@ -1177,6 +1177,31 @@ class MessageSyncTests(unittest.TestCase):
         self.db.execute(text("DELETE FROM outbox_events WHERE workspace_id=:w AND topic='chat.list.state'"), {"w": self.workspace})
         self.assertEqual(summary(self.reader.max, None, self.workspace, now=self.at)["waiting"], 1)
 
+    def test_summary_carries_preperiod_wait_but_not_preperiod_answer_into_first_reply(self):
+        from center_messenger.cabinet_summary import summary
+        now = self.at + timedelta(hours=12)
+        boundary = datetime(2026, 10, 17, 21, tzinfo=UTC)
+        self.project(self.row("1", at=boundary-timedelta(minutes=10)),
+                     self.row("2", direction="out", at=boundary+timedelta(minutes=2)),
+                     self.row("3", direction="out", at=boundary+timedelta(minutes=5)))
+        report = summary(self.reader.max, None, self.workspace, now=now)
+        self.assertEqual(report["average_response_seconds"], 720)
+        self.project(self.row("4", direction="out", at=boundary-timedelta(minutes=5)))
+        report = summary(self.reader.max, None, self.workspace, now=now)
+        self.assertIsNone(report["average_response_seconds"])
+        self.assertEqual(report["operators"][0]["answered"], 2)
+
+    def test_summary_same_timestamp_uses_source_order_and_ignores_failed_or_automatic_answers(self):
+        from center_messenger.cabinet_summary import summary
+        self.project(self.row("1", direction="out"), self.row("2"),
+                     self.row("3", direction="out", actor="automation"),
+                     dict(self.row("4", direction="out"), failed=True),
+                     self.row("5", direction="out", at=self.at+timedelta(seconds=60)),
+                     self.row("6", direction="out", at=self.at+timedelta(seconds=120)))
+        report = summary(self.reader.max, None, self.workspace, now=self.at+timedelta(hours=1))
+        self.assertEqual(report["average_response_seconds"], 60)
+        self.assertEqual(report["operators"][0]["answered"], 3)
+
     def test_summary_previous_week_starts_at_local_midnight_across_dst(self):
         from center_messenger.cabinet_summary import summary
         self.membership["timezone"] = "Europe/Berlin"
@@ -2747,13 +2772,202 @@ class MessageSyncTests(unittest.TestCase):
         expensive=[str(c.args[0]) for c in execute.call_args_list if 'count(DISTINCT' in str(c.args[0])]
         self.assertEqual(expensive,[])
 
+    def lookup_worker(self, handler):
+        from center_messenger.customer_lookup import CustomerLookupWorker
+        old, client = self.active_review_worker(handler)
+        return CustomerLookupWorker(old.connections, self.service), client
+
+    def lookup_job(self, customer=99):
+        from center_messenger.customer_lookup import TOPIC
+        return self.db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w "
+            "AND topic=:t AND event_key=:key"),
+            {"w": self.workspace, "t": TOPIC, "key": f"{self.crm}:{customer}"}).scalar_one()
+
+    def test_unknown_customer_is_immediately_visible_in_updates_and_enqueues_one_point_lookup(self):
+        self.at = datetime.now(UTC)
+        self.project(self.row("99", customer=99))
+        first = self.reader.updates(None, self.workspace, after=0)
+        self.assertEqual(len(first["updates"]), 1)
+        self.assertTrue(first["updates"][0]["new_inbound"])
+        self.assertEqual(first["updates"][0]["status"], "unlinked")
+        self.project(self.row("99", customer=99), self.row("100", customer=99, body="Another question"))
+        self.assertEqual(self.lookup_job()["branches"], [1])
+        identity = self.reader.listing(None, self.workspace)["conversations"][0]["identity_resolution"]
+        self.assertEqual(identity["customer_id"], "99")
+        self.assertEqual(identity["state"], "queued")
+        self.assertEqual(self.reader.listing(None, self.workspace, branch=1)["total"], 1)
+        self.assertEqual(self.reader.listing(None, self.workspace, branch=2)["total"], 0)
+
+    def test_point_lookup_links_new_lead_and_emits_change_after_consumed_cursor_without_realert(self):
+        self.at = datetime.now(UTC)
+        self.project(self.row("99", customer=99))
+        before = self.messages()[0]
+        cursor = self.reader.updates(None, self.workspace, after=0)["next_seq"]
+        worker, client = self.lookup_worker(lambda path, body: {"items": [
+            {"id": 99, "name": "New Child", "legal_name": "New Parent", "is_study": 0}], "total": 1})
+        self.assertTrue(worker.step(self.workspace))
+        self.assertEqual(self.lookup_job()["state"], "resolved")
+        self.assertEqual(client.call.call_count, 1)
+        self.assertEqual(client.call.call_args.args[1], {"id": 99, "is_study": 2, "removed": 0, "page": 0})
+        after = self.messages()[0]
+        self.assertEqual((after["id"], after["text"], after["occurred_at"]), (before["id"], before["text"], before["occurred_at"]))
+        changes = self.reader.updates(None, self.workspace, after=cursor)["updates"]
+        self.assertTrue(changes)
+        self.assertFalse(any(c["new_inbound"] for c in changes))
+        listing = self.reader.listing(None, self.workspace)["conversations"]
+        self.assertEqual(len(listing), 1)
+        self.assertEqual(listing[0]["status"], "lead")
+        self.assertIsNotNone(listing[0]["contact_id"])
+        self.assertIsNone(listing[0]["identity_resolution"])
+        self.assertFalse(worker.step(self.workspace))
+        self.service.browser.assert_not_called()
+
+    def test_lookup_merges_verified_branch_mirrors_but_preserves_source_rows(self):
+        self.project(self.row("99", customer=99))
+        self.project(self.row("100", customer=99, branch=2), branch=2)
+        self.assertEqual(self.lookup_job()["branches"], [1, 2])
+        worker, client = self.lookup_worker(lambda p, b: {"items": [{"id": 99, "name": "Child", "is_study": 1}], "total": 1})
+        cursor = self.reader.updates(None, self.workspace, after=0)["next_seq"]
+        worker.step(self.workspace)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(client.call.call_count, 1)
+        self.assertEqual(self.db.execute(text("SELECT count(*) FROM source_records WHERE workspace_id=:w"), {"w": self.workspace}).scalar_one(), 2)
+        self.assertFalse(any(u["new_inbound"] for u in self.reader.updates(None, self.workspace, cursor)["updates"]))
+
+    def test_point_lookup_archive_fallback_never_requests_full_archive(self):
+        self.project(self.row("99", customer=99))
+        def handler(path, body):
+            return {"items": [] if body["removed"] == 0 else [{"id": 99, "name": "Archived", "is_study": 0}],
+                    "total": 0 if body["removed"] == 0 else 1}
+        worker, client = self.lookup_worker(handler)
+        worker.step(self.workspace)
+        self.assertEqual([c.args[1]["removed"] for c in client.call.call_args_list], [0, 2])
+        self.assertTrue(all(c.args[1]["id"] == 99 for c in client.call.call_args_list))
+        self.assertEqual(self.reader.listing(None, self.workspace)["conversations"][0]["status"], "archive")
+
+    def test_point_lookup_missing_and_unsupported_ids_are_distinct_and_keep_messages(self):
+        for customer, response, state in ((99, {"items": [], "total": 0}, "not_found"),
+                (100, {"items": [{"id": 7, "name": "Wrong card"}], "total": 1}, "unsupported_id")):
+            self.project(self.row(str(customer), customer=customer))
+            worker, client = self.lookup_worker(lambda p, b: response)
+            worker.step(self.workspace)
+            self.assertEqual(self.lookup_job(customer)["state"], state)
+            self.assertFalse(worker.step(self.workspace))
+        self.assertEqual(len(self.messages()), 2)
+        self.assertTrue(all(c["contact_id"] is None for c in self.reader.listing(None, self.workspace)["conversations"]))
+
+    def test_point_lookup_retries_network_and_respects_rate_limit(self):
+        from center_messenger.alfa_client import AlfaError
+        self.project(self.row("99", customer=99))
+        def failing(p, b):
+            raise AlfaError("rate_limited", 429, "900")
+        worker, client = self.lookup_worker(failing)
+        worker.step(self.workspace)
+        value = self.lookup_job()
+        self.assertEqual(value["state"], "retry")
+        self.assertGreater((datetime.fromisoformat(value["next_at"]) - datetime.now(UTC)).total_seconds(), 890)
+        self.assertFalse(worker.step(self.workspace))
+        self.assertEqual(client.call.call_count, 1)
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_point_lookup_rejects_settings_and_branch_changes_during_request(self):
+        for change in ("UPDATE alfa_settings SET version=version+1 WHERE workspace_id=:w",
+                       "UPDATE alfa_branches SET available=false WHERE workspace_id=:w AND external_id=1"):
+            with self.subTest(change=change), self.db.begin_nested() as nested:
+                self.project(self.row("99", customer=99))
+                def handler(p, b):
+                    self.db.execute(text(change), {"w": self.workspace})
+                    return {"items": [{"id": 99, "name": "Stale", "is_study": 1}], "total": 1}
+                worker, _ = self.lookup_worker(handler)
+                self.assertFalse(worker.step(self.workspace))
+                self.assertIsNone(self.conversation()["contact_id"])
+                self.assertEqual(self.lookup_job()["state"], "queued")
+                nested.rollback()
+
+    def test_point_lookup_preserves_manual_binding_made_during_network_call(self):
+        self.project(self.row("99", customer=99))
+        original = self.conversation()["id"]
+        def handler(p, b):
+            self.db.execute(text("UPDATE conversations SET crm_link_manual=true,contact_id=:c WHERE workspace_id=:w AND id=:id"),
+                {"w": self.workspace, "id": original, "c": self.contact})
+            return {"items": [{"id": 99, "name": "Other card", "is_study": 1}], "total": 1}
+        worker, _ = self.lookup_worker(handler)
+        worker.step(self.workspace)
+        self.assertEqual(self.messages()[0]["conversation_id"], original)
+        self.assertEqual(self.conversation()["contact_id"], self.contact)
+        self.assertTrue(self.conversation()["crm_link_manual"])
+
+    def test_point_lookup_resumes_unknown_ids_saved_before_feature_and_enqueue_is_atomic(self):
+        from center_messenger.customer_lookup import TOPIC
+        with self.db.begin_nested() as tx:
+            self.project(self.row("99", customer=99))
+            tx.rollback()
+        self.assertEqual(self.db.execute(text("SELECT count(*) FROM outbox_events WHERE workspace_id=:w AND topic=:t"),
+            {"w": self.workspace, "t": TOPIC}).scalar_one(), 0)
+        self.project(self.row("99", customer=99))
+        self.db.execute(text("DELETE FROM outbox_events WHERE workspace_id=:w AND topic=:t"), {"w": self.workspace, "t": TOPIC})
+        worker, _ = self.lookup_worker(lambda p, b: {"items": [{"id": 99, "name": "Recovered", "is_study": 1}], "total": 1})
+        worker.step(self.workspace)
+        self.assertEqual(self.lookup_job()["state"], "resolved")
+
+    def test_point_lookup_rejects_expired_lease_and_replaced_directory_snapshot(self):
+        from center_messenger.customer_lookup import TOPIC
+        for variant in ("expired", "snapshot"):
+            with self.subTest(variant=variant), self.db.begin_nested() as tx:
+                self.project(self.row("99", customer=99))
+                def handler(p, b):
+                    if variant == "expired":
+                        self.db.execute(text("UPDATE outbox_events SET payload=jsonb_set(payload,'{lease_until}',to_jsonb(CAST(:until AS text))) "
+                            "WHERE workspace_id=:w AND topic=:t"),
+                            {"w": self.workspace, "t": TOPIC, "until": (datetime.now(UTC)-timedelta(seconds=1)).isoformat()})
+                    else:
+                        self.published.return_value = dict(self.snapshot, run=uuid4())
+                    return {"items": [{"id":99,"name":"Stale","is_study":1}], "total":1}
+                worker, _ = self.lookup_worker(handler)
+                self.assertFalse(worker.step(self.workspace))
+                self.assertIsNone(self.conversation()["contact_id"])
+                self.published.return_value = self.snapshot
+                tx.rollback()
+
+    def test_point_lookup_lease_prevents_a_second_worker_fetch_and_scopes_other_workspaces(self):
+        self.project(self.row("99", customer=99))
+        def handler(p, b):
+            second, client = self.lookup_worker(lambda p,b: self.fail("Concurrent duplicate request"))
+            self.assertFalse(second.step(self.workspace))
+            client.call.assert_not_called()
+            self.assertFalse(second.step(uuid4()))
+            return {"items":[{"id":99,"name":"Child","is_study":1}], "total":1}
+        worker, _ = self.lookup_worker(handler)
+        worker.step(self.workspace)
+        self.assertEqual(self.lookup_job()["state"], "resolved")
+
+    def test_point_lookup_credential_error_resumes_immediately_after_settings_change(self):
+        from center_messenger.alfa_client import AlfaError
+        self.project(self.row("99", customer=99))
+        worker, client = self.lookup_worker(lambda p,b: None)
+        client.call.side_effect = AlfaError("unauthorized", 401)
+        worker.step(self.workspace)
+        self.assertEqual(self.lookup_job()["state"], "credentials_required")
+        self.assertFalse(worker.step(self.workspace))
+        self.db.execute(text("UPDATE alfa_settings SET version=version+1 WHERE workspace_id=:w"), {"w": self.workspace})
+        client.call.side_effect = lambda p,b:{"items":[{"id":99,"name":"Child","is_study":1}], "total":1}
+        self.assertTrue(worker.step(self.workspace))
+        self.assertEqual(self.lookup_job()["state"], "resolved")
+
+    def test_unknown_message_without_id_stays_visible_with_explicit_reason(self):
+        self.at = datetime.now(UTC)
+        self.project(dict(self.row(), customers=[]))
+        item = self.reader.listing(None, self.workspace)["conversations"][0]
+        self.assertEqual(item["identity_resolution"]["state"], "missing_id")
+        self.assertEqual(len(self.reader.updates(None, self.workspace, 0)["updates"]), 1)
+
     def active_review_worker(self, handler):
         from contextlib import nullcontext
         from center_messenger.active_review import ActiveReviewWorker
         client=SimpleNamespace(call=Mock(side_effect=handler))
         vault=Mock();vault.open.return_value={};vault.seal.return_value='test'
         connections=SimpleNamespace(accounts=self.accounts,vault=vault,
-            _row=lambda db,w:db.execute(text('SELECT * FROM alfa_settings WHERE workspace_id=:w'),{'w':w}).mappings().one(),
+            _row=lambda db,w:db.execute(text('SELECT * FROM alfa_settings WHERE workspace_id=:w'),{'w':w}).mappings().one_or_none(),
             _host_gate=lambda origin:nullcontext(None),client_factory=lambda *args:client)
         return ActiveReviewWorker(connections),client
 

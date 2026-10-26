@@ -759,6 +759,9 @@ class AlfaMaxConnections:
                 customer = dict(raw_customer) if raw_customer else None
                 if customer and snapshot:
                     customer = resolve_customer(customer, directory)
+                if customer and not customer.get("contact_id"):
+                    from center_messenger.customer_lookup import enqueue
+                    enqueue(db, workspace, crm_connection, customer["customer_id"], customer["branch_id"])
                 if not customer:
                     group = "unlinked"
                 elif customer.get("contact_id"):

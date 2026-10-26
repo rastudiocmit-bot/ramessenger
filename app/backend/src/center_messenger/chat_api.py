@@ -164,22 +164,21 @@ class ChatReader:
                 return {"next_seq": end, "updates": [], "has_more": False}
             snapshot = DirectoryReader._published(db, workspace)
             update_params = {"w": workspace, "after": min(after, end), **card_preference.params(snapshot)}
-            eligible_channel = "cn.kind='max_bot'"
+            eligible_channel = ("(cn.kind='max_bot' AND s.connection_id IS NOT NULL) OR "
+                                "(cn.kind='alfa_max_browser' AND am.connection_id IS NOT NULL)")
             if snapshot:
                 update_params.update(run=snapshot["run"], crm=snapshot["connection_id"])
                 eligible_channel = (
-                    "cn.kind='max_bot' OR (cn.kind='alfa_max_browser' "
-                    "AND c.contact_id IS NOT NULL AND c.last_inbound_at IS NOT NULL "
-                    "AND am.crm_connection_id=:crm AND EXISTS(SELECT 1 FROM alfa_directory d "
-                    "WHERE d.workspace_id=c.workspace_id AND d.run_id=:run "
-                    "AND d.contact_id=c.contact_id))"
+                    "(cn.kind='max_bot' AND s.connection_id IS NOT NULL) OR (cn.kind='alfa_max_browser' "
+                    "AND am.crm_connection_id=:crm)"
                 )
             rows = list(
                 db.execute(
                     text(
                         "SELECT ch.seq,c.id,c.inbound_seq,c.contact_id,"
                         "c.crm_link_manual,cp.payload AS card_selection," + card_preference.contact_sql() + " AS family_contact_id,"
-                        "coalesce(cp.payload->>'name',p.display_name,c.peer_name) AS name,m.direction,ch.new_inbound,"
+                        "coalesce(cp.payload->>'name',p.display_name,c.peer_name) AS name,m.direction,"
+                        "(ch.new_inbound AND " + visible_message() + ") AS new_inbound,"
                         "CASE WHEN m.payload->>'deleted'='true' THEN NULL ELSE m.text END AS preview,"
                         + EFFECTIVE_UNREAD
                         + " AS effective_unread,q.unanswered_count,q.last_unanswered_at "
@@ -195,7 +194,7 @@ class ChatReader:
                         "LEFT JOIN contacts p ON "
                         "p.workspace_id=c.workspace_id AND p.id=" + card_preference.contact_sql() + " "
                         "CROSS JOIN LATERAL (" + cached_state_sql() + ") q "
-                        "WHERE ch.workspace_id=:w AND ch.seq>:after AND ("
+                        "WHERE ch.workspace_id=:w AND ch.seq>:after AND c.kind='direct' AND ("
                         + eligible_channel
                         + ") ORDER BY ch.seq LIMIT 101"
                     ),
@@ -267,7 +266,7 @@ class ChatReader:
                     "SELECT c.*,cn.name AS channel_name,cn.kind AS channel_kind,"
                     "cp.payload AS card_selection," + card_preference.contact_sql() + " AS family_contact_id,"
                     "coalesce(cp.payload->>'name',p.display_name,c.peer_name) AS display_name,"
-                    "am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
+                    "am.crm_connection_id,am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
                     "am.last_error_code AS crm_history_error,"
                     "CASE WHEN cn.kind='alfa_max_browser' THEN "
                     "(am.state='active' AND am.session_ciphertext IS NOT NULL AND coalesce(am.history_cursor#>>'{session_control,needs_check}','false')<>'true' AND EXISTS("
@@ -314,7 +313,8 @@ class ChatReader:
                 ).scalar_one_or_none()
                 if canonical:
                     return ChatReader._conversation(db, workspace, canonical, lock=lock, cached=cached)
-        return row
+        from center_messenger.customer_lookup import enrich
+        return enrich(db, workspace, [row])[0]
 
     @staticmethod
     def _meta(row):
@@ -354,6 +354,7 @@ class ChatReader:
             "can_send": bool(row["can_send"]) and row["channel_status"] == "active",
             "history_loading": bool(loading),
             "history_error": ALFA_MAX_ERRORS.get(row.get("crm_history_error")),
+            "identity_resolution": row.get("identity_resolution"),
         }
 
     @staticmethod
@@ -465,7 +466,11 @@ class ChatReader:
                 if branch:
                     scope += " AND a.branch_id=:branch"
                 if branch:
-                    where += " AND EXISTS (SELECT 1 FROM alfa_customers a WHERE " + scope + ")"
+                    where += (" AND (EXISTS (SELECT 1 FROM alfa_customers a WHERE " + scope + ") OR "
+                        "(cn.kind='alfa_max_browser' AND c.contact_id IS NULL "
+                        "AND c.external_chat_id LIKE concat('alfa-customer:',CAST(:branch AS text),':%') "
+                        "AND EXISTS(SELECT 1 FROM alfa_branches known WHERE known.workspace_id=c.workspace_id "
+                        "AND known.connection_id=:crm AND known.external_id=:branch AND known.available)))")
                 where += (
                     " AND (cn.kind <> 'alfa_max_browser' OR am.crm_connection_id=:crm)"
                 )
@@ -529,7 +534,7 @@ class ChatReader:
                 "WITH selected AS MATERIALIZED (" + selected_sql + ") SELECT c.*,cn.name AS channel_name,"
                 "coalesce(cp.payload->>'name',p.display_name,c.peer_name) AS display_name,cn.kind AS channel_kind,"
                 "cp.payload AS card_selection," + card_preference.contact_sql() + " AS family_contact_id,"
-                "am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
+                "am.crm_connection_id,am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
                 "am.last_error_code AS crm_history_error,"
                 "CASE WHEN cn.kind='alfa_max_browser' THEN (am.state='active' "
                 "AND am.session_ciphertext IS NOT NULL AND c.contact_id IS NOT NULL "
@@ -543,6 +548,8 @@ class ChatReader:
                 "CROSS JOIN LATERAL (" + cached_state_sql() + ") q "
                 "ORDER BY selected.effective_unread DESC,selected.priority_at DESC NULLS LAST,c.id"
             ), params).mappings())
+            from center_messenger.customer_lookup import enrich
+            rows = enrich(db, workspace, rows)
             families = {}
             contacts = list({UUID(value) for row in rows if row["contact_id"] for value in
                 (row["card_selection"]["contacts"] if row["card_selection"] else [str(row["contact_id"])])})

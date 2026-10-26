@@ -45,5 +45,12 @@ def register_builtin(registry, services, config):
             worker = ActiveReviewWorker(services.alfa)
             return [Step("page", C.DIRECTORY, lambda op: worker.run_next(), lane="maintenance",
                          active_delay=3, idle_delay=3, budget=90)]
+        def identities():
+            from center_messenger.customer_lookup import CustomerLookupWorker
+            worker = CustomerLookupWorker(services.alfa, services.alfa_max)
+            return [Step("customer", C.DIRECTORY, lambda op: worker.run_next(), lane="maintenance",
+                         active_delay=.2, idle_delay=2, budget=60)]
         registry.register(Manifest("crm_cards", frozenset({C.CARDS})), cards)
         registry.register(Manifest("crm_active_review", frozenset({C.DIRECTORY})), review)
+        if services.alfa_max:
+            registry.register(Manifest("crm_customer_lookup", frozenset({C.DIRECTORY})), identities)
