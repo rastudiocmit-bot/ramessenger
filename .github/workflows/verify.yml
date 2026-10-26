@@ -1,6 +1,12 @@
 name: Verify Center Messenger
 
 on:
+  pull_request:
+    paths:
+      - 'app/backend/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - '.github/workflows/verify.yml'
   workflow_dispatch:
 
 permissions:

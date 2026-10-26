@@ -239,6 +239,17 @@ class ActiveReviewWorker:
                 store(db, workspace, settings["connection_id"], owned)
         return False
 
+    def run_next(self):
+        """One resumable page in one workspace; no provider-owned polling loop."""
+        pending = getattr(self, "_pending_scopes", [])
+        if not pending:
+            with self.accounts.transaction() as db:
+                pending = list(db.execute(text("SELECT workspace_id FROM alfa_max_sync_queue ORDER BY workspace_id")).scalars())
+            self._pending_scopes = pending
+        if not pending:
+            return False
+        return bool(self.step(pending.pop(0)))
+
     def run(self):
         while not self.stopping.is_set():
             try:

@@ -1,6 +1,7 @@
 "use strict";
 window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
   let sections = {}, summaryTimer = null, summaryRequest = 0, context = null, contextEpoch = null;
+  let summaryController = null, summaryComputedAt = null;
   const icon = name => window.CenterIcon(name);
   const definition = [
     ["messages", "Чаты", "chats"], ["summary", "Сводка", "chart"],
@@ -29,6 +30,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
   function update(next) {
     sections = next;
     if (contextEpoch !== state.epoch) {
+      leaveSummary(); summaryComputedAt = null;
       context = null; contextEpoch = state.epoch;
       $("#profile-channels").textContent = "";
       if ($("#organization-branches")) $("#organization-branches").replaceChildren(node("p", "Загружаем филиалы…", "note"));
@@ -36,6 +38,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
       $("#summary-content").replaceChildren(node("p", "Загружаем показатели…", "note"));
       $("#summary-error").textContent = ""; show($("#summary-error"), false);
     }
+    if (!sections.summary) { leaveSummary(); summaryComputedAt = null; $("#summary-content").replaceChildren(); }
     const all = definition.filter(([key]) => sections[key]);
     $("#navrail").replaceChildren(...all.map(t => navButton(t, true)));
     const primary = all.slice(0, 3), rest = all.slice(3);
@@ -69,7 +72,10 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
     fillIcons();
     if (state.pane !== "summary") leaveSummary();
   }
-  function leaveSummary() { clearTimeout(summaryTimer); summaryTimer = null; summaryRequest += 1; }
+  function leaveSummary() {
+    clearTimeout(summaryTimer); summaryTimer = null; summaryRequest += 1;
+    summaryController?.abort(); summaryController = null;
+  }
   function metric(label, value, note, direction) {
     const card = node("div", undefined, "kpi"); card.append(node("dt", label), node("dd", value));
     if (note) card.append(node("div", note, "trend " + (direction || "flat")));
@@ -97,11 +103,15 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
     }
   }
   async function summary() {
+    if (summaryController || !sections.summary) return;
     clearTimeout(summaryTimer); const seq = ++summaryRequest, workspace = state.workspace?.id, epoch = state.epoch;
+    const controller = new AbortController(); summaryController = controller; let canRetry = true;
     const current = () => seq === summaryRequest && epoch === state.epoch && workspace === state.workspace?.id && state.pane === "summary";
     try {
-      const result = await api(`/workspaces/${workspace}/summary`);
+      const result = await api(`/workspaces/${workspace}/summary`, { signal: controller.signal, timeoutMs: 10000 });
       if (!current()) return;
+      const computed = result.computed_at ? new Date(result.computed_at) : null;
+      summaryComputedAt = computed && Number.isFinite(computed.getTime()) ? computed.toLocaleString("ru-RU", { timeZone: state.workspace?.timezone || "Europe/Moscow", dateStyle: "short", timeStyle: "short" }) : null;
       const content = $("#summary-content"); content.replaceChildren(); show($("#summary-error"), false);
       $("#summary-subtitle").textContent = (result.scope || "Все филиалы") + " · за последние 7 дней";
       const kpis = node("div", undefined, "kpi-grid");
@@ -126,9 +136,21 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
       const operators = node("div");
       for (const operator of result.operators) { const row = node("div", undefined, "split"); row.append(node("span", operator.name, "nm"), node("span", duration(operator.average_response_seconds), "vl muted"), node("span", String(operator.answered), "vl")); operators.append(row); }
       if (!result.operators.length) operators.append(node("p", "Ответов сотрудников за этот период пока нет.", "note"));
-      content.append(kpis, card("Обращения по дням", chart), card("Разбивка по филиалам", branches), card("Операторы за неделю", operators, "отв. · ср. время"), node("p", "Показатели рассчитываются по сохранённым сообщениям. Во время загрузки истории значения могут уточняться.", "note summary-note"));
-    } catch (error) { if (current()) { $("#summary-error").textContent = error.message; show($("#summary-error")); } }
-    finally { if (current()) summaryTimer = setTimeout(summary, 60000); }
+      content.append(kpis, card("Обращения по дням", chart), card("Разбивка по филиалам", branches), card("Операторы за неделю", operators, "отв. · ср. время"), node("p", (summaryComputedAt ? `Данные на ${summaryComputedAt}. ` : "") + "Показатели рассчитываются по сохранённым сообщениям. Во время загрузки истории значения могут уточняться.", "note summary-note"));
+    } catch (error) {
+      if (current() && error.name !== "AbortError") {
+        canRetry = ![401, 403].includes(error.status);
+        if (!canRetry) { summaryComputedAt = null; $("#summary-content").replaceChildren(); }
+        else if (!$("#summary-content .kpi-grid")) $("#summary-content").replaceChildren(node("p", "Показатели пока недоступны.", "note"));
+        const box = $("#summary-error");
+        box.textContent = (summaryComputedAt && canRetry ? `Показаны данные на ${summaryComputedAt}. Обновление задерживается. ` : "") + error.message;
+        if (canRetry) { const retry = node("button", "Повторить", "text-button"); retry.type = "button"; retry.addEventListener("click", summary); box.append(" ", retry); }
+        show(box);
+      }
+    } finally {
+      if (summaryController === controller) summaryController = null;
+      if (current() && canRetry) summaryTimer = setTimeout(summary, 60000);
+    }
   }
   $("#chat-person-open").addEventListener("click", () => document.dispatchEvent(new CustomEvent("cm:chat-details-open")));
   $("#profile-sound-settings").addEventListener("click", () => $("#chat-settings-open").click());
@@ -146,5 +168,6 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
     visualViewport.addEventListener("resize", fit); visualViewport.addEventListener("scroll", fit);
   }
   fillIcons();
-  return { update, summary, metadata, leave: leaveSummary, navigate, fillIcons };
+  function reset() { leaveSummary(); summaryComputedAt = null; $("#summary-content").replaceChildren(); $("#summary-error").textContent = ""; show($("#summary-error"), false); }
+  return { update, summary, metadata, leave: leaveSummary, reset, navigate, fillIcons };
 };

@@ -2,16 +2,35 @@
 
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
+import logging
+from time import perf_counter
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_api import DirectoryReader
 from center_messenger.message_order import visible_message, message_order, source_order
+from center_messenger.database import log_database_error
+
+logger = logging.getLogger(__name__)
+
+
+def _query(db, stage, statement, params):
+    started = perf_counter()
+    try:
+        return db.execute(statement, params)
+    except SQLAlchemyError as error:
+        log_database_error(logger, error, operation=f"summary.{stage}")
+        raise
+    finally:
+        elapsed = (perf_counter() - started) * 1000
+        if elapsed >= 250:
+            logger.warning("Slow summary calculation stage=%s duration_ms=%.0f", stage, elapsed)
 
 
 def summary(maximum, actor, workspace, *, now=None):
-    from center_messenger.chat_queue import queue_state_sql
+    from center_messenger.chat_queue import cached_state_sql
 
     now = now or datetime.now(UTC)
     with maximum.chat_transaction(actor, workspace, snapshot=True) as db:
@@ -23,7 +42,7 @@ def summary(maximum, actor, workspace, *, now=None):
         zone = ZoneInfo(membership["timezone"])
         today = now.astimezone(zone).date()
         start = datetime.combine(today - timedelta(days=6), time.min, zone).astimezone(UTC)
-        previous = start - timedelta(days=7)
+        previous = datetime.combine(today - timedelta(days=13), time.min, zone).astimezone(UTC)
         snapshot = DirectoryReader._published(db, workspace)
         params = {"w": workspace, "start": start, "previous": previous, "now": now,
                   "zone": membership["timezone"], "crm": snapshot["connection_id"] if snapshot else None}
@@ -43,16 +62,18 @@ def summary(maximum, actor, workspace, *, now=None):
                   "LEFT JOIN alfa_max_settings am ON am.workspace_id=c.workspace_id AND am.connection_id=c.connection_id "
                   "WHERE " + eligible + " AND " + visible_message() + " AND m.occurred_at>=:previous "
                   "AND m.occurred_at<=:now) ")
-        totals = db.execute(text(events +
+        totals = _query(db, "totals", text(events +
             "SELECT count(*) FILTER(WHERE direction='in' AND actor_type='contact' AND occurred_at>=:start) AS incoming,"
             "count(*) FILTER(WHERE direction='in' AND actor_type='contact' AND occurred_at<:start) AS previous_incoming "
             "FROM events"), params).mappings().one()
-        waiting = db.execute(text("SELECT count(*)" + joins + "CROSS JOIN LATERAL (" + queue_state_sql() + ") q WHERE " + eligible + " AND " + "q.needs_reply"), params).scalar_one()
-        day_rows = db.execute(text(events +
+        # The same versioned projection used by the chat list; missing/old rows
+        # fall back to the exact policy. Do not scan every full timeline again.
+        waiting = _query(db, "waiting", text("SELECT count(*)" + joins + "CROSS JOIN LATERAL (" + cached_state_sql() + ") q WHERE " + eligible + " AND " + "q.needs_reply"), params).scalar_one()
+        day_rows = _query(db, "days", text(events +
             "SELECT (occurred_at AT TIME ZONE :zone)::date AS day,count(*) AS incoming FROM events "
             "WHERE direction='in' AND actor_type='contact' AND occurred_at>=:start GROUP BY 1"), params).mappings()
         by_day = {row["day"]: row["incoming"] for row in day_rows}
-        branch_rows = db.execute(text(events +
+        branch_rows = _query(db, "branches", text(events +
             "SELECT coalesce(payload->>'customer_branch_id',payload->>'crm_branch') AS branch,count(*) AS incoming "
             "FROM events WHERE direction='in' AND actor_type='contact' AND occurred_at>=:start GROUP BY 1"), params).mappings().all()
         names = {str(row["id"]): row["name"] for row in DirectoryReader._branches(db, workspace)}
@@ -63,7 +84,7 @@ def summary(maximum, actor, workspace, *, now=None):
         # Automated sends, failed/queued commands and later follow-ups are excluded
         # from response-time calculations, while all human replies count as work.
         human = "coalesce(m.payload->>'failed','false')<>'true' AND (m.send_command_id IS NULL OR sc.state IN ('accepted','delivered','read'))"
-        responses = db.execute(text(events +
+        responses = _query(db, "responses", text(events +
             "SELECT coalesce(u.display_name,nullif(m.payload->>'actor_name',''),'Сотрудник CRM') AS name,"
             "count(*) AS answered,avg(CASE WHEN i.occurred_at IS NOT NULL AND NOT EXISTS ("
             "SELECT 1 FROM messages p LEFT JOIN send_commands pc ON pc.workspace_id=p.workspace_id AND pc.id=p.send_command_id "
@@ -95,7 +116,7 @@ def summary(maximum, actor, workspace, *, now=None):
         new_leads = 0
         if snapshot:
             params["run"] = snapshot["run"]
-            new_leads = db.execute(text(events +
+            new_leads = _query(db, "new_leads", text(events +
                 "SELECT count(DISTINCT e.contact_id) FROM events e WHERE e.direction='in' AND e.actor_type='contact' "
                 "AND e.occurred_at>=:start AND EXISTS(SELECT 1 FROM alfa_customers a WHERE a.workspace_id=e.workspace_id "
                 "AND a.run_id=:run AND a.contact_id=e.contact_id AND a.status='lead') "

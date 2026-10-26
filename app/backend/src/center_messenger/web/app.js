@@ -63,7 +63,7 @@
   }
   function clearPrivateViews() {
     $("#members-list").replaceChildren(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
-    cabinet.leave();
+    cabinet.reset();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
     ["#user-name", "#user-email", "#user-avatar", "#workspace-role", "#workspace-timezone"].forEach(selector => { $(selector).textContent = ""; });
     $("#invite-url").value = "";

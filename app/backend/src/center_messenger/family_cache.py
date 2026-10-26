@@ -402,6 +402,27 @@ class FamilyCacheWorker:
                 "WHERE workspace_id=:w AND id=:id AND state='pending' AND payload->>'lease_owner'=:owner"),
                 {"w": workspace, "id": job["id"], "owner": self.owner, "p": json.dumps(patch)})
 
+    def run_next(self):
+        """One workspace/job; called by the shared scheduler, without a loop."""
+        pending = getattr(self, "_pending_scopes", [])
+        if not pending:
+            with self.accounts.transaction() as db:
+                pending = list(db.execute(text("SELECT workspace_id FROM max_routes UNION "
+                    "SELECT workspace_id FROM alfa_max_sync_queue ORDER BY workspace_id")).scalars())
+            self._pending_scopes = pending
+        if not pending:
+            return False
+        workspace = pending.pop(0)
+        scheduled = getattr(self, "_scheduled_scopes", {})
+        if time.monotonic() >= scheduled.get(workspace, 0):
+            self.schedule(workspace)
+            scheduled[workspace] = time.monotonic() + 10
+            self._scheduled_scopes = scheduled
+        job = self.claim(workspace)
+        if job:
+            self.process(workspace, job)
+        return bool(job)
+
     def run(self):
         scheduled = 0
         while not self.stopping.is_set():
