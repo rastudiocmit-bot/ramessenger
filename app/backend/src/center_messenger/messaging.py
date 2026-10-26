@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -258,14 +259,14 @@ class Messaging:
         refresh_unread(db, job["workspace_id"], command["conversation_id"])
         return identifier
 
-    def _send(self, job, lease):
+    def _send(self, job, lease, *, stopping=None):
         with self.accounts.transaction(workspace_id=job["workspace_id"]) as db:
             connection_kind = db.execute(
                 text("SELECT kind FROM connections WHERE workspace_id=:w AND id=:c"),
                 {"w": job["workspace_id"], "c": job["connection_id"]},
             ).scalar_one_or_none()
         if connection_kind == "alfa_max_browser":
-            return self._send_alfa_max(job, lease)
+            return self._send_alfa_max(job, lease, stopping=stopping)
         with self._transaction(job, lease) as db:
             command = self._command(db, job)
             if command is None or command["state"] not in {"queued", "sending"}:
@@ -360,9 +361,48 @@ class Messaging:
             refresh_unread(db, job["workspace_id"], command["conversation_id"])
             self._remove(db, job)
 
-    def _send_alfa_max(self, job, lease):
+    @staticmethod
+    def _native_phase(db, job, attempt, phase, *, fresh=False):
+        record = {'attempt_id': attempt, 'phase': phase,
+                  phase + '_at': datetime.now(UTC).isoformat()}
+        db.execute(text("UPDATE send_commands SET payload=jsonb_set(payload,'{native_delivery}',"
+                        "(CASE WHEN :fresh THEN '{}'::jsonb ELSE coalesce(payload->'native_delivery','{}'::jsonb) END) "
+                        "|| CAST(:record AS jsonb)),updated_at=clock_timestamp() WHERE workspace_id=:w AND id=:id"),
+                   {'w': job['workspace_id'], 'id': job['subject_id'], 'fresh': fresh,
+                    'record': json.dumps(record)})
+
+    def _native_receipt(self, job, attempt, receipt):
+        """Persist a proven receipt for this attempt even after a lease/session change.
+
+        This never saves cookies or settings, and never changes another attempt.
+        """
+        if receipt.get('accepted') is not True:
+            return False
+        with self.accounts.transaction(workspace_id=job['workspace_id']) as db:
+            db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': job['workspace_id']})
+            command = self._command(db, job)
+            delivery = (command['payload'].get('native_delivery') or {}) if command else {}
+            if delivery.get('attempt_id') != attempt:
+                return False
+            if command['state'] in {'accepted', 'delivered', 'read'}:
+                return True
+            if command['state'] not in {'sending', 'unknown'} or delivery.get('phase') not in {'post_started', 'unknown'}:
+                return False
+            identifier = self._state(db, job, command, 'accepted')
+            self._native_phase(db, job, attempt, 'accepted')
+            db.execute(text('UPDATE messages SET occurred_at=clock_timestamp(),version=version+1 '
+                            'WHERE workspace_id=:w AND id=:id'), {'w': job['workspace_id'], 'id': identifier})
+            changed(db, job['workspace_id'], command['conversation_id'], identifier)
+            refresh_unread(db, job['workspace_id'], command['conversation_id'])
+            db.execute(text("DELETE FROM message_jobs WHERE workspace_id=:w AND subject_id=:id "
+                            "AND kind='send' AND channel_kind='alfa_max_browser'"),
+                       {'w': job['workspace_id'], 'id': command['id']})
+            return True
+
+    def _send_alfa_max(self, job, lease, *, stopping=None):
         if self.alfa_max is None:
             raise LostLease
+        attempt = str(uuid4())
         with self._transaction(job, lease) as db:
             command = self._command(db, job)
             if command is None or command["state"] not in {"queued", "sending"}:
@@ -403,7 +443,10 @@ class Messaging:
                 ),
                 {"w": job["workspace_id"], "id": command["id"]},
             )
-            self._state(db, job, command, "sending")
+            # Preparing a form is repeatable. Only the pre-POST handshake below
+            # changes this command to sending and commits the irreversible intent.
+            self._state(db, job, command, 'queued')
+            self._native_phase(db, job, attempt, 'preparing', fresh=True)
             command = dict(command)
             # The outgoing bubble is correlated to AlfaCRM's sent journal only by
             # exact text, recipient, branch and a narrow time window.
@@ -424,44 +467,65 @@ class Messaging:
                     ),
                 },
             )
+        def guard(operation, *, submit=False):
+            with self._transaction(job, lease) as db:
+                current = self._command(db, job)
+                delivery = (current['payload'].get('native_delivery') or {}) if current else {}
+                if not current or current['state'] not in {'queued', 'sending'} or delivery.get('attempt_id') != attempt:
+                    raise LostLease
+                self.alfa_max.sessions.renew(db, operation, force=True)
+                if submit:
+                    if current['state'] != 'queued' or delivery.get('phase') != 'preparing':
+                        raise LostLease
+                    context(db, user_id=current['requested_by'])
+                    if not self._sender_allowed(db, job['workspace_id'], current['requested_by']):
+                        raise AlfaBrowserError('access_changed')
+                    latest = self.alfa_max._send_target_in_transaction(
+                        db, job['workspace_id'], job['connection_id'], current['conversation_id'])
+                    if (latest['branch'], latest['customer']) != (target['branch'], target['customer']):
+                        raise AlfaBrowserError('settings_changed')
+                    self._native_phase(db, job, attempt, 'post_started')
+                    # Correlate a delayed/unknown send with the source journal
+                    # using its actual submission time, not its queueing time.
+                    db.execute(text('UPDATE messages SET occurred_at=clock_timestamp() '
+                                    'WHERE workspace_id=:w AND send_command_id=:id'),
+                               {'w': job['workspace_id'], 'id': current['id']})
+                    self._state(db, job, current, 'sending')
+                db.execute(text("UPDATE message_jobs SET lease_until=clock_timestamp()+interval '180 seconds' "
+                                'WHERE id=:id AND lease_owner=:lease'), {'id': job['id'], 'lease': lease})
+
         try:
-            self.alfa_max.send_native(
+            receipt = self.alfa_max.send_native(
                 job["workspace_id"],
                 job["connection_id"],
                 command["conversation_id"],
                 command["payload"]["text"],
                 target=target,
+                before_post=lambda operation: guard(operation, submit=True),
+                heartbeat=guard,
+                on_accepted=lambda receipt: self._native_receipt(job, attempt, receipt),
+                stopping=stopping,
             )
         except AlfaBrowserError as error:
             with self._transaction(job, lease) as db:
                 command = self._command(db, job)
-                if command is None or command["state"] != "sending":
+                if command is None or command["state"] not in {'queued', 'sending'} or (command['payload'].get('native_delivery') or {}).get('attempt_id') != attempt:
                     raise LostLease from None
-                if error.code in {'browser_busy', 'settings_changed', 'session_check_pending'}:
+                if error.code in {'browser_busy', 'settings_changed', 'session_check_pending',
+                                  'send_prepare_timeout', 'send_prepare_failed', 'browser_unavailable', 'crm_unavailable', 'crm_rate_limited'}:
                     self._state(db, job, command, 'queued', error.code)
-                    db.execute(text("UPDATE message_jobs SET due_at=now()+interval '10 seconds',"
-                                    "lease_owner=NULL,lease_until='2000-01-01T00:00:00Z' WHERE id=:id"), {'id': job['id']})
+                    self._native_phase(db, job, attempt, 'waiting')
+                    delay = 10 if error.code in {'browser_busy', 'settings_changed', 'session_check_pending'} else min(120, 5 * 2 ** min(command['attempts'], 5))
+                    db.execute(text("UPDATE message_jobs SET due_at=now()+(:delay*interval '1 second'),"
+                                    "lease_owner=NULL,lease_until='2000-01-01T00:00:00Z' WHERE id=:id"), {'id': job['id'], 'delay': delay})
                     return
-                state = "unknown" if error.code == "send_unknown" else "failed"
+                state = "unknown" if error.code == "send_unknown" else 'cancelled' if error.code in {'access_changed', 'disconnected'} else "failed"
                 public_code = "unknown" if state == "unknown" else error.code
                 self._state(db, job, command, state, public_code)
+                self._native_phase(db, job, attempt, state)
                 self._remove(db, job)
             return
-        with self._transaction(job, lease) as db:
-            command = self._command(db, job)
-            if command is None or command["state"] != "sending":
-                raise LostLease
-            identifier = self._state(db, job, command, "accepted")
-            db.execute(
-                text(
-                    "UPDATE messages SET occurred_at=now(),version=version+1 WHERE "
-                    "workspace_id=:w AND id=:id"
-                ),
-                {"w": job["workspace_id"], "id": identifier},
-            )
-            changed(db, job["workspace_id"], command["conversation_id"], identifier)
-            refresh_unread(db, job["workspace_id"], command["conversation_id"])
-            self._remove(db, job)
+        self._native_receipt(job, attempt, receipt)
 
     def _send_error(self, job, lease, error):
         with self._transaction(job, lease) as db:
@@ -544,7 +608,7 @@ class Messaging:
         except LostLease:
             pass
 
-    def run_next(self, kind=None, channel_kind=None):
+    def run_next(self, kind=None, channel_kind=None, *, stopping=None):
         job, lease = self._claim(kind, channel_kind)
         if job is None:
             return False
@@ -552,7 +616,7 @@ class Messaging:
             if job["kind"] == "event":
                 self._event(job, lease)
             else:
-                self._send(job, lease)
+                self._send(job, lease, stopping=stopping)
         except LostLease:
             pass
         except MaxError as error:
