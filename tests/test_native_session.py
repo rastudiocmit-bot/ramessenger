@@ -509,8 +509,10 @@ class NativeSessionTests(unittest.TestCase):
                                {'id': command['command_id']}).mappings().one()
 
     def ready_native_job(self, command):
-        self.db.execute(text("UPDATE message_jobs SET due_at=clock_timestamp()-interval '1 second',"
-                             "lease_until=clock_timestamp()-interval '1 second' WHERE subject_id=:id"),
+        # The fixture keeps one outer rollback transaction: use its SQL clock,
+        # just like _claim, rather than making the job due after that snapshot.
+        self.db.execute(text("UPDATE message_jobs SET due_at=now()-interval '1 second',"
+                             "lease_until=now()-interval '1 second' WHERE subject_id=:id"),
                         {'id': command['command_id']})
 
     def test_prepare_timeout_is_retryable_and_keeps_the_same_command(self):
