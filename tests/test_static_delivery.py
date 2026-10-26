@@ -5,6 +5,7 @@ import gzip
 import sys
 import types
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,6 +86,19 @@ class StaticDeliveryTest(unittest.TestCase):
         response = self.get("/api/ping")
         self.assertIsNone(response.headers.get("content-encoding"))
         self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_server_timing_and_slow_read_logs_exclude_private_query_and_response_data(self):
+        security = load_security()
+        with patch.object(security, "perf_counter", side_effect=[10, 11.234]):
+            with self.assertLogs("center_messenger.http_security", level="WARNING") as logs:
+                response = self.get("/api/ping?private_value=do-not-log")
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.headers["server-timing"],"app;dur=1234.00")
+        self.assertEqual(response.headers["cache-control"],"no-store")
+        self.assertIn("duration_ms=1234", " ".join(logs.output))
+        self.assertNotIn("private_value", " ".join(logs.output))
+        self.assertNotIn("do-not-log", " ".join(logs.output))
+        self.assertNotIn("pong", " ".join(logs.output))
 
     def test_missing_asset_is_not_cached(self):
         response = self.get("/assets/missing.js?v=1")

@@ -1,3 +1,6 @@
+import logging
+from time import perf_counter
+
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 
@@ -5,6 +8,7 @@ from center_messenger.config import Settings
 
 
 COMPRESSIBLE = (".js", ".css", ".html", ".svg", ".json", ".txt")
+logger = logging.getLogger(__name__)
 
 
 def cache_policy(scope, status):
@@ -46,6 +50,7 @@ class SecurityMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
+        started = perf_counter()
         headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope["headers"]}
         mutation = scope["path"].startswith("/api/") and scope["method"] in {
             "POST",
@@ -64,6 +69,7 @@ class SecurityMiddleware:
 
         async def secure_send(message):
             if message["type"] == "http.response.start":
+                elapsed = (perf_counter() - started) * 1000
                 overridden = {
                     b"cache-control",
                     b"content-security-policy",
@@ -83,6 +89,7 @@ class SecurityMiddleware:
                         (b"x-frame-options", b"DENY"),
                         (b"referrer-policy", b"no-referrer"),
                         (b"cache-control", cache_policy(scope, message.get("status"))),
+                        (b"server-timing", f"app;dur={elapsed:.2f}".encode("ascii")),
                         (
                             b"content-security-policy",
                             (
@@ -95,6 +102,13 @@ class SecurityMiddleware:
                 )
                 if self.settings.public_url.startswith("https://"):
                     values.append((b"strict-transport-security", b"max-age=15552000"))
+                if elapsed >= 1000 and scope["method"] == "GET" and path.startswith("/api/"):
+                    # Route templates carry no customer IDs, query parameters,
+                    # message contents or credentials. Time to headers includes
+                    # auth, database checkout and reads, never the SSE lifetime.
+                    route = getattr(scope.get("route"), "path", "unknown")
+                    logger.warning("Slow API read route=%s status=%s duration_ms=%.0f",
+                                   route, message.get("status"), elapsed)
                 message = dict(message, headers=values)
             await send(message)
 

@@ -2931,6 +2931,37 @@ class MessageSyncTests(unittest.TestCase):
         report=family_cache.progress(self.db,self.workspace,self.crm,self.snapshot)
         self.assertEqual(report['total'],1)
 
+    def test_pending_card_lookup_validates_aliases_with_repeated_branch_observations(self):
+        policy,_,_,active,_,conversation=self.preferred_card_fixture()
+        self.db.execute(text("INSERT INTO alfa_customers(workspace_id,run_id,branch_id,external_id,name,legal_name,"
+            "legal_type,dob,phones,status,contact_id,student_id) SELECT workspace_id,run_id,1,external_id,name,legal_name,"
+            "legal_type,dob,phones,status,contact_id,student_id FROM alfa_customers "
+            "WHERE workspace_id=:w AND run_id=:r AND branch_id=2 AND external_id=9160"),
+            {'w':self.workspace,'r':self.run})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        self.assertIsNotNone(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact))
+        self.assertTrue(policy.is_pending(self.db,self.workspace,self.snapshot,iter([active])))
+        self.assertFalse(policy.is_pending(self.db,self.workspace,self.snapshot,[self.contact]))
+        self.assertFalse(policy.is_pending(self.db,self.workspace,self.snapshot,[uuid4()]))
+        self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79990000099\"]'::jsonb "
+            "WHERE workspace_id=:w AND contact_id=:c"),{'w':self.workspace,'c':active})
+        self.assertFalse(policy.is_pending(self.db,self.workspace,self.snapshot,[active]))
+        self.assertTrue(policy.is_pending(self.db,self.workspace,self.snapshot,[self.contact]))
+
+    def test_pending_card_candidate_hints_never_replace_the_validated_manual_link(self):
+        policy,_,_,active,_,conversation=self.preferred_card_fixture()
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        hint={'source':'broken-legacy-id','contacts':[str(active)],'policy':policy.VERSION,
+              'run':str(self.run),'version':self.snapshot['version']}
+        self.db.execute(text("INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) "
+            "VALUES(:w,:id,:t,'malformed-hint',CAST(:p AS jsonb),'published')"),
+            {'w':self.workspace,'id':uuid4(),'t':policy.TOPIC,'p':json.dumps(hint)})
+        self.assertTrue(policy.is_pending(self.db,self.workspace,self.snapshot,[active]))
+        self.db.execute(text("UPDATE conversations SET crm_link_manual=true WHERE workspace_id=:w AND id=:c"),
+                        {'w':self.workspace,'c':conversation})
+        self.assertFalse(policy.is_pending(self.db,self.workspace,self.snapshot,[active]))
+        self.assertTrue(policy.is_pending(self.db,self.workspace,self.snapshot,[self.contact]))
+
     def test_card_preference_fences_phone_changes_before_background_recalculation(self):
         policy,_,_,active,_,conversation=self.preferred_card_fixture()
         policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
