@@ -514,7 +514,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     request.finally(() => { if (listTask === request) listTask = null; }).catch(() => {});
     return request;
   }
-  async function loadListPage(append = false, preservePages = false, prepared = null, preparedHistory = null) {
+  async function loadListPage(append = false, preservePages = false, prepared = null, preparedHistory = null, deferHistory = false) {
     if (append && (listRetryRequired || !hasMore)) return;
     const epoch = state.epoch, gen = generation, seq = ++listSeq;
     const targetPage = append ? page + 1 : preservePages ? page : 0;
@@ -560,7 +560,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         listLoading = false;
         if (hasMore) requestAnimationFrame(maybeLoadMore);
         const first = (items.find(item => item.unread) || items[0]).id;
-        await select(first, false, preparedHistory?.conversation?.id === first ? preparedHistory : null);
+        await select(first, false, preparedHistory?.conversation?.id === first ? preparedHistory : null, deferHistory);
       }
       else if (selected && currentItem()) renderHeader();
     } catch (error) {
@@ -771,6 +771,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   async function loadHistoryPage(id, mode = "delta") {
     const epoch = state.epoch, gen = generation, choice = selectionSeq, data = entry(id);
+    if (mode === "delta" && !data.loaded) mode = "initial";
     const params = new URLSearchParams();
     if (state.chatProtocol >= 2) params.set("limit", "40");
     if (mode === "delta" && data.loaded) params.set("after_seq", data.next);
@@ -836,7 +837,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     renderMessages(id, { bottom: mode === "initial" || result.reset, older: mode === "older" && !result.reset }); renderList();
     if (result.more_changes && mode !== "older") await loadHistoryPage(id);
   }
-  async function select(id, mobile = true, preparedHistory = null) {
+  async function select(id, mobile = true, preparedHistory = null, deferHistory = false) {
     cache.get(selected)?.controller?.abort(); historyPollError = null;
     previousHistoryTop = 0;
     if (id !== selected) document.dispatchEvent(new CustomEvent("cm:chat-selected"));
@@ -847,7 +848,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     selectionSeq += 1; selected = id; const data = entry(id); historyBusy = false; data.pollAfter = 0;
     if (mobile) $("#chat-layout").classList.add("has-selection");
     $("#chat-input").value = data.draft; resizeCompose();
-    renderList(); notice("", $("#chat-error"));
+    renderList(); renderPollStatus();
     if (data.loaded) renderMessages(id, { bottom: true });
     else {
       show($("#chat-stream")); show($("#chat-compose"), false);
@@ -855,8 +856,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       $("#chat-person").replaceChildren(node("strong", currentItem()?.name || "MAX"));
     }
     if (keepDetails && selected === id && active()) openDetails({ auto: true }).catch(error => fail(error));
-    try { if (preparedHistory) await mergeHistory(id, preparedHistory, "initial"); else await loadHistory(id, data.loaded ? "delta" : "initial"); }
-    catch (error) { if (selected === id && active()) fail(error); }
+    if (deferHistory && !preparedHistory && !data.loaded) return;
+    try {
+      if (preparedHistory) await mergeHistory(id, preparedHistory, "initial"); else await loadHistory(id, data.loaded ? "delta" : "initial");
+      if (selected === id && active()) { historyPollError = null; renderPollStatus(); }
+    } catch (error) { if (selected === id && active() && !ignored(error)) {
+      historyPollError = error; data.pollAfter = Date.now() + 8000; renderPollStatus();
+    } }
   }
   async function enter() {
     const epoch = state.epoch, gen = generation;
@@ -864,14 +870,20 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const previousSelection = selected;
     clearTimeout(timer); notice("", $("#chat-error"));
     const initial = state.chatProtocol >= 2 && !selected && !items.length;
-    if (initial) bootstrapBusy = true;
+    if (initial) { bootstrapBusy = true; show($("#chat-empty"), false); }
     try {
       const preferenceRevision = state.chatPreferenceRevision || 0;
       let prepared = null;
       if (initial) {
         const params = new URLSearchParams();
         for (const [key, id] of [["q", "chat-search"], ["branch", "chat-branch"], ["status", "chat-status"], ["connection", "chat-channel"]]) if ($(`#${id}`).value) params.set(key, $(`#${id}`).value);
-        prepared = await api(`${chatPath()}/bootstrap?${params}`, { timeoutMs: 20000 });
+        try { prepared = await api(`${chatPath()}/bootstrap?${params}`, { timeoutMs: 20000 }); }
+        catch (error) {
+          // Keep the independent read endpoints as a bounded startup fallback.
+          // Authorization failures must never be retried via another route.
+          if (![404, 405, 502, 503, 504].includes(error.status) && !["TimeoutError", "NetworkError"].includes(error.name)) throw error;
+          if (!valid(epoch, gen) || !active()) return;
+        }
       }
       const context = prepared?.context || await api(`${chatPath()}/context`, { timeoutMs: 20000 });
       if (!valid(epoch, gen) || !active()) return;
@@ -887,7 +899,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       $("#chat-branch").replaceChildren(new Option("Все филиалы", ""), ...branches.map(b => new Option(b.name, b.id)));
       if (branches.some(b => String(b.id) === old)) $("#chat-branch").value = old;
       renderFilterChip();
-      if (prepared) { if (listSeq === openingListSeq) await loadListPage(false, false, prepared.listing, prepared.history); }
+      if (prepared) { if (listSeq === openingListSeq) await loadListPage(false, false, prepared.listing, prepared.history, prepared.history_pending === true); }
       else await loadList();
       if (selected && !currentItem()) await select(selected, false);
       else if (previousSelection && selected === previousSelection) await loadHistory(selected);
@@ -900,13 +912,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   function schedule(delay = 2500) {
     clearTimeout(timer); if (!active()) return;
-    if (streamHealthy && delay === 2500) delay = 45000;
+    if (streamHealthy && delay === 2500 && !listPollError && !historyPollError && (!selected || cache.get(selected)?.loaded)) delay = 45000;
     timer = setTimeout(poll, delay);
   }
   function renderPollStatus() {
     const error = listPollError || historyPollError;
-    $("#chat-sync-state").textContent = error ? "Ожидаем соединение…" : "Обновлено · история на сервере";
-    if (error) fail(error); else notice("", $("#chat-error"));
+    $("#chat-sync-state").textContent = error ? "Ожидаем соединение…" : selected && !cache.get(selected)?.loaded ? "Загружаем историю…" : "Обновлено · история на сервере";
+    if (error) { fail(error); schedule(2500); } else notice("", $("#chat-error"));
   }
   async function poll() {
     if (!active()) return;

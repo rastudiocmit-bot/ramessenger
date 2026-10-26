@@ -1,6 +1,7 @@
 """Workspace-scoped chat API with membership checks and read-only observers."""
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
@@ -8,6 +9,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Query, Request
 from pydantic import Field, field_validator
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
 from center_messenger.accounts import audit
@@ -27,10 +29,12 @@ from center_messenger.max_client import ERRORS as MAX_ERRORS
 from center_messenger.max_client import MaxChannelInput, MaxSettingsInput
 from center_messenger.max_connections import fingerprint
 from center_messenger.message_order import message_order, source_order, visible_message
+from center_messenger.database import log_database_error
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}")
 hooks = APIRouter()
 ERRORS = {**MAX_ERRORS, **ALFA_MAX_ERRORS}
+logger = logging.getLogger(__name__)
 
 # Cached columns are used only after the resumable repair has completed.
 # During repair the same policy supplies live values, so no stale zero is shown.
@@ -123,13 +127,20 @@ class ChatReader:
         listing = self.listing(actor, workspace, through_page=0, window=90, **filters)
         first = listing["conversations"][0] if listing["conversations"] else None
         history = None
+        retry_history = False
         if first:
             try:
                 history = self.history(actor, workspace, UUID(first["id"]), limit=40)
             except AuthError as error:
                 if error.status != 404:
                     raise
-        return {"context": context, "listing": listing, "history": history}
+            except SQLAlchemyError as error:
+                # A failed timeline transaction must not discard a completed
+                # authorized list. The client retries history independently.
+                log_database_error(logger, error, operation="chat-bootstrap-history")
+                retry_history = True
+        return {"context": context, "listing": listing, "history": history,
+                "history_pending": retry_history}
 
     def event_revision(self, actor, workspace):
         with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
@@ -180,7 +191,7 @@ class ChatReader:
                         + card_preference.join_sql(snapshot) +
                         "LEFT JOIN contacts p ON "
                         "p.workspace_id=c.workspace_id AND p.id=" + card_preference.contact_sql() + " "
-                        "CROSS JOIN LATERAL (" + queue_state_sql() + ") q "
+                        "CROSS JOIN LATERAL (" + cached_state_sql() + ") q "
                         "WHERE ch.workspace_id=:w AND ch.seq>:after AND ("
                         + eligible_channel
                         + ") ORDER BY ch.seq LIMIT 101"
@@ -245,7 +256,7 @@ class ChatReader:
             }
 
     @staticmethod
-    def _conversation(db, workspace, conversation, *, lock=None):
+    def _conversation(db, workspace, conversation, *, lock=None, cached=False):
         snapshot = DirectoryReader._published(db, workspace)
         row = (
             db.execute(
@@ -275,7 +286,7 @@ class ChatReader:
                     "am.workspace_id=c.workspace_id AND am.connection_id=c.connection_id "
                     + card_preference.join_sql(snapshot) +
                     "LEFT JOIN contacts p ON p.workspace_id=c.workspace_id AND p.id=" + card_preference.contact_sql() + " "
-                    "CROSS JOIN LATERAL (" + queue_state_sql() + ") q "
+                    "CROSS JOIN LATERAL (" + (cached_state_sql() if cached and not lock else queue_state_sql()) + ") q "
                     "WHERE c.workspace_id=:w AND c.id=:id AND c.kind='direct' AND "
                     "((cn.kind='max_bot' AND s.connection_id IS NOT NULL) OR "
                     "(cn.kind='alfa_max_browser' AND am.connection_id IS NOT NULL)) "
@@ -299,7 +310,7 @@ class ChatReader:
                      "contact": row["contact_id"], "external": external},
                 ).scalar_one_or_none()
                 if canonical:
-                    return ChatReader._conversation(db, workspace, canonical, lock=lock)
+                    return ChatReader._conversation(db, workspace, canonical, lock=lock, cached=cached)
         return row
 
     @staticmethod
@@ -602,7 +613,11 @@ class ChatReader:
         if not 20 <= limit <= 60:
             raise AuthError(422, "Размер страницы истории должен быть от 20 до 60 сообщений.")
         with self.max.chat_transaction(actor, workspace, snapshot=True) as db:
-            row = self._conversation(db, workspace, conversation)
+            # Message writers update this policy projection in the same
+            # transaction. Do not recalculate the entire reply history on every
+            # read. The SQL falls back to live policy when a projection is absent;
+            # mutations retain their locked live-policy authorization below.
+            row = self._conversation(db, workspace, conversation, cached=True)
             conversation = row["id"]
             params = {"w": workspace, "c": conversation}
             end = db.execute(

@@ -3145,6 +3145,27 @@ class MessageSyncTests(unittest.TestCase):
         self.db.execute(text("UPDATE contacts SET display_name='Renamed' WHERE workspace_id=:w"),{'w':self.workspace})
         self.assertNotEqual(self.reader.event_revision(None,self.workspace)['version'],before['version'])
 
+    def test_history_projection_falls_back_for_missing_rows_and_cannot_authorize_handling(self):
+        self.project(self.row('1'), self.row('2'))
+        conversation = self.conversation()['id']
+        before = self.reader.history(None,self.workspace,conversation)
+        self.assertEqual(before['conversation']['unread_count'],2)
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object("
+            "'needs_reply',false,'unanswered_count',0,'latest_inbound_id',NULL) "
+            "WHERE workspace_id=:w AND topic='chat.list.state' AND event_key=:c"),
+            {'w':self.workspace,'c':str(conversation)})
+        projected = self.reader.history(None,self.workspace,conversation)
+        self.assertFalse(projected['conversation']['unread'])
+        with self.assertRaises(AuthError) as denied:
+            self.reader.handle(SimpleNamespace(user_id=self.user),self.workspace,conversation,
+                HandleInput(seen_checkpoint=projected['conversation']['seen_checkpoint']))
+        self.assertEqual(denied.exception.status,409)
+        self.db.execute(text("DELETE FROM outbox_events WHERE workspace_id=:w "
+            "AND topic='chat.list.state' AND event_key=:c"),{'w':self.workspace,'c':str(conversation)})
+        fallback = self.reader.history(None,self.workspace,conversation)
+        self.assertEqual(fallback['conversation']['unread_count'],2)
+        self.assertEqual([m['id'] for m in fallback['messages']],[m['id'] for m in before['messages']])
+
     def test_compact_card_keeps_cached_reads_small_and_checks_contact_access_before_cache_hits(self):
         reader, worker, _=self.family_worker_fixture()
         self.project(self.row())

@@ -21,14 +21,18 @@ def log_database_error(logger, error, *, operation):
 def make_engine(settings: Settings) -> Engine:
     return create_engine(
         settings.database_url(),
-        pool_size=2,
-        max_overflow=1,
+        # The API shares this bounded pool with six background workers. Three
+        # connections let a slow history read starve even lightweight requests.
+        pool_size=6,
+        max_overflow=2,
         pool_timeout=3,
         pool_pre_ping=True,
         hide_parameters=True,
         connect_args={
             "connect_timeout": settings.db_connect_timeout,
-            "options": f"-c statement_timeout={settings.db_statement_timeout_ms}",
+            # These are short transactional queries. Compiling their correlated
+            # policy expressions can take longer than the query timeout itself.
+            "options": f"-c statement_timeout={settings.db_statement_timeout_ms} -c jit=off",
         },
     )
 
