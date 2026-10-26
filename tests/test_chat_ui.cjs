@@ -1345,3 +1345,29 @@ test("cancelled outgoing message shows a warning rather than a success check", a
   assert.equal(status.querySelector('[data-icon="check"]'), null);
   assert.match(ui.$("#chat-history .chat-message-error").textContent, /Отправка отменена/);
 });
+
+test('unknown CRM identity shows exact ID and retry reason without forcing manual linking', async t => {
+  const items = [{ ...conversation(1), contact_id: null, status: 'unlinked',
+    identity_resolution: {state:'queued', text:'Карточка ожидает загрузки из CRM', customer_id:'99'} }];
+  const ui = setup(t, url => url.pathname.endsWith('/messages') ? history(identifier(1), [message(1)], {conversation:items[0]}) : undefined, {conversations:items});
+  dockFamily(ui); await ui.app.enter(); ui.$('#chat-details').click(); await flush();
+  assert.equal(ui.$('#chat-details-dialog').open, true);
+  assert.match(ui.$('#chat-details-contact').textContent, /ожидает загрузки.*ID CRM: 99/);
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length, 0);
+  items[0] = {...items[0], identity_resolution:{state:'not_found',text:'CRM не вернула карточку с этим ID, включая архив',customer_id:'99',next_at:'2026-10-27T12:00:00Z'}};
+  await ui.poll(); await flush();
+  assert.match(ui.$('#chat-details-contact').textContent,/не вернула карточку/);
+  assert.match(ui.$('#chat-details-sync').textContent,/Следующая проверка/);
+});
+
+test('identity refresh does not repeatedly reopen an unrelated failed family request on every chat poll', async t => {
+  const items = [{...conversation(1),contact_id:identifier(91)}];
+  let reads=0;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[message(1)],{conversation:items[0]});
+    if(url.pathname.endsWith('/family')){reads++;throw Object.assign(new Error('Unavailable'),{status:503});}
+  },{conversations:items});
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.equal(reads,1);await ui.poll();await flush();await ui.poll();await flush();
+  assert.equal(reads,1);
+});
