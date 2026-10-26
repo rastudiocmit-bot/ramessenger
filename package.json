@@ -13,7 +13,8 @@
     "test:history-states": "node tests/check_history_states.cjs",
     "test:incremental": "node tests/check_incremental_sync.cjs",
     "test:loading": "node tests/check_chat_loading.cjs",
-    "test:startup": "node tests/check_chat_startup.cjs"
+    "test:startup": "node tests/check_chat_startup.cjs",
+    "test:crm-review": "node tests/check_crm_review.cjs"
   },
   "devDependencies": {
     "jsdom": "30.1.3",

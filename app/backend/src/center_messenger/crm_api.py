@@ -18,6 +18,7 @@ from center_messenger.crm_directory import normalized_name, phone_number
 from center_messenger.family_cache import enqueue, cache_status
 from center_messenger.group_links import TOPIC as GROUPS_TOPIC
 from center_messenger import card_preference
+from center_messenger.crm_review import cached_status as current_review_status
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}/directory")
 STATUS = {3: "client", 2: "lead", 1: "archive"}
@@ -460,6 +461,7 @@ class DirectoryReader:
                 person["paid_lesson_count"] = customer_paid_lessons(person["cards"])
                 person["subscriptions"] = customer_subscriptions(person["cards"], groups=person["groups"])
                 group_facts(person["groups"], person["cards"], today=snapshot["today"], subscriptions=person["subscriptions"])
+            review = current_review_status(db, workspace, snapshot, cards, selection=selection)
             return {
                 "id": str(contact_id),
                 "source_contact_id": str(source_contact),
@@ -467,7 +469,7 @@ class DirectoryReader:
                 "name": selection["name"] if selection else contact["display_name"],
                 "phones": contact["phones"],
                 "emails": contact["emails"],
-                "needs_review": bool(contact["needs_review"] or (selection and selection.get("ambiguous"))),
+                **review,
                 "max_connected": bool(contact["max_connected"] or selection),
                 "max_bot_connected": bool(contact["max_bot_connected"]),
                 "students": list(people.values()),

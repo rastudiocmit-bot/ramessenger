@@ -48,7 +48,7 @@ class IdentityTests(unittest.TestCase):
         first={b['external_id']:b['student_id'] for b in bindings}
         self.assertEqual(first[7],shared)
         self.assertNotEqual(first[8],shared)
-        self.assertTrue(contacts[0]['needs_review'])
+        self.assertFalse(contacts[0]['needs_review'])
         _,_,again=project_directory(self.connection,rows,bindings)
         self.assertEqual({b['external_id']:b['student_id'] for b in again},first)
 

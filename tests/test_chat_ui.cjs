@@ -736,6 +736,22 @@ function dockFamily(ui) {
   dialog.close=function(){this.open=false;this.dispatchEvent(new ui.window.Event('close'));};
 }
 
+test('CRM review badge explains current reasons and disappears after the conflict is resolved',async t=>{
+  const family=preparedFamily(1);family.needs_review=true;family.cache.auto_refresh=true;
+  family.review_reasons=[{code:'customer_name_conflict',text:'Различаются ФИО ребёнка в филиалах.',customer_ids:['9160'],branch_ids:['1','2']}];
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return structuredClone(family);
+  });
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  const badge=[...ui.$('#chat-details-badges').children].find(node=>node.textContent==='Нужна проверка в CRM');
+  assert.ok(badge);assert.match(badge.title,/Различаются ФИО/);assert.match(badge.title,/ID AlfaCRM: 9160/);assert.match(badge.title,/Филиалы: 1, 2/);
+  family.needs_review=false;family.review_reasons=[];
+  await runTimer(ui,60000);
+  assert.doesNotMatch(ui.$('#chat-details-badges').textContent,/Нужна проверка/);
+  assert.match(ui.$('#chat-details-badges').textContent,/Клиент/);
+});
+
 function enableBulkDialog(ui) {
   const dialog=ui.$('#chat-bulk-dialog');
   dialog.showModal=function(){this.open=true;};
