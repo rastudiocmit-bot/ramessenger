@@ -143,7 +143,12 @@ class Messaging:
             job = (
                 db.execute(
                     text(
-                        "SELECT message_jobs.* FROM message_jobs "
+                        # Do not deserialize lease timestamps: older native
+                        # deferrals used PostgreSQL -infinity, which Psycopg
+                        # cannot represent as a Python datetime. Selecting only
+                        # the fields needed by the worker recovers those jobs.
+                        "SELECT message_jobs.id,message_jobs.workspace_id,message_jobs.connection_id,"
+                        "message_jobs.subject_id,message_jobs.kind,message_jobs.channel_kind FROM message_jobs "
                         "WHERE message_jobs.due_at<=now() "
                         "AND message_jobs.lease_until<now() "
                         + extra
@@ -382,9 +387,12 @@ class Messaging:
                 )
             except AlfaBrowserError as error:
                 if error.code in {'browser_busy', 'session_check_pending', 'reauth_required'}:
-                    self._state(db, job, command, 'queued', 'session_check_pending')
+                    # A busy browser is shared with history reads; it does not
+                    # imply that the CRM session needs to be restored.
+                    wait_code = 'browser_busy' if error.code == 'browser_busy' else 'session_check_pending'
+                    self._state(db, job, command, 'queued', wait_code)
                     db.execute(text("UPDATE message_jobs SET due_at=now()+interval '10 seconds',"
-                                    "lease_owner=NULL,lease_until='-infinity' WHERE id=:id"), {'id': job['id']})
+                                    "lease_owner=NULL,lease_until='2000-01-01T00:00:00Z' WHERE id=:id"), {'id': job['id']})
                     return
                 self._state(db, job, command, "cancelled" if error.code == "disconnected" else "failed", error.code)
                 self._remove(db, job)
@@ -430,9 +438,9 @@ class Messaging:
                 if command is None or command["state"] != "sending":
                     raise LostLease from None
                 if error.code in {'browser_busy', 'settings_changed', 'session_check_pending'}:
-                    self._state(db, job, command, 'queued', 'session_check_pending')
+                    self._state(db, job, command, 'queued', error.code)
                     db.execute(text("UPDATE message_jobs SET due_at=now()+interval '10 seconds',"
-                                    "lease_owner=NULL,lease_until='-infinity' WHERE id=:id"), {'id': job['id']})
+                                    "lease_owner=NULL,lease_until='2000-01-01T00:00:00Z' WHERE id=:id"), {'id': job['id']})
                     return
                 state = "unknown" if error.code == "send_unknown" else "failed"
                 public_code = "unknown" if state == "unknown" else error.code
