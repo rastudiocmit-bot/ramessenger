@@ -2,10 +2,72 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
+from sqlalchemy.exc import OperationalError
 
 from center_messenger.auth_security import AuthError
 from center_messenger.chat_card_view import CardViews, compact_card
 from center_messenger import chat_events
+from center_messenger.chat_api import ChatReader
+from center_messenger.database import make_engine
+
+
+class StartupTests(unittest.TestCase):
+    def reader(self):
+        reader = ChatReader.__new__(ChatReader)
+        reader.context = Mock(return_value={"channels": []})
+        reader.listing = Mock(return_value={"conversations": [{"id": str(uuid4())}]})
+        reader.history = Mock(return_value={"messages": []})
+        return reader
+
+    def test_a_failed_timeline_preserves_the_authorized_list_and_retries_independently(self):
+        reader = self.reader()
+        reader.history.side_effect = OperationalError("private SQL", {}, RuntimeError("private detail"))
+        with self.assertLogs("center_messenger.chat_api", level="ERROR") as logs:
+            result = reader.bootstrap(None, uuid4(), branch=1)
+        self.assertEqual(result["listing"], reader.listing.return_value)
+        self.assertIsNone(result["history"])
+        self.assertTrue(result["history_pending"])
+        self.assertNotIn("private", " ".join(logs.output))
+        reader.listing.assert_called_once()
+        reader.history.assert_called_once()
+
+    def test_history_authorization_failures_are_not_downgraded_to_pending(self):
+        for status in (401, 403, 503):
+            with self.subTest(status=status):
+                reader = self.reader()
+                reader.history.side_effect = AuthError(status, "Unavailable")
+                with self.assertRaises(AuthError):
+                    reader.bootstrap(None, uuid4())
+
+    def test_failed_context_never_falls_through_to_a_private_list(self):
+        reader = self.reader()
+        reader.context.side_effect = AuthError(403, "No access")
+        with self.assertRaises(AuthError):
+            reader.bootstrap(None, uuid4())
+        reader.listing.assert_not_called()
+
+    def test_short_reads_disable_jit_and_have_bounded_capacity_for_workers_and_requests(self):
+        from sqlalchemy.pool import QueuePool
+        settings = SimpleNamespace(database_url=lambda: "postgresql+psycopg://local/test",
+                                   db_connect_timeout=3, db_statement_timeout_ms=2500)
+        with patch("center_messenger.database.create_engine") as factory:
+            make_engine(settings)
+        options = factory.call_args.kwargs
+        self.assertIn("-c jit=off", options["connect_args"]["options"])
+        self.assertIn("statement_timeout=2500", options["connect_args"]["options"])
+        self.assertEqual(options["pool_timeout"], 3)
+        pool = QueuePool(lambda: Mock(), pool_size=options["pool_size"],
+                         max_overflow=options["max_overflow"], timeout=.01)
+        connections = []
+        try:
+            # Six server workers cannot exhaust the entire foreground capacity.
+            for _ in range(8):
+                connections.append(pool.connect())
+            self.assertLessEqual(options["pool_size"] + options["max_overflow"], 10)
+        finally:
+            for connection in connections:
+                connection.close()
+            pool.dispose()
 
 
 def family():

@@ -1125,6 +1125,66 @@ test('protocol two opens context, first dialogs and messages from one bootstrap 
   assert.match(ui.$('#chat-person').textContent,/Parent 1/);
 });
 
+test('a transient bootstrap outage falls back once to independent authorized reads',async t=>{
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))throw Object.assign(new Error('Service unavailable'),{status:503});
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[message(1)]);
+  });
+  ui.state.chatProtocol=2;await ui.app.enter();
+  assert.deepEqual(ui.ids(),[identifier(1)]);
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/bootstrap')).length,1);
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/context')).length,1);
+  assert.equal(ui.$('#chat-error').textContent,'');
+});
+
+test('bootstrap authorization failures cannot fall back through another route',async t=>{
+  const ui=setup(t,url=>{if(url.pathname.endsWith('/bootstrap'))throw Object.assign(new Error('No access'),{status:403});});
+  ui.state.chatProtocol=2;await ui.app.enter();
+  assert.equal(ui.calls.length,1);assert.equal(ui.$('#chat-error').textContent,'No access');
+});
+
+test('a partial bootstrap displays its dialogs before retrying the failed first timeline',async t=>{
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))return {...bootstrapPayload(),history:null,history_pending:true};
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[message(1)]);
+  });
+  ui.state.chatProtocol=2;await ui.app.enter();
+  assert.match(ui.$('.row-name').textContent,/Parent 1/);assert.equal(ui.calls.length,1);
+  assert.match(ui.$('#chat-history').textContent,/Открываем переписку/);
+  await ui.poll();assert.deepEqual(ui.ids(),[identifier(1)]);
+  assert.equal(ui.$('#chat-error').textContent,'');
+});
+
+test('a failed first history read stays visible through list success and clears only on history recovery',async t=>{
+  let clock=1000,reads=0;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages')){
+      if(++reads===1)throw Object.assign(new Error('Service unavailable'),{status:503});
+      return history(identifier(1),[message(1)]);
+    }
+  });
+  ui.window.Date.now=()=>clock;
+  await ui.app.enter();assert.equal(ui.$('#chat-error').textContent,'Service unavailable');
+  await ui.poll();assert.equal(reads,1);
+  assert.equal(ui.$('#chat-error').textContent,'Service unavailable');
+  clock+=9000;await ui.poll();assert.deepEqual(ui.ids(),[identifier(1)]);
+  assert.equal(ui.$('#chat-error').textContent,'');
+});
+
+test('a healthy event stream does not postpone recovery of an unloaded timeline for forty five seconds',async t=>{
+  const payload={...bootstrapPayload(),history:null,history_pending:true};
+  payload.listing.version='1:2026-10-26';
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/bootstrap'))return payload;
+    if(url.pathname.endsWith('/chat-updates'))return {next_seq:1,updates:[],has_more:false};
+  });
+  ui.state.chatProtocol=2;const sources=eventSources(ui);await ui.app.enter();ui.app.watch();
+  sources[0].dispatchEvent(new ui.window.MessageEvent('ready',{data:JSON.stringify({version:payload.listing.version})}));
+  await flush();await ui.poll();
+  assert.ok(ui.calls.some(url=>url.pathname.endsWith('/messages')));
+  assert.equal(ui.$('#chat-error').textContent,'');
+});
+
 test('late bootstrap cannot replace a filter and client chosen while it was loading',async t=>{
   let release;
   const ui=setup(t,url=>{
