@@ -3342,5 +3342,27 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(self.reader.history(None,self.workspace,self.conversation()['id'])['total'],1)
         self.assertTrue(self.db.execute(text("SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='messages_chat_order_idx')")).scalar_one())
 
+    def test_voice_duration_migration_preserves_keys_and_enforces_the_setting(self):
+        from center_messenger.ai_voice import AiVoice
+        self.db.execute(text("INSERT INTO ai_settings(workspace_id,folder_id,key_ciphertext,voice_enabled) "
+                             "VALUES(:w,'b1gtestfolder','sealed-yandex',true)"),{'w':self.workspace})
+        self.assertEqual(AiVoice.voice_duration(self.db,self.workspace),180)
+        self.db.execute(text("UPDATE ai_settings SET voice_max_seconds=75 WHERE workspace_id=:w"),{'w':self.workspace})
+        self.assertEqual(AiVoice.voice_duration(self.db,self.workspace),75)
+        for value in (14,181):
+            savepoint=self.db.begin_nested()
+            try:
+                with self.assertRaises(Exception):
+                    self.db.execute(text("UPDATE ai_settings SET voice_max_seconds=:v WHERE workspace_id=:w"),{'w':self.workspace,'v':value})
+            finally:
+                savepoint.rollback()
+        path=ROOT/'app/backend/migrations/versions/0018_voice_duration.py'
+        spec=importlib.util.spec_from_file_location('voice_migration',path)
+        migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
+        with Operations.context(MigrationContext.configure(self.db)):
+            migration.downgrade();migration.upgrade()
+        row=self.db.execute(text('SELECT voice_max_seconds,key_ciphertext,voice_enabled FROM ai_settings WHERE workspace_id=:w'),{'w':self.workspace}).one()
+        self.assertEqual(tuple(row),(180,'sealed-yandex',True))
+
 if __name__ == "__main__":
     unittest.main()

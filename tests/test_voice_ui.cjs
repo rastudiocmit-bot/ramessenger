@@ -27,10 +27,10 @@ function setup(t, options={}) {
     createGain(){return{gain:{value:1},connect(){},disconnect(){this.detached=true;}};}
   };
   Object.defineProperty(w.navigator,'mediaDevices',{value:{getUserMedia:()=>{requests++;return options.getUserMedia?options.getUserMedia(createMedia):Promise.resolve(createMedia());}}});
-  const state={voiceInput:true,workspace:{id:'workspace'},pane:'messages',epoch:1};
+  const state={voiceInput:true,voiceMaxSeconds:options.voiceLimit||30,workspace:{id:'workspace'},pane:'messages',epoch:1};
   $('#chat-compose').hidden=false;$('#chat-input').disabled=false;
   w.eval(source);
-  const app=w.CenterVoice({$,state,api:async(url,args)=>{calls.push({url,args});if(url.endsWith('/diagnostic'))return null;return options.transcribe?options.transcribe(args):{text:'Распознанный текст'};},toast:()=>assert.fail('voice must not use global notifications')});
+  const app=w.CenterVoice({$,state,api:async(url,args={})=>{calls.push({url,args});if(url.endsWith('/diagnostic'))return null;if(url.includes('/voice/jobs/'))return options.job?options.job(args):null;return options.transcribe?options.transcribe(args):{text:'Распознанный текст'};},toast:()=>assert.fail('voice must not use global notifications')});
   const pointer=(target,type,extra={})=>{const event=new w.MouseEvent(type,{bubbles:true,cancelable:true,button:0,clientX:100,clientY:100,...extra});
     Object.defineProperties(event,{pointerId:{value:extra.pointerId??1},pointerType:{value:'touch'},isPrimary:{value:true}});$(target).dispatchEvent(event);};
   const advance=async(ms)=>{const until=now+ms;let guard=0;
@@ -104,7 +104,7 @@ test('release unlocks immediately; retry reuses the clip and cannot automaticall
   let count=0;const request=deferred();const s=setup(t,{transcribe:()=>++count===1?request.promise:{text:'Повтор без отправки'}});
   let submits=0;s.$('#chat-compose').addEventListener('submit',event=>{event.preventDefault();submits++;});
   await s.hold();s.frames();s.pointer('#chat-voice','pointerup');await flush();assert.equal(s.locked(),false);assert.equal(s.$('#voice-hold').hidden,true);
-  assert.equal(s.$('#chat-voice-panel').dataset.phase,'working');assert.equal(s.transcriptions()[0].args.timeoutMs,60000);
+  assert.equal(s.$('#chat-voice-panel').dataset.phase,'working');assert.equal(s.transcriptions()[0].args.timeoutMs,30000);
   request.reject(Object.assign(new Error('Нет связи'),{code:'network'}));await flush();assert.match(s.$('#chat-voice-label').textContent,/Запись сохранена/);
   s.$('#chat-voice-retry').click();await flush();assert.equal(s.$('#chat-input').value,'Повтор без отправки');
   assert.equal(s.transcriptions()[0].args.data.audio,s.transcriptions()[1].args.data.audio);await s.advance(30000);assert.equal(submits,0);
@@ -178,4 +178,43 @@ test('processing uses the existing composer row and leaves no persistent extra r
   assert.equal(s.$('#chat-voice-panel').dataset.phase,'working');assert.equal(s.$('#chat-compose').classList.contains('voice-active'),true);
   assert.equal(s.$('#chat-compose').classList.contains('voice-inline'),false);
   pending.resolve({text:''});await flush();assert.equal(s.$('#chat-compose').classList.contains('voice-active'),false);assert.equal(s.$('#chat-voice-panel').hidden,true);
+});
+
+test('a three minute recording survives the old 30 second boundary and stops at its configured limit',async t=>{
+ const s=setup(t,{voiceLimit:180});await s.tap();s.frames(352);await flush();
+ assert.equal(s.transcriptions().length,0);assert.match(s.$('#chat-voice-time').textContent,/3:00$/);
+ s.frames(1758);await flush();
+ assert.equal(s.transcriptions().length,1);
+ assert.equal(Buffer.from(s.transcriptions()[0].args.data.audio,'base64').length,180*32000);
+ assert.equal(s.transcriptions()[0].args.data.background,true);
+ assert.equal(s.$('#chat-input').value,'Распознанный текст');
+});
+test('a smaller recording limit is captured per attempt',async t=>{
+ const s=setup(t,{voiceLimit:45});await s.tap();s.frames(100);s.state.voiceMaxSeconds=180;s.frames(428);await flush();
+ assert.equal(s.transcriptions().length,1);assert.equal(Buffer.from(s.transcriptions()[0].args.data.audio,'base64').length,45*32000);
+});
+test('background recognition polls to completion and releases the result without submitting',async t=>{
+ let polls=0,submits=0;
+ const s=setup(t,{transcribe:()=>({job_id:'job'}),job:args=>args.method==='DELETE'?null:++polls===1?{status:'pending'}:{status:'done',result:{text:'Длинная запись'}}});
+ s.$('#chat-compose').addEventListener('submit',()=>submits++);
+ await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();
+ assert.equal(s.$('#chat-input').value,'');await s.advance(1600);
+ assert.equal(s.$('#chat-input').value,'Длинная запись');assert.equal(submits,0);
+ assert.ok(s.calls.some(c=>c.url.endsWith('/jobs/job')&&c.args.method==='DELETE'));
+});
+test('cancelling an outstanding job discards a late transcript',async t=>{
+ const pending=deferred();
+ const s=setup(t,{transcribe:()=>({job_id:'job'}),job:args=>args.method==='DELETE'?null:pending.promise});
+ await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();await s.advance(800);
+ s.w.document.dispatchEvent(new s.w.CustomEvent('cm:chat-selected'));
+ pending.resolve({status:'done',result:{text:'Чужой диалог'}});await flush();
+ assert.equal(s.$('#chat-input').value,'');assert.ok(s.calls.some(c=>c.args.method==='DELETE'));
+});
+
+test('long recognised text bypasses browser maxlength without silently dropping the tail',async t=>{
+ const text='Длинный текст '.repeat(400);
+ const s=setup(t,{transcribe:()=>({text})});s.$('#chat-input').focus();
+ s.w.document.execCommand=()=>assert.fail('maxlength would truncate the transcript');
+ await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();
+ assert.equal(s.$('#chat-input').value,text.trim());
 });

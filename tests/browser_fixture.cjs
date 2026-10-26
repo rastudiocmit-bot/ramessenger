@@ -7,7 +7,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
   const preferences = { name_order: "parent_first" };
   // Voice input and AI agents (Connections → service settings). Off in the chat unless asked.
   const ai = { settings: { configured: Boolean(options.voice), folder_id: options.voice ? 'b1gexamplefolder0000' : '', key_hint: options.voice ? 'k3y9' : '',
-      voice_enabled: Boolean(options.voice), monthly_limit_rub: null, status: options.voice ? 'active' : 'not_configured', error: null, verified_at: null,
+      voice_enabled: Boolean(options.voice), voice_max_seconds: 180, monthly_limit_rub: null, status: options.voice ? 'active' : 'not_configured', error: null, verified_at: null,
       month_spent_rub: 0, vault_ready: true, models: [{ id: 'yandexgpt-5.1', title: 'YandexGPT Pro 5.1', provider: 'yandex', provider_title: 'Yandex Cloud' },
         { id: 'aliceai-llm', title: 'Alice AI LLM', provider: 'yandex', provider_title: 'Yandex Cloud' },
         { id: 'deepseek-flash', title: 'DeepSeek V4.1 Flash', provider: 'deepseek', provider_title: 'DeepSeek' },
@@ -67,7 +67,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       history:conversations.length?{conversation:conversations[0],messages,next_seq:messages.length,total:messages.length,has_more:false,more_changes:false}:null};
     else if (p.endsWith('/chats/preferences')) { Object.assign(preferences, entry.body); payload=preferences; }
     else if (p.endsWith('/ai/settings')) {
-      if (method === 'PUT') Object.assign(ai.settings, { folder_id: entry.body.folder_id, voice_enabled: entry.body.voice_enabled, monthly_limit_rub: entry.body.monthly_limit_rub,
+      if (method === 'PUT') Object.assign(ai.settings, { voice_max_seconds: entry.body.voice_max_seconds ?? ai.settings.voice_max_seconds, folder_id: entry.body.folder_id, voice_enabled: entry.body.voice_enabled, monthly_limit_rub: entry.body.monthly_limit_rub,
         key_hint: entry.body.clear_key ? '' : entry.body.api_key ? entry.body.api_key.slice(-4) : ai.settings.key_hint, status: 'not_configured' },
         { configured: Boolean(entry.body.folder_id) && !entry.body.clear_key && Boolean(entry.body.api_key || ai.settings.key_hint) });
       payload = ai.settings;

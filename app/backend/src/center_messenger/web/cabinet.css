@@ -789,7 +789,16 @@ body:has(#cabinet[hidden]){overflow:auto}
 .sync-steps b svg{width:14px;height:14px}
 
 /* The history monitor and service forms are separate work areas. */
-.connection-tabs{display:flex;gap:6px;margin:0 auto 18px;padding:0 var(--gut-r) 12px var(--gut-l);max-width:1280px;border-bottom:1px solid var(--line)}
+.connection-tabs{display:flex;gap:6px;margin:0 auto 18px;padding:0 var(--gut-r) 12px var(--gut-l);max-width:1280px;border-bottom:1px solid var(--line);overflow-x:auto;overscroll-behavior-x:contain}
+.connection-tabs button{flex-shrink:0}
+.voice-agent-link{margin-bottom:18px}
+#connections-voice-view .ai-services{display:block;max-width:880px}
+#connections-voice-view .ai-providers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}
+#connections-agents-view #ai-agents-card{max-width:880px}
+.ai-provider-choice{display:flex;flex-wrap:wrap;gap:12px 24px;border:1px solid var(--line);border-radius:12px;margin:14px 0;padding:14px}
+.ai-provider-choice legend{font-size:13px;font-weight:600;padding:0 6px}
+.ai-provider-choice .check-label{margin:0}
+@media(max-width:719px){#connections-voice-view .ai-providers{grid-template-columns:minmax(0,1fr)}}
 .connection-tabs button{display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:10px;color:var(--muted);font-size:13px;font-weight:600;white-space:nowrap}
 .connection-tabs svg{width:17px;height:17px}.connection-tabs button[aria-selected="true"]{background:var(--primary-tint);color:var(--primary-ink)}
 .connection-view{max-width:1280px;margin:0 auto;padding:0 var(--gut-r) 24px var(--gut-l)}

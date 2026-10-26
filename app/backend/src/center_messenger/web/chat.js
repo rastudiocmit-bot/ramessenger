@@ -585,13 +585,15 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-input").disabled = unavailable || Boolean(data.pending);
     if ($("#chat-templates")) $("#chat-templates").disabled = unavailable || Boolean(data.pending);
     const send = $("#chat-send");
-    send.disabled = unavailable || historyBusy || (!data.pending && !$("#chat-input").value.trim());
+    const tooLong = $("#chat-input").value.trim().length > 4000;
+    send.disabled = unavailable || historyBusy || (!data.pending && (!$("#chat-input").value.trim() || tooLong));
     send.classList.toggle("is-retry", Boolean(data.pending));
     send.setAttribute("aria-label", data.pending ? "Проверить отправку" : "Отправить");
     send.title = data.pending ? "Проверить отправку" : "Отправить";
     const hint = $("#chat-send-hint");
-    hint.hidden = !unavailable && !data.pending;
+    hint.hidden = !unavailable && !data.pending && !tooLong;
     hint.textContent = state.workspace?.role === "observer" ? "Роль «Наблюдатель» открывает переписку только для чтения." : unavailable ? "Проверьте подключение MAX, чтобы отправить ответ." : data.pending ? "Связь прервалась. Кнопка проверит тот же запрос без повторного сообщения." : "";
+    if (tooLong && !unavailable && !data.pending) hint.textContent = "Запись сохранена в черновике целиком. Сократите текст до 4000 символов перед отправкой.";
   }
   function compareMessages(a, b) {
     const value = message => BigInt(message.sort_time ?? Math.trunc(new Date(message.occurred_at).getTime()) * 1000);
@@ -889,6 +891,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (!valid(epoch, gen) || !active()) return;
       if (preferenceRevision === (state.chatPreferenceRevision || 0) && !preferenceBusy) applyPreferences(context.preferences);
       state.voiceInput = Boolean(context.voice_input);
+      state.voiceMaxSeconds = context.voice_max_seconds || 180;
       document.dispatchEvent(new CustomEvent("cm:voice-availability"));
       channels = context.channels || [];
       const channel = $("#chat-channel"), chosen = channel.value;
@@ -955,6 +958,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   async function submit() {
     const id = selected, data = cache.get(id); if (!data || historyBusy || !data.meta?.can_send) return;
     const content = $("#chat-input").value.trim(); if (!data.pending && !content) return;
+    if (!data.pending && content.length > 4000) { renderHeader(); return; }
     const epoch = state.epoch, gen = generation;
     data.draft = content;
     const payload = data.pending || { request_id: crypto.randomUUID(), text: content, seen_inbound_seq: data.meta.inbound_seq, seen_checkpoint: data.meta.seen_checkpoint };

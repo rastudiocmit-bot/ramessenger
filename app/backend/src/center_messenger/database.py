@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0017_chat_read_versions"
+SCHEMA_REVISION = "0018_voice_duration"
 
 
 def log_database_error(logger, error, *, operation):

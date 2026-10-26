@@ -44,6 +44,40 @@ def http_error(status):
 
 
 class RecognizeTest(unittest.TestCase):
+    def test_three_minutes_are_split_losslessly_and_billed_per_request(self):
+        audio = y.silence(180)
+        self.assertEqual(y.check_audio(audio), 180)
+        chunks = y.audio_chunks(audio)
+        self.assertEqual(b''.join(chunks), audio)
+        self.assertTrue(all(0 < len(chunk) <= 960000 and len(chunk) % 2 == 0 for chunk in chunks))
+        self.assertEqual(y.audio_cost(audio), sum(y.stt_cost(y.audio_seconds(len(c))) for c in chunks))
+        with self.assertRaises(y.YandexError):
+            y.check_audio(audio, 60)
+
+    def test_parallel_recognition_preserves_order_even_when_first_chunk_finishes_last(self):
+        import struct
+        import time
+        audio = b''.join(struct.pack('<h', value) * (30 * y.SAMPLE_RATE) for value in (1000, 2000, 3000))
+        def opener(request, timeout):
+            value = struct.unpack('<h', request.data[:2])[0]
+            if value == 1000:
+                time.sleep(0.03)
+            self.assertLessEqual(len(request.data), 960000)
+            return FakeResponse(json.dumps({'result':str(value)}).encode())
+        self.assertEqual(y.YandexClient(opener).recognize(audio, api_key=KEY), '1000 2000 3000')
+
+    def test_a_failed_piece_never_returns_a_partial_transcript_but_counts_successful_pieces(self):
+        import struct
+        audio = struct.pack('<h',1000) * (30*y.SAMPLE_RATE) + struct.pack('<h',2000) * (30*y.SAMPLE_RATE)
+        def opener(request,timeout):
+            if request.data[:2] == struct.pack('<h',2000):
+                raise http_error(503)
+            return FakeResponse(b'{"result":"first piece"}')
+        with self.assertRaises(y.YandexError) as error:
+            y.YandexClient(opener).recognize(audio,api_key=KEY)
+        self.assertEqual(error.exception.code,'unavailable')
+        self.assertAlmostEqual(error.exception.billed_cost,y.stt_cost(30))
+
     def test_request_shape_and_result(self):
         opener = FakeOpener({"result": "  добрый   день  "})
         text = y.YandexClient(opener).recognize(y.silence(1), api_key=KEY)
