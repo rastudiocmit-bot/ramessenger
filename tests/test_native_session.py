@@ -435,6 +435,60 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(self.setting()['session_ciphertext'], old)
         self.assertEqual(self.db.execute(text('SELECT state FROM send_commands WHERE id=:id'), {'id': command['command_id']}).scalar_one(), 'cancelled')
 
+    def test_history_browser_lease_defers_send_without_claiming_logout(self):
+        messaging, command = self.queue_operator_reply()
+        operation = self.service.sessions.claim(self.workspace, self.channel)
+        try:
+            messaging.run_next('send', 'alfa_max_browser')
+            row = self.db.execute(text('SELECT state,last_error_code FROM send_commands WHERE id=:id'),
+                                  {'id': command['command_id']}).mappings().one()
+            self.assertEqual((row['state'], row['last_error_code']), ('queued', 'browser_busy'))
+            self.service.browser.send.assert_not_called()
+            self.assertFalse(control(self.setting()).get('needs_check'))
+            message = self.reader.history(None, self.workspace, self.conversation()['id'])['messages'][-1]
+            self.assertIn('Браузер AlfaCRM занят', message['error'])
+            self.assertNotIn('авторизац', message['error'])
+        finally:
+            self.service.sessions.release(operation)
+        self.db.execute(text("UPDATE message_jobs SET due_at=now()-interval '1 second' WHERE subject_id=:id"),
+                        {'id': command['command_id']})
+        messaging.run_next('send', 'alfa_max_browser')
+        self.service.browser.send.assert_called_once()
+        self.assertEqual(self.db.execute(text('SELECT state FROM send_commands WHERE id=:id'),
+                                        {'id': command['command_id']}).scalar_one(), 'accepted')
+
+    def test_changed_snapshot_defers_send_with_its_actual_reason(self):
+        messaging, command = self.queue_operator_reply()
+        with patch.object(self.service, 'send_native', side_effect=AlfaBrowserError('settings_changed')):
+            messaging.run_next('send', 'alfa_max_browser')
+        row = self.db.execute(text('SELECT state,last_error_code FROM send_commands WHERE id=:id'),
+                              {'id': command['command_id']}).mappings().one()
+        self.assertEqual((row['state'], row['last_error_code']), ('queued', 'settings_changed'))
+        self.assertFalse(control(self.setting()).get('needs_check'))
+        self.service.browser.send.assert_not_called()
+
+    def test_existing_negative_infinity_wait_is_claimed_and_sent_once(self):
+        messaging, command = self.queue_operator_reply()
+        self.db.execute(text("UPDATE message_jobs SET lease_until='-infinity',lease_owner=NULL "
+                             "WHERE subject_id=:id"), {'id': command['command_id']})
+        self.db.execute(text("UPDATE send_commands SET last_error_code='session_check_pending' "
+                             "WHERE id=:id"), {'id': command['command_id']})
+        messaging.run_next('send', 'alfa_max_browser')
+        messaging.run_next('send', 'alfa_max_browser')
+        self.service.browser.send.assert_called_once()
+        self.assertEqual(self.db.execute(text('SELECT state FROM send_commands WHERE id=:id'),
+                                        {'id': command['command_id']}).scalar_one(), 'accepted')
+
+    def test_actual_authorization_check_retains_auth_wait_reason(self):
+        messaging, command = self.queue_operator_reply()
+        self.pending()
+        messaging.run_next('send', 'alfa_max_browser')
+        row = self.db.execute(text('SELECT state,last_error_code FROM send_commands WHERE id=:id'),
+                              {'id': command['command_id']}).mappings().one()
+        self.assertEqual((row['state'], row['last_error_code']), ('queued', 'session_check_pending'))
+        self.assertTrue(control(self.setting()).get('needs_check'))
+        self.service.browser.send.assert_not_called()
+
     def test_unknown_submission_is_not_automatically_repeated(self):
         messaging, command = self.queue_operator_reply()
         self.service.browser.send.side_effect = AlfaBrowserError('send_unknown')
