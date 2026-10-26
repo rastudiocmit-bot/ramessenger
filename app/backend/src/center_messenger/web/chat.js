@@ -1543,12 +1543,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-details-student").replaceChildren(node("div", undefined, "family-skel tall"), node("div", undefined, "family-skel"), node("div", undefined, "family-skel tall"));
   }
   function familyPending(name) {
+    delete detailsDialog.dataset.identityPending;
     detailsSeq += 1; family = null; familyRenderKey = ""; familySelected = null; familyChildChoice = false; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     detailsDialog.querySelector(".family-scroll").scrollTop = 0;
     $("#chat-details-name").textContent = name || "Загружаем сведения…";
     detailsDialog.classList.add("is-loading"); detailsDialog.classList.remove("is-refreshing"); familySkeleton();
   }
   function familyUnlinked() {
+    detailsDialog.dataset.identityPending = "true";
     const item = currentItem(), data = cache.get(selected), name = item?.name || data?.meta?.peer_name || "Контакт MAX";
     family = null; detailsDialog.classList.remove("is-loading");
     $("#chat-details-name").textContent = name;
@@ -1563,7 +1565,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (isAdmin()) { const link = button("Связать с CRM", "family-link-btn", () => openLink(selected)); detail.append(link); }
   }
   function refreshIdentityDetails() {
-    if (!detailsDialog.open || family || detailsDialog.classList.contains("is-loading") || detailsDialog.classList.contains("is-closing")) return;
+    if (!detailsDialog.open || detailsDialog.dataset.identityPending !== "true" || family || detailsDialog.classList.contains("is-loading") || detailsDialog.classList.contains("is-closing")) return;
     const meta = { ...cache.get(selected)?.meta, ...currentItem() };
     if (meta.contact_id) openDetails({ auto: true }).catch(error => fail(error));
     else familyUnlinked();

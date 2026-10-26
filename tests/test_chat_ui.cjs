@@ -1359,3 +1359,15 @@ test('unknown CRM identity shows exact ID and retry reason without forcing manua
   assert.match(ui.$('#chat-details-contact').textContent,/не вернула карточку/);
   assert.match(ui.$('#chat-details-sync').textContent,/Следующая проверка/);
 });
+
+test('identity refresh does not repeatedly reopen an unrelated failed family request on every chat poll', async t => {
+  const items = [{...conversation(1),contact_id:identifier(91)}];
+  let reads=0;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[message(1)],{conversation:items[0]});
+    if(url.pathname.endsWith('/family')){reads++;throw Object.assign(new Error('Unavailable'),{status:503});}
+  },{conversations:items});
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.equal(reads,1);await ui.poll();await flush();await ui.poll();await flush();
+  assert.equal(reads,1);
+});
