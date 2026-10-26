@@ -23,6 +23,7 @@ class AiSettingsInput(InputModel):
     clear_key: bool = False
     voice_enabled: bool = False
     monthly_limit_rub: float | None = Field(default=None, ge=0, le=1_000_000)
+    voice_max_seconds: int | None = Field(default=None, ge=15, le=180, strict=True)
 
 
 class DeepSeekInput(InputModel):
@@ -52,6 +53,7 @@ class TranscribeInput(InputModel):
     audio: str = Field(min_length=4, max_length=(MAX_AUDIO_BYTES * 4) // 3 + 8)
     agent_id: UUID | None = None
     attempt_id: UUID | None = None
+    background: bool = False
 
 
 class VoiceDiagnosticInput(InputModel):
@@ -64,7 +66,7 @@ class VoiceDiagnosticInput(InputModel):
     audio_state: Literal["running", "suspended", "interrupted", "closed", "unknown"]
     elapsed_ms: int = Field(ge=0, le=300000, strict=True)
     first_frame_ms: int | None = Field(default=None, ge=0, le=120000, strict=True)
-    captured_ms: int = Field(ge=0, le=30000, strict=True)
+    captured_ms: int = Field(ge=0, le=180000, strict=True)
 
 
 def voice(request: Request):
@@ -139,6 +141,8 @@ def transcribe(workspace_id: UUID, model: TranscribeInput, request: Request):
         raise AuthError(422, "Запись повреждена. Попробуйте записать ещё раз.") from None
     started, status = monotonic(), 200
     try:
+        if model.background:
+            return voice(request).jobs.create(actor, workspace_id, audio, model.agent_id)
         return voice(request).transcribe(actor, workspace_id, audio, model.agent_id)
     except AuthError as error:
         status = error.status
@@ -151,6 +155,16 @@ def transcribe(workspace_id: UUID, model: TranscribeInput, request: Request):
             "Voice request workspace=%s attempt=%s status=%s elapsed_ms=%s",
             workspace_id, model.attempt_id, status, round((monotonic() - started) * 1000),
         )
+
+
+@router.get("/voice/jobs/{job_id}")
+def voice_job(workspace_id: UUID, job_id: UUID, request: Request):
+    return voice(request).jobs.get(identity(request), workspace_id, job_id)
+
+
+@router.delete("/voice/jobs/{job_id}", status_code=204)
+def cancel_voice_job(workspace_id: UUID, job_id: UUID, request: Request):
+    voice(request).jobs.get(identity(request, mutation=True), workspace_id, job_id, cancel=True)
 
 
 @router.post("/voice/diagnostic", status_code=204)

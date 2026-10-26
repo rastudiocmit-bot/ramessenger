@@ -78,6 +78,9 @@ class FakeDB:
         sql, params = str(sql), params or {}
         if sql.startswith("SELECT * FROM ai_settings"):
             return Result([self.settings] if self.settings else [])
+        if sql.startswith("UPDATE ai_settings SET status="):
+            self.settings.update(status=params['s'],last_error_code=params['e'])
+            return Result()
         if "coalesce(sum(u.cost_rub)" in sql:
             return Result(scalar=self.spent)
         if sql.startswith("INSERT INTO ai_settings"):
@@ -88,7 +91,7 @@ class FakeDB:
                 return Result()
             self.settings = (self.settings or blank_settings()) | {
                 "folder_id": params["f"], "key_ciphertext": params["c"], "key_hint": params["h"],
-                "voice_enabled": params["v"], "monthly_limit_rub": params["l"], "status": params["s"],
+                "voice_max_seconds": params["duration"], "voice_enabled": params["v"], "monthly_limit_rub": params["l"], "status": params["s"],
                 "last_error_code": None, "verified_at": None}
             return Result()
         if sql.startswith("INSERT INTO auth_events"):  # the real accounts.audit
@@ -231,7 +234,7 @@ class TranscribeTest(unittest.TestCase):
             ({"voice": False}, silence(2), 409),
             ({"configured": False}, silence(2), 409),
             ({"limit": 10.0}, silence(2), 429),
-            ({}, silence(31), 413),
+            ({}, silence(181), 413),
             ({}, b"\x00", 422),
         ]
         for options, audio, status in cases:

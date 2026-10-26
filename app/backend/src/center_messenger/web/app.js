@@ -431,8 +431,9 @@
     const label = $(selector); label.textContent = text; label.closest(".connection-tile").dataset.state = mode;
   }
   function connectionView(view) {
+    if (!["monitor", "settings", "voice", "agents"].includes(view)) view = "monitor";
     state.connectionsView = view;
-    for (const name of ["monitor", "settings"]) {
+    for (const name of ["monitor", "settings", "voice", "agents"]) {
       show($("#connections-" + name + "-view"), name === view);
       $("#connections-" + name + "-tab").setAttribute("aria-selected", String(name === view));
       $("#connections-" + name + "-tab").tabIndex = name === view ? 0 : -1;
@@ -442,7 +443,9 @@
   $(".connection-tabs").addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const view = event.key === "Home" ? "monitor" : event.key === "End" ? "settings" : state.connectionsView === "settings" ? "monitor" : "settings";
+    const names = ["monitor", "settings", "voice", "agents"], index = names.indexOf(state.connectionsView || "monitor");
+    const view = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
+      : names[(index + (event.key === "ArrowLeft" ? names.length - 1 : 1)) % names.length];
     connectionView(view); $("#connections-" + view + "-tab").focus();
   });
   function alfaButtons() {
@@ -575,7 +578,7 @@
     alfaMaxButtons();
     const hasSession = payload.configured && payload.state !== "not_configured";
     show($("#history-monitor-empty"), !hasSession);
-    if (previousState !== payload.state && payload.state !== "active") connectionView("settings");
+    if (previousState !== payload.state && payload.state !== "active" && !["voice", "agents"].includes(state.connectionsView)) connectionView("settings");
     if (hasSession) alfaMaxProgress.start();
     else { alfaMaxProgress.reset(); connectionSummary("#alfa-history-summary", "Сначала подключите MAX", "waiting"); }
   }

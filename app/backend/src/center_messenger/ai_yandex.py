@@ -10,14 +10,17 @@ import math
 import re
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from array import array
 from urllib.parse import urlencode
 
 STT_URL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
 COMPLETION_URL = "https://ai.api.cloud.yandex.net/foundationModels/v1/completion"
 SAMPLE_RATE = 16000
 BYTES_PER_SECOND = SAMPLE_RATE * 2
-MAX_AUDIO_BYTES = 1_000_000  # SpeechKit synchronous limit
-MAX_SECONDS = 30
+MAX_SECONDS = 180
+MAX_AUDIO_BYTES = MAX_SECONDS * BYTES_PER_SECOND
+STT_CHUNK_BYTES = 30 * BYTES_PER_SECOND  # each provider request stays below 1 MB
 MIN_AUDIO_BYTES = BYTES_PER_SECOND // 10  # 0.1 s
 STT_TIMEOUT = 10
 COMPLETION_TIMEOUT = 15
@@ -70,19 +73,44 @@ def audio_seconds(size):
     return size / BYTES_PER_SECOND
 
 
-def check_audio(audio):
+def check_audio(audio, max_seconds=MAX_SECONDS):
     """Reject what SpeechKit would refuse, before paying for a call."""
     if not isinstance(audio, (bytes, bytearray)) or len(audio) % 2:
         raise YandexError("audio_format")
     if len(audio) < MIN_AUDIO_BYTES:
         raise YandexError("audio_short")
-    if len(audio) > MAX_AUDIO_BYTES or audio_seconds(len(audio)) > MAX_SECONDS + 0.5:
+    if len(audio) > MAX_AUDIO_BYTES or audio_seconds(len(audio)) > max_seconds:
         raise YandexError("audio_long")
     return audio_seconds(len(audio))
 
 
 def stt_cost(seconds):
     return math.ceil(max(seconds, 0.001) / 15) * STT_UNIT_RUB
+
+
+def audio_chunks(audio):
+    """Contiguous PCM pieces; prefer a quiet 40 ms window before the 30 s edge.
+
+    No overlapping samples, discarded tails or reordered transcripts. A quiet
+    boundary reduces splitting words; continuous speech falls back to 30 s.
+    """
+    chunks, start = [], 0
+    while len(audio) - start > STT_CHUNK_BYTES:
+        end = start + STT_CHUNK_BYTES
+        window = BYTES_PER_SECOND // 25
+        candidates = range(end - 2 * BYTES_PER_SECOND, end, window)
+        energies = [(sum(abs(v) for v in array('h', audio[p:p + window])), p + window // 2)
+                    for p in candidates]
+        energy, quiet = min(energies)
+        if energy < (window // 2) * 200:
+            end = quiet
+        chunks.append(audio[start:end]); start = end
+    chunks.append(audio[start:])
+    return chunks
+
+
+def audio_cost(audio):
+    return sum(stt_cost(audio_seconds(len(chunk))) for chunk in audio_chunks(audio))
 
 
 def model_cost(model, input_tokens, output_tokens):
@@ -148,6 +176,22 @@ class YandexClient:
         }
 
     def recognize(self, audio, *, api_key, profanity=True):
+        check_audio(audio)
+        chunks = audio_chunks(audio)
+        if len(chunks) > 1:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(self.recognize, chunk, api_key=api_key, profanity=profanity) for chunk in chunks]
+                parts, billed, failure = [], 0.0, None
+                for chunk, future in zip(chunks, futures):
+                    try:
+                        parts.append(future.result())
+                        billed += stt_cost(audio_seconds(len(chunk)))
+                    except YandexError as error:
+                        failure = error
+                if failure:
+                    failure.billed_cost = billed
+                    raise failure
+                return " ".join(part for part in parts if part)
         query = urlencode({"lang": "ru-RU", "format": "lpcm", "sampleRateHertz": str(SAMPLE_RATE),
                            "profanityFilter": "true" if profanity else "false"})
         payload = self._post(f"{STT_URL}?{query}", bytes(audio),

@@ -19,7 +19,7 @@ from center_messenger.accounts import audit
 from center_messenger.ai_deepseek import DeepSeekClient
 from center_messenger.ai_yandex import (
     DEFAULT_MODEL, DEFAULT_PROMPT, MODELS, YandexClient, YandexError, accept_normalized,
-    check_audio, key_hint, silence, stt_cost, valid_folder, valid_key,
+    check_audio, key_hint, silence, stt_cost, audio_cost, MAX_SECONDS, valid_folder, valid_key,
 )
 from center_messenger.auth_security import AuthError
 
@@ -62,7 +62,7 @@ ERRORS = {
     "model_unknown": (422, "Эта модель не поддерживается."),
     "audio_format": (422, "Запись повреждена. Попробуйте записать ещё раз."),
     "audio_short": (422, "Запись слишком короткая."),
-    "audio_long": (413, "Запись длиннее 30 секунд."),
+    "audio_long": (413, "Запись превышает допустимую длительность голосового ввода."),
 }
 
 
@@ -118,6 +118,8 @@ class AiVoice:
         self.accounts, self.vault = alfa.accounts, alfa.vault
         self.client = client or YandexClient()
         self.deepseek = deepseek or DeepSeekClient()
+        from center_messenger.voice_jobs import VoiceJobs
+        self.jobs = VoiceJobs(self)
 
     # ── reading ────────────────────────────────────────────────────────────
     @staticmethod
@@ -143,6 +145,11 @@ class AiVoice:
             "FROM ai_settings WHERE workspace_id=:w"
         ), {"w": workspace}).scalar_one_or_none())
 
+    @staticmethod
+    def voice_duration(db, workspace):
+        return db.execute(text("SELECT voice_max_seconds FROM ai_settings WHERE workspace_id=:w"),
+                          {"w": workspace}).scalar_one_or_none() or MAX_SECONDS
+
     def _public(self, db, workspace):
         row, spent = self._settings(db, workspace), self._month_spent(db, workspace)
         error = row["last_error_code"] if row else None
@@ -151,6 +158,7 @@ class AiVoice:
             "folder_id": row["folder_id"] if row else "",
             "key_hint": row["key_hint"] if row else "",
             "voice_enabled": bool(row and row["voice_enabled"]),
+            "voice_max_seconds": row.get("voice_max_seconds", MAX_SECONDS) if row else MAX_SECONDS,
             "monthly_limit_rub": float(row["monthly_limit_rub"]) if row and row["monthly_limit_rub"] is not None else None,
             "status": row["status"] if row else "not_configured",
             "error": _message(error)[1] if error else None,
@@ -216,6 +224,11 @@ class AiVoice:
                     raise AuthError(422, "API-ключ выглядит неверно: латинские буквы, цифры, «-» и «_».")
                 cipher, hint = self.vault.seal(workspace, SECRET_ID, {"api_key": key}, purpose=PURPOSE), key_hint(key)
             voice = bool(data.get("voice_enabled"))
+            duration = data.get("voice_max_seconds")
+            if duration is None:
+                duration = old.get("voice_max_seconds", MAX_SECONDS) if old else MAX_SECONDS
+            if type(duration) is not int or not 15 <= duration <= MAX_SECONDS:
+                raise AuthError(422, "Длительность записи — целое число от 15 до 180 секунд.")
             if voice and not (cipher and folder):
                 raise AuthError(422, "Чтобы включить голосовой ввод, укажите API-ключ и ID каталога.")
             limit = data.get("monthly_limit_rub")
@@ -232,16 +245,17 @@ class AiVoice:
             status = "not_configured" if reset or not old else old["status"]
             db.execute(text(
                 "INSERT INTO ai_settings(workspace_id,folder_id,key_ciphertext,key_hint,voice_enabled,"
-                "monthly_limit_rub,status,updated_by) VALUES (:w,:f,:c,:h,:v,:l,:s,:u) "
+                "monthly_limit_rub,status,voice_max_seconds,updated_by) VALUES (:w,:f,:c,:h,:v,:l,:s,:duration,:u) "
                 "ON CONFLICT (workspace_id) DO UPDATE SET folder_id=EXCLUDED.folder_id,"
                 "key_ciphertext=EXCLUDED.key_ciphertext,key_hint=EXCLUDED.key_hint,"
                 "voice_enabled=EXCLUDED.voice_enabled,monthly_limit_rub=EXCLUDED.monthly_limit_rub,"
+                "voice_max_seconds=EXCLUDED.voice_max_seconds,"
                 "status=EXCLUDED.status,"
                 "last_error_code=CASE WHEN :reset THEN NULL ELSE ai_settings.last_error_code END,"
                 "verified_at=CASE WHEN :reset THEN NULL ELSE ai_settings.verified_at END,"
                 "version=ai_settings.version+1,updated_at=now(),updated_by=EXCLUDED.updated_by"
             ), {"w": workspace, "f": folder, "c": cipher, "h": hint, "v": voice, "l": limit,
-                "s": status, "u": actor.user_id, "reset": reset})
+                "s": status, "u": actor.user_id, "reset": reset, "duration": duration})
             audit(db, "ai_settings_updated", user_id=actor.user_id, workspace_id=workspace)
             return self._public(db, workspace)
 
@@ -253,11 +267,6 @@ class AiVoice:
         cost, tokens, error = stt_cost(0.5), (0, 0), None
         try:
             self.client.recognize(silence(0.5), api_key=key)
-            answer = self.client.complete("Проверка связи", prompt="Ответь одним словом: готово.",
-                                          model=DEFAULT_MODEL, temperature=0, api_key=key,
-                                          folder_id=folder, max_tokens=20)
-            tokens = (answer["input_tokens"], answer["output_tokens"])
-            cost += model_cost(DEFAULT_MODEL, *tokens)
         except YandexError as failure:
             error = failure.code
         with self.accounts.transaction(actor) as db:
@@ -436,7 +445,7 @@ class AiVoice:
         try:
             answer = client.complete(raw, prompt=agent["prompt"], model=agent["model"],
                                      temperature=float(agent["temperature"]), api_key=key,
-                                     folder_id=creds["folder"], max_tokens=min(2000, max(200, len(raw) * 2)))
+                                     folder_id=creds["folder"], max_tokens=min(6000, max(200, len(raw) * 2)))
         except YandexError as failure:
             return raw, (0, 0), 0.0, True, failure.code
         tokens = (answer["input_tokens"], answer["output_tokens"])
@@ -488,6 +497,9 @@ class AiVoice:
             row = self._settings(db, workspace)
             if not row or not row["voice_enabled"] or not row["key_ciphertext"] or not row["folder_id"]:
                 raise AuthError(409, "Голосовой ввод не настроен. Обратитесь к администратору.")
+            check_limit = row.get("voice_max_seconds", MAX_SECONDS)
+            if seconds > check_limit:
+                raise AuthError(413, f"Допустимая длительность записи — {check_limit} секунд.")
             limit = row["monthly_limit_rub"]
             if limit is not None and self._month_spent(db, workspace) >= float(limit):
                 raise AuthError(429, "Лимит голосового ввода на этот месяц исчерпан.")
@@ -507,11 +519,11 @@ class AiVoice:
                 raise AuthError(429, "Слишком много голосовых сообщений за час. Повторите позже.",
                                 retry_after=error.retry_after) from None
             raise
-        cost = stt_cost(seconds)
+        cost = audio_cost(audio)
         try:
             raw = self.client.recognize(audio, api_key=key)
         except YandexError as failure:
-            self._usage(actor, workspace, kind="voice", seconds=seconds, cost=0.0, outcome="error",
+            self._usage(actor, workspace, kind="voice", seconds=seconds, cost=getattr(failure, "billed_cost", 0.0), outcome="error",
                         error=failure.code)
             raise _fail(failure.code) from None
         result = {"raw_text": raw, "text": raw, "seconds": round(seconds, 1), "agent": None,

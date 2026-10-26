@@ -59,10 +59,10 @@ class SecurityMiddleware:
             "DELETE",
         }
         path = scope["path"]
-        # Voice input carries up to 1 MB of audio as base64 JSON; agent prompts run to
+        # Voice input carries up to 180 s of mono PCM as base64 JSON; prompts run to
         # 4000 Cyrillic characters. Every other mutation keeps its small limit.
         body_limit = (
-            1_400_000 if path.endswith("/voice/transcribe")
+            7_700_000 if path.endswith("/voice/transcribe")
             else 32768 if path.endswith("/messages") or "/ai/agents" in path
             else 8192
         )

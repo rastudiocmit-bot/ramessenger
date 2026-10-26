@@ -1321,3 +1321,13 @@ test('a long dialog list renders a bounded window and preserves its visible clie
   scroll.scrollTop=0;scroll.dispatchEvent(new ui.window.Event('scroll'));await flush();
   assert.equal(list.querySelector('.chat-row').dataset.id,identifier(600));
 });
+
+test('an oversized dictated draft stays intact and cannot be submitted until shortened',async t=>{
+ let sent=0;const ui=setup(t,(url,args)=>{if(url.pathname.endsWith('/messages')&&args?.method==='POST')sent++;});await ui.app.enter();
+ const input=ui.$('#chat-input');input.value='Текст '.repeat(800);input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
+ assert.equal(ui.$('#chat-send').disabled,true);assert.match(ui.$('#chat-send-hint').textContent,/4000/);
+ ui.$('#chat-compose').dispatchEvent(new ui.window.Event('submit',{cancelable:true}));await flush();
+ assert.equal(input.value,'Текст '.repeat(800));assert.equal(sent,0);
+ input.value='Короткий ответ';input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
+ assert.equal(ui.$('#chat-send').disabled,false);assert.equal(ui.$('#chat-send-hint').hidden,true);
+});

@@ -2,7 +2,8 @@
 // Audio and retry clips live only in memory. Permission/startup/recognition belong
 // to one attempt and one chat; cancelling fences even promises browsers cannot abort.
 window.CenterVoice = ({ $, state, api }) => {
-  const LIMIT = 30, RATE = 16000, HOLD_MS = 220, STREAM_HOLD_MS = 450;
+  const RATE = 16000, HOLD_MS = 220, STREAM_HOLD_MS = 450;
+  const recordingLimit = () => Math.max(15, Math.min(180, Number(state.voiceMaxSeconds) || 180));
   const CANCEL_PX = 90, STILL_PX = 10;
   const compose = $("#chat-compose"), input = $("#chat-input"), button = $("#chat-voice"), stream = $("#chat-stream");
   const panel = $("#chat-voice-panel"), label = $("#chat-voice-label"), time = $("#chat-voice-time");
@@ -115,12 +116,13 @@ window.CenterVoice = ({ $, state, api }) => {
     const data = { attempt_id: mine.id, outcome, code, stage: status, audio_state: ["running", "suspended", "interrupted", "closed"].includes(mine.context?.state) ? mine.context.state : "unknown",
       elapsed_ms: Math.min(300000, Math.round(performance.now() - mine.started)),
       first_frame_ms: mine.firstFrame == null ? null : Math.min(120000, Math.round(mine.firstFrame - mine.started)),
-      captured_ms: Math.min(30000, Math.round((mine.frames || 0) / (mine.rate || RATE) * 1000)) };
+      captured_ms: Math.min(180000, Math.round((mine.frames || 0) / (mine.rate || RATE) * 1000)) };
     api(`/workspaces/${mine.workspace}/voice/diagnostic`, { method: "POST", data, timeoutMs: 5000 }).catch(() => {});
   }
   function reset() {
     const mine = attempt; attempt = null; generation += 1;
     if (mine) {
+      releaseJob(mine);
       stopCapture(mine); mine.controller.abort();
       if (status === "starting") discardContext(mine.context);
     }
@@ -165,9 +167,9 @@ window.CenterVoice = ({ $, state, api }) => {
   async function start(prepared = prepare()) {
     if (!available() || attempt) return;
     const mine = { id: crypto.randomUUID(), generation, workspace: state.workspace.id, epoch: state.epoch,
-      controller: new AbortController(), started: performance.now(), frames: 0, rate: RATE };
+      controller: new AbortController(), started: performance.now(), frames: 0, rate: RATE, limit: recordingLimit() };
     attempt = mine; phase("starting", "Включаем микрофон…");
-    if (hold?.armed) { holdTime.textContent = `0:00 / ${clock(LIMIT)}`; holdPhase("starting"); render(); }
+    if (hold?.armed) { holdTime.textContent = `0:00 / ${clock(mine.limit)}`; holdPhase("starting"); render(); }
     let media, source, processor, gain;
     try {
       if (prepared.error) throw prepared.error;
@@ -189,14 +191,14 @@ window.CenterVoice = ({ $, state, api }) => {
         const data = event.inputBuffer.getChannelData(0); if (!data.length) return;
         const now = performance.now(); capture.lastFrame = now;
         if (mine.firstFrame == null) { mine.firstFrame = now; phase("recording", "Идёт запись"); if (hold?.armed) holdPhase("recording"); render(); }
-        const remaining = Math.max(0, Math.floor(LIMIT * capture.rate - mine.frames));
+        const remaining = Math.max(0, Math.floor(mine.limit * capture.rate - mine.frames));
         const block = new Float32Array(data.subarray(0, remaining)); capture.chunks.push(block); mine.frames += block.length;
         let sum = 0; for (const value of block) sum += value * value;
         capture.peak = Math.max(capture.peak * 0.85, Math.sqrt(sum / (block.length || 1)));
-        time.textContent = holdTime.textContent = `${clock(mine.frames / capture.rate)} / ${clock(LIMIT)}`;
+        time.textContent = holdTime.textContent = `${clock(mine.frames / capture.rate)} / ${clock(mine.limit)}`;
         level.style.transform = `scaleX(${Math.min(1, capture.peak * 6).toFixed(3)})`;
         orb.style.setProperty("--level", Math.min(1, capture.peak * 6).toFixed(3));
-        if (mine.frames / capture.rate >= LIMIT) finish();
+        if (mine.frames / capture.rate >= mine.limit) finish();
       };
       context.onstatechange = () => { if (current(mine) && mine.capture && context.state !== "running") fail(mine, failure("audio_interrupted")); };
       for (const track of media.getTracks()) track.onended = () => { if (current(mine) && mine.capture) fail(mine, failure("capture_stalled")); };
@@ -241,10 +243,10 @@ window.CenterVoice = ({ $, state, api }) => {
     holdPhase(-dy > CANCEL_PX ? "cancel" : "recording");
   }
   // 16 kHz, 16-bit little-endian LPCM accepted directly by SpeechKit.
-  function encode(chunks, rate) {
+  function encode(chunks, rate, limit) {
     const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0), samples = new Float32Array(total);
     let offset = 0; for (const chunk of chunks) { samples.set(chunk, offset); offset += chunk.length; }
-    const ratio = rate / RATE, length = Math.min(Math.floor(total / ratio), LIMIT * RATE), out = new Int16Array(length);
+    const ratio = rate / RATE, length = Math.min(Math.floor(total / ratio), limit * RATE), out = new Int16Array(length);
     for (let i = 0; i < length; i += 1) {
       const from = Math.floor(i * ratio), to = Math.max(from + 1, Math.floor((i + 1) * ratio));
       let sum = 0; for (let j = from; j < to && j < total; j += 1) sum += samples[j];
@@ -262,7 +264,7 @@ window.CenterVoice = ({ $, state, api }) => {
     const top = scroller.scrollTop, historyTop = stream.scrollTop;
     const following = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48;
     let inserted = false;
-    if (document.activeElement === input) {
+    if (document.activeElement === input && (input.maxLength < 0 || before.length + joined.length <= input.maxLength)) {
       input.setSelectionRange(before.length, before.length);
       try { inserted = document.execCommand("insertText", false, joined); } catch (_) { /* Fallback below. */ }
     }
@@ -277,22 +279,46 @@ window.CenterVoice = ({ $, state, api }) => {
       report(mine, "cancelled"); reset();
       return;
     }
-    mine.clip = encode(capture.chunks, capture.rate); transcribe(mine);
+    mine.clip = encode(capture.chunks, capture.rate, mine.limit); transcribe(mine);
+  }
+  function releaseJob(mine) {
+    if (!mine.job) return;
+    const id = mine.job; mine.job = null;
+    api(`/workspaces/${mine.workspace}/voice/jobs/${id}`, { method: "DELETE", timeoutMs: 5000 }).catch(() => {});
+  }
+  function pollDelay(signal) {
+    return new Promise((resolve, reject) => {
+      const abort = () => { clearTimeout(timer); reject(new DOMException("Отменено", "AbortError")); };
+      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 750);
+      if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+    });
   }
   async function transcribe(mine) {
     if (!current(mine) || !mine.clip || status === "working") return;
     mine.controller = new AbortController();
     phase("working", "Распознаём запись…");
     try {
-      const result = await api(`/workspaces/${mine.workspace}/voice/transcribe`, { method: "POST",
-        data: { audio: base64(mine.clip), attempt_id: mine.id }, timeoutMs: 60000, signal: mine.controller.signal });
+      let result = await api(`/workspaces/${mine.workspace}/voice/transcribe`, { method: "POST",
+        data: { audio: base64(mine.clip), attempt_id: mine.id, background: true }, timeoutMs: 30000, signal: mine.controller.signal });
+      if (result.job_id) {
+        mine.job = result.job_id;
+        if (!current(mine) || mine.controller.signal.aborted) { releaseJob(mine); return; }
+        const deadline = performance.now() + 180000;
+        while (true) {
+          await pollDelay(mine.controller.signal);
+          if (!current(mine)) return;
+          const progress = await api(`/workspaces/${mine.workspace}/voice/jobs/${mine.job}`, { timeoutMs: 10000, signal: mine.controller.signal });
+          if (progress.status === "done") { result = progress.result; releaseJob(mine); break; }
+          if (performance.now() > deadline) throw failure("timeout", "Распознавание заняло слишком много времени. Повторите попытку.");
+        }
+      }
       if (!current(mine) || mine.controller.signal.aborted) return;
       mine.clip = null; report(mine, "complete");
       if (result.text) insert(result.text);
       // Recognition only edits the draft. Empty speech and provider notices do
       // not add a row, a popup or a message to the conversation.
       reset();
-    } catch (error) { if (current(mine) && !mine.controller.signal.aborted) fail(mine, error); }
+    } catch (error) { releaseJob(mine); if (current(mine) && !mine.controller.signal.aborted) fail(mine, error); }
   }
   document.addEventListener("pointerdown", () => { swallowUntil = 0; }, true);
   scroller.addEventListener("touchmove", event => { if (hold?.armed && event.cancelable) event.preventDefault(); }, { passive: false });

@@ -17,6 +17,8 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     form.elements.api_key.placeholder = settings.key_hint ? `Сохранён ключ …${settings.key_hint}` : "Вставьте API-ключ";
     form.elements.monthly_limit_rub.value = settings.monthly_limit_rub ?? "";
     form.elements.voice_enabled.checked = Boolean(settings.voice_enabled);
+    form.elements.voice_max_seconds.value = settings.voice_max_seconds || 180;
+    state.voiceMaxSeconds = settings.voice_max_seconds || 180;
     $("#ai-spent").textContent = `Потрачено в этом месяце: ${money(settings.month_spent_rub)} ₽`
       + (settings.monthly_limit_rub != null ? ` из ${money(settings.monthly_limit_rub)} ₽` : "");
     const badge = $("#ai-status"), configured = settings.configured;
@@ -39,12 +41,24 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       if (items.some(item => item.id === chosen)) select.value = chosen;
     };
     fill(agentForm.elements.task, settings.tasks);
-    // Models grouped by provider; a provider without a key is marked in its group label.
-    const model = agentForm.elements.model, chosen = model.value, groups = new Map();
+    renderModels(agentForm.elements.model.value || editing?.model || settings.default_model);
+    renderPipeline();
+  }
+
+  function renderPipeline() {
+    const main = agents.find(agent => agent.enabled && agent.is_default);
+    $("#voice-active-summary").textContent = `Распознавание: Yandex SpeechKit · Запись: до ${settings?.voice_max_seconds || 180} сек. · `
+      + (main ? `Обработка текста: ${main.model_title} (${main.name})` : "Текст вставляется без обработки AI-агентом.");
+  }
+  function renderModels(chosen) {
+    if (!settings) return;
+    const provider = settings.models.find(item => item.id === chosen)?.provider || agentForm.elements.provider.value || "yandex";
+    agentForm.elements.provider.value = provider;
+    const model = agentForm.elements.model, groups = new Map();
     for (const item of settings.models) {
-      const provider = item.provider || "yandex";
+      if ((item.provider || "yandex") !== provider) continue;
       if (!groups.has(provider)) {
-        const ready = provider === "deepseek" ? ds.configured : configured;
+        const ready = provider === "deepseek" ? settings.deepseek?.configured : settings.configured;
         const group = document.createElement("optgroup");
         group.label = (item.provider_title || "Yandex Cloud") + (ready ? "" : " — ключ не добавлен");
         groups.set(provider, group);
@@ -53,9 +67,13 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     }
     model.replaceChildren(...groups.values());
     if (settings.models.some(item => item.id === chosen)) model.value = chosen;
+    $("#ai-agent-provider-note").textContent = (provider === "deepseek" ? "Текст обрабатывает DeepSeek." : "Текст обрабатывает Yandex AI Studio.")
+      + " Аудио распознаёт Yandex SpeechKit."
+      + ((provider === "deepseek" ? settings.deepseek?.configured : settings.configured) ? "" : " Добавьте ключ во вкладке «Голосовой ввод».");
   }
 
   function renderAgents() {
+    renderPipeline();
     list.replaceChildren();
     if (!agents.length) {
       list.append(node("p", "Агентов пока нет. Без агента в поле вставляется распознанный текст как есть.", "muted small"));
@@ -92,7 +110,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     $("#ai-agent-form-title").textContent = agent ? `Агент «${agent.name}»` : "Новый агент";
     f.name.value = agent?.name || "Чистовик голосового ответа";
     f.task.value = agent?.task || "voice_input";
-    f.model.value = agent?.model || settings?.default_model || "yandexgpt-5.1";
+    renderModels(agent?.model || settings?.default_model || "yandexgpt-5.1");
     f.prompt.value = agent?.prompt || settings?.default_prompt || "";
     f.temperature.value = agent?.temperature ?? 0.2; temperature(f.temperature.value);
     f.enabled.checked = agent ? agent.enabled : true;
@@ -122,13 +140,13 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       const f = form.elements, limit = f.monthly_limit_rub.value.trim();
       settings = await api(`${base()}/settings`, { method: "PUT", data: {
         folder_id: f.folder_id.value.trim(), api_key: f.api_key.value.trim() || null,
-        voice_enabled: f.voice_enabled.checked, monthly_limit_rub: limit === "" ? null : Number(limit) } });
+        voice_enabled: f.voice_enabled.checked, voice_max_seconds: Number(f.voice_max_seconds.value), monthly_limit_rub: limit === "" ? null : Number(limit) } });
       renderSettings(); toast("Настройки Yandex Cloud сохранены.");
     }, $("#ai-error"));
   });
   $("#ai-verify").addEventListener("click", () => guarded($("#ai-verify"), async () => {
     settings = await api(`${base()}/settings/verify`, { method: "POST", timeoutMs: 40000 });
-    renderSettings(); toast(settings.ok ? "Yandex Cloud отвечает: распознавание и модель работают." : "Проверка не прошла.", !settings.ok);
+    renderSettings(); toast(settings.ok ? "Yandex SpeechKit отвечает: распознавание работает." : "Проверка не прошла.", !settings.ok);
   }, $("#ai-error")));
   $("#ai-clear").addEventListener("click", () => guarded($("#ai-clear"), async () => {
     if (!(await confirm("Удалить ключ Yandex Cloud?", "Голосовой ввод отключится у всех сотрудников.", "Удалить"))) return;
@@ -157,6 +175,10 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   }, $("#ai-deepseek-error")));
 
   $("#ai-agent-new").addEventListener("click", () => edit(null));
+  for (const radio of agentForm.querySelectorAll('[name="provider"]')) radio.addEventListener("change", () => {
+    renderModels(settings.models.find(item => item.provider === agentForm.elements.provider.value)?.id);
+  });
+  agentForm.elements.model.addEventListener("change", () => renderModels(agentForm.elements.model.value));
   $("#ai-agent-cancel").addEventListener("click", close);
   agentForm.elements.temperature.addEventListener("input", event => temperature(event.target.value));
   agentForm.addEventListener("submit", event => {
@@ -196,7 +218,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
           node("span", version.prompt));
         const restore = node("button", "Вернуть в форму", "text-button"); restore.type = "button";
         restore.addEventListener("click", () => {
-          const f = agentForm.elements; f.name.value = version.name; f.model.value = version.model; f.prompt.value = version.prompt;
+          const f = agentForm.elements; f.name.value = version.name; renderModels(version.model); f.prompt.value = version.prompt;
           f.temperature.value = version.temperature; temperature(version.temperature);
           toast("Версия перенесена в форму. Нажмите «Сохранить агента», чтобы применить.");
         });

@@ -120,7 +120,8 @@ class ChatReader:
                                   "status": row["status"], "enabled": bool(row["enabled"])} for row in rows],
                     "branches": DirectoryReader._branches(db, workspace), "can_write": writable,
                     "send_attachments": False,
-                    "voice_input": writable and AiVoice.voice_available(db, workspace)}
+                    "voice_input": writable and AiVoice.voice_available(db, workspace),
+                    "voice_max_seconds": AiVoice.voice_duration(db, workspace) if writable else 180}
 
     def bootstrap(self, actor, workspace, **filters):
         context = self.context(actor, workspace)

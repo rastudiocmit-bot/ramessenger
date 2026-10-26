@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -128,6 +129,8 @@ def create_app(
             max_worker.stop()
         if worker:
             worker.stop()
+        if app.state.ai_voice:
+            await asyncio.to_thread(app.state.ai_voice.jobs.pool.shutdown, wait=True, cancel_futures=True)
         if engine is not None:
             engine.dispose()
 
