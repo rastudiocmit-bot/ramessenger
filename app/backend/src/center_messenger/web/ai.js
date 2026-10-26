@@ -53,11 +53,15 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     renderGateways();
     const selectedSynthesis = settings.gateways?.synthesis_provider || "disabled";
     const nextRoute = selectedSynthesis + ":" + (settings.gateways?.synthesis_voice || "Mia");
-    $("#ai-synthesis-test").disabled = selectedSynthesis === "disabled" || !settings.gateways?.[selectedSynthesis]?.configured;
+    $("#ai-synthesis-test").disabled = selectedSynthesis === "disabled" || !providerReady(selectedSynthesis);
     if (synthesisRoute !== nextRoute) {
-      if (audioUrl) URL.revokeObjectURL(audioUrl); audioUrl = null; synthesisRoute = nextRoute;
-      $("#ai-synthesis-audio").removeAttribute("src"); show($("#ai-synthesis-audio"), false); $("#ai-synthesis-result").textContent = "";
+      if (audioUrl) URL.revokeObjectURL(audioUrl); audioUrl = null; synthesisRoute = nextRoute; notice("", $("#ai-synthesis-error"));
+      $("#ai-synthesis-audio").removeAttribute("src"); show($("#ai-synthesis-audio"), false); show($("#ai-synthesis-play"), false); $("#ai-synthesis-result").textContent = "";
     }
+    const ttsCheck = settings.gateways?.yandex?.checks?.synthesis;
+    $("#ai-yandex-tts-verify").disabled = !settings.configured;
+    $("#ai-yandex-tts-status").textContent = !ttsCheck ? "Синтез не проверен" : ttsCheck.ok ? "Синтез работает" : ttsCheck.error_code === "unauthorized" ? "Нет доступа к синтезу" : checkErrors[ttsCheck.error_code] || "Ошибка синтеза";
+    $("#ai-yandex-tts-status").dataset.state = !ttsCheck ? "" : ttsCheck.ok ? "active" : "error";
     renderPipeline();
   }
 
@@ -174,6 +178,14 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     settings = await api(`${base()}/settings/verify`, { method: "POST", timeoutMs: 40000 });
     renderSettings(); toast(settings.ok ? "Yandex SpeechKit отвечает: распознавание работает." : "Проверка не прошла.", !settings.ok);
   }, $("#ai-error")));
+  $("#ai-yandex-tts-verify").addEventListener("click", () => guarded($("#ai-yandex-tts-verify"), async () => {
+    settings = await api(`${base()}/gateways/yandex/verify`, { method: "POST", timeoutMs: 40000, data: { capability: "synthesis" } });
+    renderSettings();
+    if (!settings.ok) {
+      const code = settings.gateways?.yandex?.checks?.synthesis?.error_code;
+      notice(code === "unauthorized" ? "Для синтеза речи у сервисного аккаунта Яндекса должна быть роль ai.speechkit-tts.user. Проверьте ключ и права аккаунта." : checkErrors[code] || "Проверка синтеза не прошла.", $("#ai-error"));
+    }
+  }, $("#ai-error")));
   $("#ai-clear").addEventListener("click", () => guarded($("#ai-clear"), async () => {
     if (!(await confirm("Удалить ключ Yandex Cloud?", "Если для распознавания выбран Яндекс, голосовой ввод отключится.", "Удалить"))) return;
     settings = await api(`${base()}/settings`, { method: "PUT", data: { folder_id: form.elements.folder_id.value.trim(), clear_key: true,
@@ -234,13 +246,21 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       if (check?.checked_at) { time.dateTime = check.checked_at; time.textContent = new Date(check.checked_at).toLocaleString("ru-RU"); }
     }
   }
+  function renderSynthesisVoices(provider, selected) {
+    const gateways = settings.gateways || {};
+    const voices = gateways.synthesis_voice_catalog?.[provider] || (provider === "yandex"
+      ? [{ id: "marina", title: "Марина · русский" }, { id: "john", title: "John · английский" }]
+      : (gateways.synthesis_voices || ["Mia"]).map(id => ({ id, title: id })));
+    const field = routesForm.elements.synthesis_voice;
+    field.replaceChildren(...voices.map(voice => new Option(voice.title, voice.id)));
+    field.value = voices.some(voice => voice.id === selected) ? selected : voices[0]?.id || "";
+  }
   function renderGateways() {
     const gateways = settings.gateways || {};
     if (routesForm) {
       for (const [key, fallback] of Object.entries({ recognition_provider: "yandex", recognition_language: "ru", synthesis_provider: "disabled" }))
         routesForm.elements[key].value = gateways[key] || fallback;
-      routesForm.elements.synthesis_voice.replaceChildren(...(gateways.synthesis_voices || ["Mia"]).map(voice => new Option(voice, voice)));
-      routesForm.elements.synthesis_voice.value = gateways.synthesis_voice || "Mia";
+      renderSynthesisVoices(gateways.synthesis_provider || "disabled", gateways.synthesis_voice);
     }
     for (const card of gatewayCards) {
       const item = gateways[card.dataset.gateway] || {}, f = card.querySelector("form").elements;
@@ -300,16 +320,46 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   routesForm?.elements.recognition_provider.addEventListener("change", () => {
     routesForm.elements.recognition_language.value = routesForm.elements.recognition_provider.value === "yandex" ? "ru" : "auto";
   });
+  routesForm?.elements.synthesis_provider.addEventListener("change", () => {
+    renderSynthesisVoices(routesForm.elements.synthesis_provider.value);
+  });
+  $("#ai-synthesis-play").addEventListener("click", () => guarded($("#ai-synthesis-play"), async () => {
+    await $("#ai-synthesis-audio").play();
+  }, $("#ai-synthesis-error")));
   $("#ai-synthesis-test")?.addEventListener("click", event => guarded(event.currentTarget, async () => {
-    const text = $("#ai-synthesis-text").value.trim();
+    const text = $("#ai-synthesis-text").value.trim(), mine = seq, route = synthesisRoute;
     if (!text) throw new Error("Введите текст для синтеза.");
-    const answer = await api(`${base()}/synthesize`, { method: "POST", timeoutMs: 65000, data: { text } });
+    if (routesForm.elements.synthesis_provider.value !== settings.gateways.synthesis_provider || routesForm.elements.synthesis_voice.value !== settings.gateways.synthesis_voice)
+      throw new Error("Сохраните выбранный шлюз и голос кнопкой «Сохранить маршруты».");
+    const audio = $("#ai-synthesis-audio"), result = $("#ai-synthesis-result"), play = $("#ai-synthesis-play");
+    audio.pause(); show(play, false); show(audio, false); result.textContent = "Создаём аудио…";
+    if (audioUrl) URL.revokeObjectURL(audioUrl); audioUrl = null;
+    audio.removeAttribute("src"); audio.load();
+    let answer;
+    try { answer = await api(`${base()}/synthesize`, { method: "POST", timeoutMs: 65000, data: { text } }); }
+    catch (error) { if (mine !== seq || route !== synthesisRoute) return; result.textContent = ""; throw error; }
+    if (mine !== seq || route !== synthesisRoute) return;
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     const bytes = Uint8Array.from(atob(answer.audio), char => char.charCodeAt(0));
     audioUrl = URL.createObjectURL(new Blob([bytes], { type: answer.content_type }));
-    const audio = $("#ai-synthesis-audio"); audio.src = audioUrl; show(audio);
-    $("#ai-synthesis-result").textContent = answer.billing === "subscription" ? "Использована квота Token Plan. Нажмите воспроизведение для прослушивания." : "Промотариф MiMo: стоимость синтеза сейчас не начисляется. Нажмите воспроизведение.";
+    const billing = answer.billing === "subscription" ? "Использована квота Token Plan."
+      : answer.billing === "pay_as_you_go" ? `Оценка стоимости: ${money(answer.cost_rub)} ₽.` : "Синтез выполнен по промотарифу MiMo.";
+    show(audio); audio.preload = "auto";
+    result.textContent = billing + " Загружаем проигрыватель…";
+    try {
+      await new Promise((resolve, reject) => {
+        let timer;
+        const clean = () => { clearTimeout(timer); audio.removeEventListener("loadedmetadata", ready); audio.removeEventListener("error", failed); };
+        const ready = () => { clean(); Number.isFinite(audio.duration) && audio.duration > 0 ? resolve() : reject(new Error("Получено аудио без доступной длительности.")); };
+        const failed = () => { clean(); reject(new Error("Браузер не смог открыть полученное аудио. Повторите создание записи.")); };
+        audio.addEventListener("loadedmetadata", ready); audio.addEventListener("error", failed);
+        timer = setTimeout(failed, 12000); audio.src = audioUrl; audio.load();
+      });
+      if (mine !== seq || route !== synthesisRoute) return;
+      show(play); result.textContent = `Аудио готово · ${Math.ceil(audio.duration)} сек. ${billing} Нажмите «Воспроизвести».`;
+    } catch (error) { if (mine !== seq || route !== synthesisRoute) return; show(audio, false); result.textContent = billing; throw error; }
   }, $("#ai-synthesis-error")));
+
 
   $("#ai-agent-new").addEventListener("click", () => edit(null));
   for (const radio of agentForm.querySelectorAll('[name="provider"]')) radio.addEventListener("change", () => {

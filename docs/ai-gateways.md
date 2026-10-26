@@ -37,3 +37,10 @@ Official references:
 - https://mimo.mi.com/docs/en-US/price/pay-as-you-go
 
 The gateway header reflects saved per-capability checks: active only when all three pass, partial for incomplete verification, error when any check fails. “Проверить всё” runs the three checks sequentially, blocks conflicting actions on that card, and shows the current stage. Credentials, action routes and common recording options have independent save forms.
+
+
+Yandex SpeechKit synthesis uses the existing encrypted service-account key with `ai.speechkit-tts.user`, API v1 form-encoded requests and PCM-to-WAV wrapping. Available voices are provider-specific (Russian voices and English John); saving a Yandex key resets its separate synthesis verification. API v1 cost is estimated at 1,342 ₽ per million characters including VAT, per the published tariff. No automatic provider switch is performed.
+
+Preview success now requires the browser to load positive audio duration; an explicit Play button and native controls start playback on user action. The production CSP permits same-origin media and local blob media only; script/connect/frame policies stay restricted. Browser tests reproduce the old policy's blocked 0:00 player and verify decoding plus advancing playback time under the fixed policy at desktop/mobile sizes. A billing acknowledgement is not proof of browser playback; decode failures show an inline error while retaining the billing acknowledgement.
+
+Yandex references: https://aistudio.yandex.ru/ru/docs/speechkit/pricing ; https://aistudio.yandex.ru/en/docs/speechkit/tts/request ; https://aistudio.yandex.ru/en/docs/speechkit/tts/voices ; https://aistudio.yandex.ru/en/docs/ai-studio/security/

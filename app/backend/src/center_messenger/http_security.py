@@ -94,7 +94,7 @@ class SecurityMiddleware:
                             b"content-security-policy",
                             (
                                 b"default-src 'self'; script-src 'self'; style-src 'self'; "
-                                b"img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+                                b"img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; "
                                 b"frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
                             ),
                         ),

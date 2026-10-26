@@ -264,6 +264,7 @@ class AiVoice:
                 "voice_enabled=EXCLUDED.voice_enabled,monthly_limit_rub=EXCLUDED.monthly_limit_rub,"
                 "voice_max_seconds=EXCLUDED.voice_max_seconds,"
                 "status=EXCLUDED.status,"
+                "gateway_config=CASE WHEN :reset THEN ai_settings.gateway_config - 'yandex' ELSE ai_settings.gateway_config END,"
                 "last_error_code=CASE WHEN :reset THEN NULL ELSE ai_settings.last_error_code END,"
                 "verified_at=CASE WHEN :reset THEN NULL ELSE ai_settings.verified_at END,"
                 "version=ai_settings.version+1,updated_at=now(),updated_by=EXCLUDED.updated_by"

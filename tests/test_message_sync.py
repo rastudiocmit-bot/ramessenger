@@ -3424,5 +3424,48 @@ class MessageSyncTests(unittest.TestCase):
                 service.gateways.save(actor,self.workspace,'unknown',{'api_key':'fake'})
         finally:service.jobs.pool.shutdown(wait=True)
 
+    def test_synthesis_routes_use_the_selected_key_voice_and_billing_and_reset_checks_on_rotation(self):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        import base64,io,wave
+        from center_messenger.ai_voice import AiVoice
+        from center_messenger.ai_yandex import YandexClient,silence
+        from center_messenger.ai_mimo import MimoClient
+        from center_messenger.connector_vault import ConnectorVault
+        from test_ai_yandex import FakeOpener
+        outer=self
+        class Accounts:
+            @contextmanager
+            def transaction(self,*args,**kwargs):yield outer.db
+            def _workspace(self,*args,**kwargs):return {'role':'owner'}
+            def _workspace_chat(self,*args,**kwargs):return {'role':'owner'}
+            def throttle(self,*args,**kwargs):pass
+        vault=ConnectorVault(None);vault._key=lambda:b't'*32
+        wire=FakeOpener(silence(1))
+        service=AiVoice(SimpleNamespace(accounts=Accounts(),vault=vault),client=YandexClient(wire))
+        actor=SimpleNamespace(user_id=self.user)
+        try:
+            service.save_settings(actor,self.workspace,{'api_key':'AQVN'+'x'*36,'folder_id':'b1gtestfolder'})
+            service.gateways.routes(actor,self.workspace,{'recognition_provider':'yandex','recognition_language':'ru','synthesis_provider':'yandex','synthesis_voice':'marina'})
+            result=service.gateways.synthesize(actor,self.workspace,'Здравствуйте.')
+            self.assertEqual(result['provider'],'yandex');self.assertEqual(result['billing'],'pay_as_you_go');self.assertGreater(result['cost_rub'],0)
+            checked=service.gateways.verify(actor,self.workspace,'yandex','synthesis')
+            self.assertTrue(checked['gateways']['yandex']['checks']['synthesis']['ok'])
+            rotated=service.save_settings(actor,self.workspace,{'api_key':'AQVN'+'z'*36})
+            self.assertEqual(rotated['gateways']['yandex']['checks'],{})
+            self.assertEqual(rotated['gateways']['synthesis_voice'],'marina')
+            output=io.BytesIO()
+            with wave.open(output,'wb') as wav:
+                wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(16000);wav.writeframes(silence(1))
+            mimo_wire=FakeOpener({'choices':[{'message':{'audio':{'data':base64.b64encode(output.getvalue()).decode()}},'finish_reason':'stop'}]})
+            service.mimo=MimoClient(mimo_wire)
+            service.gateways.save(actor,self.workspace,'mimo_plan',{'api_key':'tp-'+'p'*30})
+            service.gateways.routes(actor,self.workspace,{'recognition_provider':'yandex','recognition_language':'ru','synthesis_provider':'mimo_plan','synthesis_voice':'Dean'})
+            result=service.gateways.synthesize(actor,self.workspace,'Hello.')
+            self.assertEqual(result['billing'],'subscription');self.assertEqual(result['cost_rub'],0)
+            self.assertEqual(json.loads(mimo_wire.requests[0][0].data)['audio']['voice'],'Dean')
+            self.assertEqual(mimo_wire.requests[0][0].get_header('Api-key'),'tp-'+'p'*30)
+        finally:service.jobs.pool.shutdown(wait=True)
+
 if __name__ == "__main__":
     unittest.main()

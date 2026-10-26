@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from center_messenger import ai_mimo
 from center_messenger.accounts import audit
-from center_messenger.ai_yandex import YandexError, key_hint, silence
+from center_messenger.ai_yandex import YandexError, key_hint, silence, TTS_VOICES, tts_cost
 from center_messenger.auth_security import AuthError
 
 PROVIDERS = ('mimo', 'mimo_plan')
@@ -48,7 +48,12 @@ def public(row):
             'base_url': item.get('base_url', ai_mimo.PLAN_URL if provider == 'mimo_plan' else ai_mimo.PAYG_URL),
             'billing': 'subscription' if provider == 'mimo_plan' else 'pay_as_you_go',
         }
+    result['yandex'] = {'configured': bool(row and row.get('key_ciphertext') and row.get('folder_id')),
+                        'checks': saved.get('yandex', {}).get('checks', {})}
     result['synthesis_voices'] = list(ai_mimo.VOICES)
+    result['synthesis_voice_catalog'] = {
+        'yandex': [{'id': key, 'title': title} for key, title in TTS_VOICES.items()],
+        **{provider: [{'id': voice, 'title': voice} for voice in ai_mimo.VOICES] for provider in PROVIDERS}}
     return result
 
 
@@ -135,15 +140,17 @@ class Gateways:
             provider = data['recognition_provider']
             language = data['recognition_language']
             synthesis = data['synthesis_provider']
-            if provider not in ('yandex', *PROVIDERS) or synthesis not in ('disabled', *PROVIDERS):
+            if provider not in ('yandex', *PROVIDERS) or synthesis not in ('disabled', 'yandex', *PROVIDERS):
                 raise AuthError(422, 'Неизвестный шлюз для действия.')
             if language not in (('ru',) if provider == 'yandex' else ('auto', 'en', 'zh')):
                 raise AuthError(422, 'MiMo ASR поддерживает китайский и английский; для русского выберите Yandex.')
-            if data['synthesis_voice'] not in ai_mimo.VOICES:
+            if data['synthesis_voice'] not in (TTS_VOICES if synthesis == 'yandex' else ai_mimo.VOICES):
                 raise AuthError(422, 'Неизвестный голос.')
             for selected in (provider, synthesis):
                 if selected in PROVIDERS and not (row and row.get(selected + '_key_ciphertext')):
                     raise AuthError(422, 'Сначала сохраните ключ выбранного шлюза.')
+            if synthesis == 'yandex' and not (row and row['key_ciphertext'] and row['folder_id']):
+                raise AuthError(422, 'Сначала сохраните ключ Yandex Cloud и ID каталога.')
             if provider == 'yandex' and row and row['voice_enabled'] and not (row['key_ciphertext'] and row['folder_id']):
                 raise AuthError(422, 'Сначала подключите Yandex Cloud или выключите голосовой ввод.')
             saved.update({key: data[key] for key in ('recognition_provider', 'recognition_language',
@@ -153,6 +160,8 @@ class Gateways:
             return service._public(db, workspace)
 
     def verify(self, actor, workspace, provider, capability):
+        if provider == 'yandex' and capability == 'synthesis':
+            return self.verify_yandex_synthesis(actor, workspace)
         if provider not in PROVIDERS or capability not in ('text', 'recognition', 'synthesis'):
             raise AuthError(422, 'Неизвестная возможность шлюза.')
         service = self.service
@@ -210,21 +219,54 @@ class Gateways:
             row = service._settings(db, workspace)
             saved = config(row)
             provider = saved.get('synthesis_provider', 'disabled')
-            if provider not in PROVIDERS:
+            if provider not in ('yandex', *PROVIDERS):
                 raise AuthError(409, 'Сначала выберите шлюз синтеза речи.')
             if row['monthly_limit_rub'] is not None and service._month_spent(db, workspace) >= float(row['monthly_limit_rub']):
                 raise AuthError(429, 'Месячный лимит исчерпан.')
-            creds = credentials(service, row, workspace, {provider})
-        kwargs = options(creds, provider)
+            creds = service._credentials(db, workspace, yandex=False, selected={provider})
+        kwargs = {'api_key': creds['yandex']} if provider == 'yandex' else options(creds, provider)
         if not kwargs['api_key']:
             raise AuthError(409, 'Шлюз синтеза не подключён.')
         service.accounts.throttle(f'ai-tts:{workspace}:{actor.user_id}', limit=10, minutes=1)
         try:
-            result = service.mimo.synthesize(sample, plan=provider == 'mimo_plan',
-                voice=saved.get('synthesis_voice', 'Mia'), **kwargs)
+            if provider == 'yandex':
+                result = service.client.synthesize(sample, voice=saved.get('synthesis_voice', 'marina'), **kwargs)
+            else:
+                result = service.mimo.synthesize(sample, plan=provider == 'mimo_plan',
+                    voice=saved.get('synthesis_voice', 'Mia'), **kwargs)
         except YandexError as failure:
             service._usage(actor, workspace, kind='synthesis', outcome='error', error=failure.code)
             from center_messenger.ai_voice import _fail
             raise _fail(failure.code, provider) from None
-        service._usage(actor, workspace, kind='synthesis', seconds=result['seconds'])
-        return result | {'billing': 'subscription' if provider == 'mimo_plan' else 'promotional'}
+        cost = tts_cost(sample) if provider == 'yandex' else 0
+        service._usage(actor, workspace, kind='synthesis', seconds=result['seconds'], cost=cost)
+        return result | {'billing': 'pay_as_you_go' if provider == 'yandex' else 'subscription' if provider == 'mimo_plan' else 'promotional',
+                         'cost_rub': round(cost, 4), 'provider': provider}
+
+
+    def verify_yandex_synthesis(self, actor, workspace):
+        service = self.service
+        with service.accounts.transaction(actor, snapshot=True) as db:
+            service.accounts._workspace(db, actor, workspace, manage=True)
+            row = service._settings(db, workspace)
+            if row and row['monthly_limit_rub'] is not None and service._month_spent(db, workspace) >= float(row['monthly_limit_rub']):
+                raise AuthError(429, 'Месячный лимит исчерпан.')
+            key = service._credentials(db, workspace, selected={'yandex'})['yandex']
+            cipher, folder = row['key_ciphertext'], row['folder_id']
+        service.accounts.throttle(f'ai-tts-check:{workspace}:{actor.user_id}', limit=10, minutes=1)
+        error, cost = None, 0
+        try:
+            service.client.synthesize('Проверка синтеза речи.', api_key=key, voice='marina')
+            cost = tts_cost('Проверка синтеза речи.')
+        except YandexError as failure:
+            error = failure.code
+        service._usage(actor, workspace, kind='verify', cost=cost, outcome='error' if error else 'ok', error=error)
+        with service.accounts.transaction(actor) as db:
+            service.accounts._workspace(db, actor, workspace, manage=True)
+            row = service._settings(db, workspace, lock=True)
+            saved = config(row)
+            if row['key_ciphertext'] == cipher and row['folder_id'] == folder:
+                saved['yandex'] = {'checks': {'synthesis': {'ok': error is None, 'error_code': error,
+                    'checked_at': datetime.now(timezone.utc).isoformat()}}}
+                self._write(db, actor, workspace, saved)
+            return service._public(db, workspace) | {'ok': error is None}

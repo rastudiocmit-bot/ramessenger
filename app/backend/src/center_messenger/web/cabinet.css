@@ -1392,3 +1392,6 @@ body:has(#cabinet[hidden]){overflow:auto}
 @media(max-width:719px) { .gateway-options-grid { grid-template-columns: minmax(0,1fr); } .gateway-section { margin-bottom: 24px; } .gateway-current { font-size: 11px; } }
 
 @media(min-width:720px) { .gateway-card .gateway-provider-caption { min-height: 40px; } }
+
+#ai-synthesis-play { margin-left: 8px; }
+#ai-synthesis-play[hidden] { display: none; }

@@ -109,6 +109,8 @@ class StaticDeliveryTest(unittest.TestCase):
         response = self.get("/assets/chat.js?v=1")
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertIn("default-src 'self'", response.headers["content-security-policy"])
+        self.assertIn("media-src 'self' blob:", response.headers["content-security-policy"])
+        self.assertIn("script-src 'self'", response.headers["content-security-policy"])
 
 
 if __name__ == "__main__":
