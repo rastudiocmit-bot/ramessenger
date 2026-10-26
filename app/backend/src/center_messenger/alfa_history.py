@@ -9,6 +9,8 @@ PROJECTION_VERSION = 3
 RECHECK_INTERVAL = timedelta(hours=6)
 MAX_GAP_RETRIES = 1
 MAX_PAGE_FAILURES = 3
+LIVE_INTERVAL = 15
+RANGE_INTERVAL = 2
 
 
 def history_pending(cursor):
@@ -48,8 +50,12 @@ def retry_history(original, keys=None):
     cursor = dict(original)
     for key in cursor.get("streams", []) if keys is None else keys:
         for prefix in ("paused", "pause_error", "error", "retries", "failures", "live_error",
-                       "retry_live", "retry_archive", "retry_catchup"):
+                       "retry_live", "retry_archive", "retry_catchup",
+                       "due_live", "due_archive", "due_catchup"):
             cursor.pop(f"{prefix}:{key}", None)
+        # An explicit retry is immediately eligible while keeping the timestamp
+        # of the last successful read available to the freshness monitor.
+        cursor[f"due_live:{key}"] = datetime.min.replace(tzinfo=UTC).isoformat()
     return cursor
 
 
@@ -169,6 +175,8 @@ def plan_history(original, branches, now=None):
             paused = cursor.get(f"paused:{key}")
             if paused and now >= datetime.fromisoformat(paused):
                 cursor = retry_history(cursor, [key])
+            for kind in ("live", "catchup", "archive"):
+                cursor.setdefault(f"due_{kind}:{key}", history_due(cursor, key, kind, now).isoformat())
             if not cursor.get("archive_paused") and not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"):
                 if not cursor.get(f"scan_id:{key}"):
                     cursor[f"scan_id:{key}"] = str(uuid4())
@@ -185,13 +193,61 @@ def plan_history(original, branches, now=None):
                     and not cursor.get(f"paused:{key}") and retry_ready(cursor, key, "archive", now)):
                 archives.append((branch, direction, page))
     # Read every journal's head before spending time on old pages.
-    requests = list(dict.fromkeys(heads + catchups + archives))
+    ordered = []
+    for kind, group in (("live", heads), ("catchup", catchups), ("archive", archives)):
+        ordered.extend(sorted(group, key=lambda r: history_due(cursor, f"{r[0]}:{r[1]}", kind, now)))
+    requests = list(dict.fromkeys(ordered))
     return cursor, requests
 
 
+def history_due(cursor, key, kind, now):
+    """Backoff replaces the normal schedule for this stream and operation only."""
+    value = (cursor.get(f"retry_{kind}:{key}") or {}).get("next_at") or cursor.get(f"due_{kind}:{key}")
+    if value:
+        return datetime.fromisoformat(value)
+    if kind == "live" and cursor.get(f"live_checked:{key}"):
+        return datetime.fromisoformat(cursor[f"live_checked:{key}"]) + timedelta(seconds=LIVE_INTERVAL)
+    return now
+
+
+def history_flow(cursor, request):
+    branch, direction, page = request
+    return "live" if page == 0 else "catchup" if page == cursor.get(f"catchup:{branch}:{direction}", 0) else "archive"
+
+
+def ready_history(cursor, now):
+    """Read-only scheduling view, shared by the worker and browser coordinator."""
+    ready = {}
+    for key in cursor.get("streams", []):
+        kinds = ["live"]
+        if cursor.get(f"catchup:{key}", 0) > 0:
+            kinds.append("catchup")
+        if (cursor.get(key, 0) > 0 and not cursor.get("archive_paused")
+                and not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}")):
+            kinds.append("archive")
+        for kind in kinds:
+            due = history_due(cursor, key, kind, now)
+            if due <= now:
+                ready[kind] = min(ready.get(kind, due), due)
+    return ready
+
+
+def live_freshness(cursor, now=None):
+    now = now or datetime.now(UTC)
+    lags, unobserved = [], 0
+    for key in cursor.get('streams', []):
+        value = cursor.get(f'live_checked:{key}')
+        if value:
+            lags.append(max(0, int((now - datetime.fromisoformat(value)).total_seconds() - LIVE_INTERVAL)))
+        else:
+            unobserved += 1
+    return {'interval_seconds': LIVE_INTERVAL, 'unobserved_journals': unobserved,
+            'delayed_journals': sum(lag >= LIVE_INTERVAL for lag in lags),
+            'max_lag_seconds': max(lags, default=0)}
+
+
 def retry_ready(cursor, key, kind, now):
-    value = (cursor.get(f"retry_{kind}:{key}") or {}).get("next_at")
-    return not value or datetime.fromisoformat(value) <= now
+    return history_due(cursor, key, kind, now) <= now
 
 
 def _retry_result(cursor, key, kind, result, now):
@@ -203,6 +259,7 @@ def _retry_result(cursor, key, kind, result, now):
                          "next_at": (now + timedelta(seconds=delay)).isoformat()}
     else:
         cursor.pop(token, None)
+        cursor[f"due_{kind}:{key}"] = (now + timedelta(seconds=LIVE_INTERVAL if kind == "live" else RANGE_INTERVAL)).isoformat()
 
 
 def next_history_delay(cursor, now=None):
@@ -210,14 +267,13 @@ def next_history_delay(cursor, now=None):
     now = now or datetime.now(UTC)
     waits = []
     for key in cursor.get("streams", []):
-        kinds = [("live", 15)]
+        kinds = ["live"]
         if cursor.get(f"catchup:{key}", 0):
-            kinds.append(("catchup", 2))
-        if not cursor.get("archive_paused") and not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"):
-            kinds.append(("archive", 2))
-        for kind, normal in kinds:
-            value = (cursor.get(f"retry_{kind}:{key}") or {}).get("next_at")
-            waits.append(max(1, (datetime.fromisoformat(value) - now).total_seconds()) if value else normal)
+            kinds.append("catchup")
+        if cursor.get(key, 0) > 0 and not cursor.get("archive_paused") and not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"):
+            kinds.append("archive")
+        for kind in kinds:
+            waits.append(max(0, (history_due(cursor, key, kind, now) - now).total_seconds()))
         paused = cursor.get(f"paused:{key}")
         if paused and not cursor.get("archive_paused"):
             waits.append(max(1, (datetime.fromisoformat(paused) - now).total_seconds()))

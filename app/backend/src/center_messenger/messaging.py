@@ -434,8 +434,9 @@ class Messaging:
                     # imply that the CRM session needs to be restored.
                     wait_code = 'browser_busy' if error.code == 'browser_busy' else 'session_check_pending'
                     self._state(db, job, command, 'queued', wait_code)
-                    db.execute(text("UPDATE message_jobs SET due_at=now()+interval '10 seconds',"
-                                    "lease_owner=NULL,lease_until='2000-01-01T00:00:00Z' WHERE id=:id"), {'id': job['id']})
+                    db.execute(text("UPDATE message_jobs SET due_at=now()+(:delay*interval '1 second'),"
+                                    "lease_owner=NULL,lease_until='2000-01-01T00:00:00Z' WHERE id=:id"),
+                               {'id': job['id'], 'delay': .25 if wait_code == 'browser_busy' else 10})
                     return
                 self._state(db, job, command, "cancelled" if error.code == "disconnected" else "failed", error.code)
                 self._remove(db, job)
@@ -517,11 +518,15 @@ class Messaging:
                 command = self._command(db, job)
                 if command is None or command["state"] not in {'queued', 'sending'} or (command['payload'].get('native_delivery') or {}).get('attempt_id') != attempt:
                     raise LostLease from None
-                if error.code in {'browser_busy', 'settings_changed', 'session_check_pending',
+                if error.code in {'browser_busy', 'browser_priority_wait', 'settings_changed', 'session_check_pending',
                                   'send_prepare_timeout', 'send_prepare_failed', 'browser_unavailable', 'crm_unavailable', 'crm_rate_limited'}:
                     self._state(db, job, command, 'queued', error.code)
                     self._native_phase(db, job, attempt, 'waiting')
-                    delay = 10 if error.code in {'browser_busy', 'settings_changed', 'session_check_pending'} else min(120, 5 * 2 ** min(command['attempts'], 5))
+                    if error.code in {'browser_busy', 'browser_priority_wait'}:
+                        db.execute(text("UPDATE send_commands SET attempts=GREATEST(0,attempts-1) "
+                                        "WHERE workspace_id=:w AND id=:id"),
+                                   {'w': job['workspace_id'], 'id': command['id']})
+                    delay = .25 if error.code in {'browser_busy', 'browser_priority_wait'} else 10 if error.code in {'settings_changed', 'session_check_pending'} else min(120, 5 * 2 ** min(command['attempts'], 5))
                     db.execute(text("UPDATE message_jobs SET due_at=now()+(:delay*interval '1 second'),"
                                     "lease_owner=NULL,lease_until='2000-01-01T00:00:00Z' WHERE id=:id"), {'id': job['id'], 'delay': delay})
                     return

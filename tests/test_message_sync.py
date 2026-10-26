@@ -243,7 +243,7 @@ class LoaderPlanningTests(unittest.TestCase):
         self.assertNotIn((1, "receive", 4), requests)
         self.assertIn((1, "receive", 0), requests)
         self.assertIn((1, "sent", 0), requests)
-        self.assertEqual(next_history_delay(cursor, now), 15)
+        self.assertEqual(next_history_delay(cursor, now), 0)  # Healthy heads have not been read yet.
         retry = retry_history(cursor, ["1:receive"])
         self.assertNotIn("retry_archive:1:receive", retry)
         self.assertEqual(retry["1:receive"], 4)
@@ -648,7 +648,16 @@ class MessageSyncTests(unittest.TestCase):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 1, "1:sent": 1})
         self.assertEqual(cursor["1:receive"], 2)
 
-    def run_worker(self, cursor, page_result=None, browser_effect=None):
+    def run_worker(self, cursor, page_result=None, browser_effect=None, *, after_seconds=0):
+        # Simulate elapsed scheduling time between worker restarts without a
+        # real sleep or changing the database/lease clock of this rollback fixture.
+        cursor = json.loads(json.dumps(cursor))
+        if after_seconds:
+            for key, value in list(cursor.items()):
+                if key.startswith(('due_', 'live_checked:')):
+                    cursor[key] = (datetime.fromisoformat(value) - timedelta(seconds=after_seconds)).isoformat()
+                elif key.startswith('retry_') and isinstance(value, dict) and value.get('next_at'):
+                    value['next_at'] = (datetime.fromisoformat(value['next_at']) - timedelta(seconds=after_seconds)).isoformat()
         self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) WHERE workspace_id=:w"),
                         {"w": self.workspace, "cursor": json.dumps(cursor)})
         self.db.execute(text("INSERT INTO alfa_max_sync_queue(workspace_id,connection_id) VALUES (:w,:c) "
@@ -683,6 +692,8 @@ class MessageSyncTests(unittest.TestCase):
         self.service.browser.read_histories.reset_mock()
         cursor = self.run_worker(cursor)
         self.assertEqual(cursor["1:receive"], 0)
+        self.service.browser.read_histories.assert_not_called()
+        cursor = self.run_worker(cursor, after_seconds=16)
         requests = self.service.browser.read_histories.call_args.args[2]
         self.assertNotIn((1, "receive", 1), requests)
 
@@ -712,8 +723,12 @@ class MessageSyncTests(unittest.TestCase):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 5,
                                   "head:1:receive": "old"},
                                  page_result=lambda request: {"messages": [self.row("10")], "has_more": True})
-        self.assertEqual(cursor["1:receive"], 6)
+        self.assertEqual(cursor["1:receive"], 5)  # Newly discovered catchup takes the next turn.
         self.assertEqual(cursor["catchup:1:receive"], 1)
+        cursor = self.run_worker(cursor, after_seconds=3,
+                                 page_result=lambda request: {"messages": [self.row("10")], "has_more": True})
+        self.assertEqual(cursor["1:receive"], 6)
+        self.assertEqual(cursor["catchup:1:receive"], 0)
 
     def test_a_failed_page_does_not_discard_other_clients_or_advance_its_cursor(self):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 4}, page_result=lambda request:
@@ -781,7 +796,7 @@ class MessageSyncTests(unittest.TestCase):
                 rows[:0] = [self.row(str(100 + cycle * 10 + i), at=self.at + timedelta(seconds=i))
                             for i in range(6, 0, -1)]
             # run_worker creates a fresh worker and reloads only the DB cursor.
-            cursor = self.run_worker(cursor, page_result=page)
+            cursor = self.run_worker(cursor, page_result=page, after_seconds=16 if cycle else 0)
             if not history_pending(cursor):
                 break
         self.assertFalse(history_pending(cursor))
@@ -807,13 +822,13 @@ class MessageSyncTests(unittest.TestCase):
         late = self.row("999", at=datetime(1999, 1, 1, tzinfo=UTC), body="Late old import")
         journals[(1, "receive")].append(late)
         cursor["finished:1:receive"] = (datetime.now(UTC) - RECHECK_INTERVAL).isoformat()
-        cursor = self.run_worker(cursor, page_result=page)
+        cursor = self.run_worker(cursor, page_result=page, after_seconds=16)
         self.assertEqual(len(self.messages()), len(expected))
         self.assertTrue(all(r[2] == 0 for r in self.service.browser.read_histories.call_args.args[2]))
         # A new source ID with an old timestamp is still imported when it appears in the feed.
         journals[(1, "receive")].pop()
         journals[(1, "receive")].insert(0, late)
-        cursor = self.run_worker(cursor, page_result=page)
+        cursor = self.run_worker(cursor, page_result=page, after_seconds=16)
         self.assertEqual(len(self.messages()), len(expected) + 1)
         self.assertEqual(min(m["occurred_at"] for m in self.messages()).year, 1999)
 
@@ -848,7 +863,7 @@ class MessageSyncTests(unittest.TestCase):
         cursor=self.run_worker({},page_result=page)
         def fresh(request):
             return {"messages":[self.row("3",body="New live message")],"has_more":False,"total":3} if request==(1,"receive",0) else page(request)
-        cursor=self.run_worker(cursor,page_result=fresh)
+        cursor=self.run_worker(cursor,page_result=fresh,after_seconds=16)
         self.assertEqual({m["payload"]["crm_record_id"] for m in self.messages()},{"1","3"})
         self.assertFalse(history_pending(cursor))
         self.assertTrue(history_coverage(self.db,self.workspace,self.channel,cursor,[1,2])["history_loaded"])
@@ -881,7 +896,7 @@ class MessageSyncTests(unittest.TestCase):
                 self.assertEqual(cursor["error:1:receive"], "history_projection")
                 self.assertEqual(cursor["missing_ids:1:receive"], ["20"])
         self.assertIn("paused:1:receive", cursor)
-        cursor = self.run_worker(cursor, page_result=page)
+        cursor = self.run_worker(cursor, page_result=page, after_seconds=16)
         self.assertNotIn((1, "receive", 4), self.service.browser.read_histories.call_args.args[2])
         cursor = self.run_worker(retry_history(cursor), page_result=lambda request: {
             "messages": [self.row("20")] if request == (1, "receive", 0) else [], "has_more": False})
@@ -1179,8 +1194,15 @@ class MessageSyncTests(unittest.TestCase):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION}, browser_effect=changed_settings)
         self.assertTrue(cursor.pop("client_repair")["complete"])
         cursor.pop("activity", None)
-        self.assertEqual(cursor, {"projection_version": PROJECTION_VERSION, "sync_policy": 1,
-            "streams":["1:receive","1:sent","2:receive","2:sent"]})
+        self.assertEqual(cursor['streams'], ["1:receive","1:sent","2:receive","2:sent"])
+        self.assertEqual(cursor['projection_version'], PROJECTION_VERSION)
+        for key in cursor['streams']:
+            self.assertEqual(cursor.get(key, 0), 0)
+            self.assertEqual(cursor.get(f'scan_pages:{key}', 0), 0)
+            self.assertNotIn(f'live_checked:{key}', cursor)
+            self.assertNotIn(f'complete:{key}', cursor)
+        self.assertEqual(self.db.execute(text('SELECT session_ciphertext FROM alfa_max_settings WHERE workspace_id=:w'),
+                                         {'w': self.workspace}).scalar_one(), 'test')
         self.assertEqual(self.messages(), [])
 
     def test_journal_context_does_not_create_an_unlinked_copy_of_a_known_customer(self):
@@ -2699,7 +2721,7 @@ class MessageSyncTests(unittest.TestCase):
                 return {'messages':[self.row('1')],'has_more':request[2]==0,'total':2,'row_count':1}
             return {'messages':[],'has_more':False,'total':0,'row_count':0}
         cursor=self.run_worker({},page_result=page)
-        cursor=self.run_worker(cursor,page_result=page)
+        cursor=self.run_worker(cursor,page_result=page,after_seconds=3)
         report=history_coverage(self.db,self.workspace,self.channel,cursor,[1,2])
         self.assertTrue(report['history_loaded'])
         self.assertFalse(report['history_complete'])
@@ -2906,7 +2928,7 @@ class MessageSyncTests(unittest.TestCase):
         self.assertLessEqual(float(seconds), 15.1)
         self.assertGreater(float(seconds), 10)
         self.assertIn("retry_archive:1:receive", cursor)
-        cursor = self.run_worker(cursor, browser_effect=self.streaming_browser(page))
+        cursor = self.run_worker(cursor, browser_effect=self.streaming_browser(page), after_seconds=16)
         requests = self.service.browser.read_histories.call_args.args[2]
         self.assertNotIn((1, "receive", 4), requests)
         self.assertIn((2, "sent", 0), requests)

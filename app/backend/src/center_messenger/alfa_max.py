@@ -18,7 +18,7 @@ from center_messenger.alfa_repair import REPAIR_BATCH, customer_directory, recon
 from center_messenger.alfa_monitor import AlfaSyncMonitor
 from center_messenger.alfa_history import (
     advance_history, history_coverage, history_pending, plan_history,
-    reconcile_history, retry_history, verify_saved_pages, coverage_rows, adopt_history, next_history_delay,
+    reconcile_history, retry_history, verify_saved_pages, coverage_rows, adopt_history, next_history_delay, history_flow, live_freshness,
 )
 from center_messenger.history_receipts import record_pages, finish_pages, new_records
 from center_messenger import active_review, family_cache
@@ -28,10 +28,12 @@ from center_messenger.crm_api import DirectoryReader
 from center_messenger.database import log_database_error
 from center_messenger.message_order import message_order, source_order, visible_message
 from center_messenger.alfa_session import NativeSessions, SECRET, CONTROL, merge_state, control, same_session, stamp, event
+from center_messenger.native_priority import BUSY_RETRY
 
 ERRORS = {
     "recovery_disabled": "Автоматическое восстановление выключено. Войдите в AlfaCRM через настройки подключения.",
     "browser_busy": "Браузер AlfaCRM занят. Операция продолжится автоматически.",
+    "browser_priority_wait": "Операция в очереди браузера AlfaCRM. Продолжим автоматически.",
     "send_prepare_timeout": "Подготовка отправки задержалась. Повторим автоматически; сообщение ещё не отправлялось.",
     "send_prepare_failed": "Подготовка отправки прервана. Повторим автоматически; сообщение ещё не отправлялось.",
     "session_check_pending": "Проверяем авторизацию AlfaCRM. Отправка продолжится после восстановления.",
@@ -272,6 +274,7 @@ class AlfaMaxConnections:
                     "archive_paused": bool(cursor.get("archive_paused")),
                     "live_cycle": cursor.get("live_cycle"),
                     "last_live_cycle": cursor.get("last_live_cycle"),
+                    "freshness": live_freshness(cursor),
                     "card_worker": family_cache.current(db, workspace, row["crm_connection_id"]),
                     "error": ERRORS.get(row["last_error_code"]), "error_code": row["last_error_code"]}
             if activity_only:
@@ -1191,7 +1194,7 @@ class AlfaMaxConnections:
     def send_native(self, workspace, connection, conversation, message, *, target=None,
                     before_post=None, on_accepted=None, heartbeat=None, stopping=None):
         target = target or self.send_target(workspace, connection, conversation)
-        with self.sessions.operation(workspace, connection, target.get('session_snapshot')) as operation:
+        with self.sessions.operation(workspace, connection, target.get('session_snapshot'), purpose='send') as operation:
             if control(operation['row']).get('needs_check'):
                 raise AlfaBrowserError('session_check_pending')
             def guard(callback=None):
@@ -1331,6 +1334,10 @@ class AlfaMaxWorker:
         try:
             with self._transaction(workspace, connection, lease) as db:
                 pending = self.service._row(db, workspace)
+                if pending and control(pending).get('lease') and stamp(control(pending).get('until')) > datetime.now(UTC):
+                    # Busy polling must not repeat directory repair or decryption.
+                    self._release(db, workspace, connection, lease, BUSY_RETRY)
+                    return True
                 recovery_due = bool(pending and pending["session_ciphertext"] and
                     (pending["state"] == "reauth_required" or control(pending).get("needs_check")))
             if recovery_due:
@@ -1391,7 +1398,10 @@ class AlfaMaxWorker:
                                     "WHERE workspace_id=:w"), {"w": workspace, "cursor": json.dumps(original_cursor)})
                 # Preserve completed imports; only unfinished pages and new records are planned.
                 cursor, requests = plan_history(original_cursor, branches)
-                expected_cursor = dict(original_cursor)
+                # Publish durable due times before arbitration, without moving pages.
+                db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) "
+                                "WHERE workspace_id=:w"), {"w": workspace, "cursor": json.dumps(cursor)})
+                expected_cursor = dict(cursor)
                 origin = row["crm_origin"]
                 settings_version = row["version"]
                 session_snapshot = dict(row)
@@ -1409,25 +1419,39 @@ class AlfaMaxWorker:
             saved_pages = 0
             controls = {"archive_paused", "archive_pause_changed_at", "retry_requests", CONTROL}
             semantic = lambda value: {k: v for k, v in value.items() if k not in controls | {"activity"}}
-            cycle = {"id": str(uuid4()), "started_at": datetime.now(UTC).isoformat(),
-                     "journals": len(branches) * 2, "checked": 0, "failed": 0, "added_records": 0}
-            live_planned = any(r[2] == 0 or r[2] == original_cursor.get(f"catchup:{r[0]}:{r[1]}", 0)
-                               for r in requests)
+            cycle = dict(cursor.get('live_cycle') or {})
+            # Old releases did not persist per-journal membership of a cycle.
+            if not cycle.get('targets'):
+                cycle = {}
+            if not cycle and any(r[2] == 0 for r in requests):
+                cycle = {"id": str(uuid4()), "started_at": datetime.now(UTC).isoformat(),
+                         "journals": len(branches) * 2, "checked": 0, "failed": 0, "added_records": 0,
+                         "targets": list(cursor['streams']), "checked_keys": [], "failed_keys": []}
+            if cycle:
+                cycle['targets'] = [k for k in cycle['targets'] if k in cursor['streams']]
+                cycle['journals'] = len(cycle['targets'])
+            yielded = False
             def flow_for(request):
-                branch, direction, page = request
-                return "live" if page == 0 else "catchup" if page == cursor.get(f"catchup:{branch}:{direction}", 0) else "archive"
+                return history_flow(cursor, request)
 
             def before_read(request):
-                nonlocal read_step
+                nonlocal read_step, yielded
                 read_step = requests.index(request)
-                with self.accounts.transaction(workspace_id=workspace, snapshot=True) as db:
+                if yielded:
+                    return False
+                with self._transaction(workspace, connection, lease) as db:
                     current = self.service._row(db, workspace)
                     if (not current or current["version"] != settings_version or current["state"] != "active"
                         or current["current_crm_connection_id"] != crm_connection or current["crm_origin"] != origin
                         or current.get("crm_settings_version") != crm_settings_version):
                         raise AlfaBrowserError("settings_changed")
                     paused = bool((current["history_cursor"] or {}).get("archive_paused"))
-                return not paused or flow_for(request) != "archive"
+                    if paused and flow_for(request) == 'archive':
+                        return False
+                    if io_lease and (saved_pages >= 16 or not self.service.sessions.can_read(db, io_lease, flow_for(request))):
+                        yielded = True
+                        return False
+                return True
 
             def heartbeat():
                 nonlocal read_step
@@ -1499,12 +1523,19 @@ class AlfaMaxWorker:
                     advance_history(cursor, [request], [result],
                                     allow_archive=bool(cursor.get(f"scan_id:{branch}:{direction}")))
                     finish_pages(db, workspace, connection, previous, cursor)
-                    if page == 0:
-                        cycle["failed" if result.get("error") else "checked"] += 1
-                    if flow != "archive":
+                    if cycle and page == 0:
+                        key = f'{branch}:{direction}'
+                        for name in ('checked_keys', 'failed_keys'):
+                            cycle[name] = [k for k in cycle.get(name, []) if k != key and k in cycle['targets']]
+                        if key in cycle['targets']:
+                            cycle['failed_keys' if result.get('error') else 'checked_keys'].append(key)
+                        cycle['checked'] = len(cycle['checked_keys'])
+                        cycle['failed'] = len(cycle['failed_keys'])
+                    if cycle and flow != "archive":
                         cycle["added_records"] += added
-                    if live_planned:
+                    if cycle:
                         cursor["live_cycle"] = dict(cycle)
+                    self.service.sessions.page_finished(cursor, flow)
                     cursor["activity"] = snapshot(True)
                     status_error = next((cursor.get(f"{prefix}:{key}") for key in cursor["streams"]
                         for prefix in ("live_error", "error") if cursor.get(f"{prefix}:{key}")), None)
@@ -1518,6 +1549,7 @@ class AlfaMaxWorker:
                 session_snapshot['session_ciphertext'] = encrypted
                 if io_lease:
                     io_lease['row']['session_ciphertext'] = encrypted
+                    io_lease['pages'] = saved_pages + 1
                 expected_cursor = json.loads(json.dumps(cursor))
                 saved_pages += 1
                 self.service.monitor.committed(workspace, connection, lease)
@@ -1529,7 +1561,9 @@ class AlfaMaxWorker:
                         workspace, *request, result["missing_ids"])
 
             if requests:
-                io_lease = self.service.sessions.claim(workspace, connection, session_snapshot)
+                io_lease = self.service.sessions.claim(workspace, connection, session_snapshot, purpose='history')
+                # An aged background page may be granted a bounded fair turn.
+                requests.sort(key=lambda request: flow_for(request) != io_lease['kind'])
                 initial_session = session
                 results, renewed_session = self.service.browser.read_histories(
                     origin, session, requests, on_progress=heartbeat, continue_on_error=True,
@@ -1545,22 +1579,28 @@ class AlfaMaxWorker:
                      "completed_pages": saved_pages})
             with self._transaction(workspace, connection, lease) as db:
                 check_current(self.service._row(db, workspace))
-                if live_planned:
+                if cycle and set(cycle['targets']) <= set(cycle.get('checked_keys', [])) | set(cycle.get('failed_keys', [])):
                     cycle["completed_at"] = datetime.now(UTC).isoformat()
                     cursor["last_live_cycle"] = dict(cycle)
                     cursor.pop("live_cycle", None)
                 cursor["activity"] = snapshot(True) | {"phase": "waiting", "operation": "waiting", "client": None}
-                db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb),"
-                                "session_ciphertext=:session WHERE workspace_id=:w"),
-                    {"w": workspace, "cursor": json.dumps(cursor),
-                     "session": self.service.vault.seal_browser_state(workspace, connection, session)})
+                if io_lease:
+                    self.service.sessions.renew(db, io_lease)
+                    db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb),"
+                                    "session_ciphertext=:session WHERE workspace_id=:w"),
+                        {"w": workspace, "cursor": json.dumps(cursor),
+                         "session": self.service.vault.seal_browser_state(workspace, connection, session)})
+                else:
+                    # No browser operation: do not rotate cookies under an active sender.
+                    db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:cursor AS jsonb) WHERE workspace_id=:w"),
+                               {"w": workspace, "cursor": json.dumps(cursor)})
                 delay = 0 if cursor.get("retry_requests") else next_history_delay(cursor)
                 self._release(db, workspace, connection, lease, delay)
         except AlfaBrowserError as error:
             code = error.code
             delay = (
-                5
-                if code == "browser_busy"
+                BUSY_RETRY
+                if code in {"browser_busy", "browser_priority_wait"}
                 else 30
                 if code == "settings_changed"
                 else 60
@@ -1569,7 +1609,9 @@ class AlfaMaxWorker:
             )
             try:
                 self.service.monitor.rollback(workspace, connection, lease)
-                observe({"phase": "error", "operation": "error", "client": None, "error_code": code})
+                waiting = code in {'browser_busy', 'browser_priority_wait'}
+                observe({"phase": "waiting" if waiting else "error", "operation": "waiting" if waiting else "error",
+                         "client": None, "error_code": None if waiting else code})
                 with self._transaction(workspace, connection, lease) as db:
                     current = self.service._row(db, workspace)
                     if session_snapshot is not None and not same_session(current, session_snapshot):
@@ -1579,7 +1621,7 @@ class AlfaMaxWorker:
                     if code in {"reauth_required", "otp_required"} and session_snapshot is not None:
                         if self.service.sessions.suspect(db, workspace, session_snapshot, 'history'):
                             delay = 0
-                    elif session_snapshot is None or same_session(current, session_snapshot):
+                    elif not waiting and (session_snapshot is None or same_session(current, session_snapshot)):
                         db.execute(text("UPDATE alfa_max_settings SET last_error_code=:code,updated_at=now() "
                                         "WHERE workspace_id=:w AND connection_id=:c"),
                                    {"w": workspace, "c": connection, "code": code})
