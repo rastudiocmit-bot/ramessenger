@@ -5,7 +5,7 @@ on:
     paths:
       - 'app/backend/**'
       - 'tests/**'
-      - 'requirements.txt'
+      - 'requirements*.txt'
       - '.github/workflows/verify.yml'
   workflow_dispatch:
 
@@ -24,12 +24,13 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
       CM_TEST_DATABASE_URL: postgresql+psycopg://postgres:isolated-test-password@127.0.0.1:5432/postgres
+      PYTHONPATH: app/backend/src
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,7 +43,7 @@ jobs:
           cache: npm
       - name: Install test dependencies
         run: |
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-test.txt
           npm ci --ignore-scripts
       - name: Python syntax
         run: python3 -m compileall -q app/backend/src app/backend/migrations scripts

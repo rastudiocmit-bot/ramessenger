@@ -199,13 +199,13 @@ Unknown после обрыва не пересылается автоматич
 
 ## Проверки и диагностика
 
-Из корня репозитория после установки `requirements.txt`:
+Из корня репозитория после установки `requirements-test.txt`:
 
 ```bash
 PYTHONPATH=app/backend/src python -m center_messenger.loader.adapters.example
 PYTHONPATH=app/backend/src python -m unittest discover -s tests -p 'test_loader.py' -v
 PYTHONPATH=app/backend/src python -m unittest discover -s tests -p 'test_loader_persistence.py' -v
-python -m unittest discover -s tests -p 'test_*.py' -v
+PYTHONPATH=app/backend/src python -m unittest discover -s tests -p 'test_*.py' -v
 npm test
 ```
 

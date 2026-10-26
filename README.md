@@ -43,8 +43,9 @@ curl --fail --silent --show-error http://127.0.0.1:8100/health/ready
 ## Проверки
 
 ```bash
+python3 -m pip install -r requirements-test.txt
 python3 -m compileall -q app/backend/src app/backend/migrations scripts
-python3 -m unittest discover -s tests -p 'test_*.py' -v
+PYTHONPATH=app/backend/src python3 -m unittest discover -s tests -p 'test_*.py' -v
 npm ci --ignore-scripts
 npm test
 docker run --rm --entrypoint alembic <image> -c /app/alembic.ini history
