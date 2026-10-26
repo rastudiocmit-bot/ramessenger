@@ -41,6 +41,9 @@ def join_sql(snapshot, *, c="c", cn="cn", am="am", alias="cp"):
         return f" LEFT JOIN LATERAL (SELECT NULL::jsonb AS payload) {alias} ON true "
     # This guard also detects a new, conflicting owner of a formerly unique
     # phone, not just edits to the previously selected card.
+    # Keep the two mutually exclusive contact/phone paths separate. A CASE in
+    # the customer filter prevents indexed contact lookups and scans the entire
+    # CRM catalog again for every pending dialog.
     return f""" LEFT JOIN LATERAL (
       SELECT e.payload FROM outbox_events e WHERE e.workspace_id={c}.workspace_id
         AND e.topic='{TOPIC}' AND e.event_key=concat(CAST(:card_connection AS text),':',{c}.contact_id)
@@ -48,15 +51,25 @@ def join_sql(snapshot, *, c="c", cn="cn", am="am", alias="cp"):
         AND e.payload->>'run'=CAST(:card_run AS text) AND e.payload->>'version'=CAST(:card_version AS text)
         AND e.payload->>'source'={c}.contact_id::text AND NOT {c}.crm_link_manual
         AND {cn}.kind='alfa_max_browser' AND {am}.crm_connection_id=:card_connection
-        AND e.payload->>'guard'=(SELECT md5(coalesce(string_agg({guard_piece()},'|' ORDER BY a.external_id,a.branch_id),''))
-          FROM alfa_customers a JOIN alfa_branches b ON b.workspace_id=a.workspace_id
-            AND b.connection_id=:card_connection AND b.external_id=a.branch_id AND b.available
-          WHERE a.workspace_id=e.workspace_id AND a.run_id=:card_run AND
-            (CASE WHEN e.payload->>'phone' IS NOT NULL THEN a.contact_id IN (
-               SELECT anchor.contact_id FROM alfa_customers anchor JOIN alfa_branches ab ON ab.workspace_id=anchor.workspace_id
-                 AND ab.connection_id=:card_connection AND ab.external_id=anchor.branch_id AND ab.available
-               WHERE anchor.workspace_id=e.workspace_id AND anchor.run_id=:card_run AND anchor.phones->>0=e.payload->>'phone')
-             ELSE a.contact_id={c}.contact_id END))
+        AND e.payload->>'guard'=(
+          SELECT md5(coalesce(string_agg(guarded.piece,'|' ORDER BY guarded.external_id,guarded.branch_id),''))
+          FROM (
+            SELECT a.external_id,a.branch_id,{guard_piece()} AS piece
+            FROM alfa_customers a JOIN alfa_branches b ON b.workspace_id=a.workspace_id
+              AND b.connection_id=:card_connection AND b.external_id=a.branch_id AND b.available
+            WHERE e.payload->>'phone' IS NULL AND a.workspace_id=e.workspace_id
+              AND a.run_id=:card_run AND a.contact_id={c}.contact_id
+            UNION ALL
+            SELECT a.external_id,a.branch_id,{guard_piece()} AS piece
+            FROM alfa_customers a JOIN alfa_branches b ON b.workspace_id=a.workspace_id
+              AND b.connection_id=:card_connection AND b.external_id=a.branch_id AND b.available
+            WHERE e.payload->>'phone' IS NOT NULL AND a.workspace_id=e.workspace_id
+              AND a.run_id=:card_run AND a.contact_id IN (
+                SELECT anchor.contact_id FROM alfa_customers anchor JOIN alfa_branches ab ON ab.workspace_id=anchor.workspace_id
+                  AND ab.connection_id=:card_connection AND ab.external_id=anchor.branch_id AND ab.available
+                WHERE anchor.workspace_id=e.workspace_id AND anchor.run_id=:card_run
+                  AND anchor.phones->>0=e.payload->>'phone')
+          ) guarded)
     ) {alias} ON true """
 
 
@@ -79,9 +92,32 @@ def pending_sql(snapshot):
 
 
 def is_pending(db, workspace, snapshot, contacts):
-    return db.execute(text("SELECT EXISTS(SELECT 1 FROM (" + pending_sql(snapshot) +
-        ") pending WHERE pending.contact_id=ANY(CAST(:card_contacts AS uuid[])))"),
-        {"w": workspace, **params(snapshot), "card_contacts": list(contacts)}).scalar_one()
+    contacts = tuple(contacts)
+    if not contacts:
+        return False
+    # Start with the requested family and persisted alias candidates. Validate
+    # only those candidates with the full identity guard, rather than computing
+    # and unnesting every pending family's projection for one cached card read.
+    # The candidate payload is a hint, never authority: stale/manual/changed
+    # choices still go through join_sql and the final verified family overlap.
+    source = ("CASE WHEN e.payload->>'source' ~ "
+        "'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' "
+        "THEN (e.payload->>'source')::uuid END")
+    aliases = (" UNION SELECT " + source + " FROM outbox_events e "
+        "WHERE e.workspace_id=:w AND e.topic='" + TOPIC + "' AND e.state='published' "
+        "AND e.payload->>'policy'='" + str(VERSION) + "' "
+        "AND e.payload->>'run'=CAST(:card_run AS text) "
+        "AND e.payload->>'version'=CAST(:card_version AS text) "
+        "AND e.payload->'contacts' ?| CAST(:card_contact_text AS text[])") if enabled(snapshot) else ""
+    return db.execute(text(
+        "WITH candidates AS MATERIALIZED (SELECT unnest(CAST(:card_contacts AS uuid[])) AS contact_id" + aliases + ") "
+        "SELECT EXISTS(SELECT 1 FROM candidates candidate JOIN conversations q ON q.contact_id=candidate.contact_id "
+        "AND q.workspace_id=:w JOIN connections cn ON cn.workspace_id=q.workspace_id AND cn.id=q.connection_id "
+        "LEFT JOIN alfa_max_settings am ON am.workspace_id=q.workspace_id AND am.connection_id=q.connection_id "
+        + join_sql(snapshot, c="q") + " WHERE q.kind='direct' AND q.needs_reply AND "
+        + family_sql("q") + " && CAST(:card_contacts AS uuid[]))"),
+        {"w": workspace, **params(snapshot), "card_contacts": list(contacts),
+         "card_contact_text": [str(contact) for contact in contacts]}).scalar_one()
 
 
 def selected(db, workspace, snapshot, conversation, source):
