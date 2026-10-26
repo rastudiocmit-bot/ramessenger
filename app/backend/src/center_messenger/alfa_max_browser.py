@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import socket
+import threading
 import time
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -178,15 +179,19 @@ def _history_url(origin, branch, direction, page):
     return base if page == 0 else f"{base}?page={page + 1}"
 
 
+def _hidden_markup(node):
+    return any(el.has_attr('hidden') or el.get('aria-hidden') == 'true'
+               or re.search(r'(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\.0+)?\s*(?:;|!important|$))', el.get('style', ''), re.I)
+               or bool({'hidden', 'd-none', 'invisible'} & set(el.get('class', [])))
+               or ('modal' in el.get('class', []) and not {'in', 'show'} & set(el.get('class', [])))
+               for el in [node, *node.parents] if getattr(el, 'attrs', None))
+
+
 def _login_form(soup):
     """A hidden password/change-password dialog is not evidence of logout."""
-    def hidden(node):
-        return any(el.has_attr('hidden') or el.get('aria-hidden') == 'true'
-                   or re.search(r'(?:display\s*:\s*none|visibility\s*:\s*hidden)', el.get('style', ''), re.I)
-                   or 'hidden' in el.get('class', []) for el in [node, *node.parents] if getattr(el, 'attrs', None))
     for form in soup.select('form'):
-        passwords = [p for p in form.select('input[type="password"]') if not hidden(p)]
-        identities = [p for p in form.select('input[name]') if not hidden(p)
+        passwords = [p for p in form.select('input[type="password"]') if not _hidden_markup(p)]
+        identities = [p for p in form.select('input[name]') if not _hidden_markup(p)
                       and re.search(r'email|login|username', p.get('name', ''), re.I)]
         action = urlsplit(form.get('action', '')).path
         login_marker = re.search(r'/(?:auth/)?(?:login|sign-?in)(?:/|$)', action, re.I)
@@ -194,6 +199,22 @@ def _login_form(soup):
         if passwords and identities and (login_marker or named_login):
             return True
     return False
+
+
+def _otp_form(soup):
+    return any(not _hidden_markup(node) and node.find_parent('form') is not None
+               for node in soup.select('input[autocomplete="one-time-code"],input[name="LoginForm[code]"],input[name="OtpForm[code]"]'))
+
+
+def _capture_state(error, context):
+    """Private recovery data; never part of public diagnostic/error metadata."""
+    try:
+        state = context.storage_state()
+        if isinstance(state, dict) and isinstance(state.get('cookies'), list):
+            error.browser_state = {key: state.get(key, []) for key in ('cookies', 'origins')}
+    except Exception:
+        pass
+    return error
 
 
 def _reject_history_response(reason, branch, direction, page, observed_page=None):
@@ -299,6 +320,8 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
     if html_size > MAX_HTML_BYTES:
         _reject_history_response("html_too_large", branch, direction, page)
     soup = BeautifulSoup(html, "html.parser")
+    if not soup.select_one('table.crm-table') and _otp_form(soup):
+        raise AlfaBrowserError('otp_required')
     if not soup.select_one('table.crm-table') and _login_form(soup):
         raise AlfaBrowserError("reauth_required")
     table = soup.select_one("table.crm-table")
@@ -629,6 +652,8 @@ def _customer_card_compose_url(markup, *, origin, branch, customer):
     if not isinstance(markup, str) or len(markup.encode("utf-8", "ignore")) > MAX_HTML_BYTES:
         raise AlfaBrowserError("form_unavailable")
     soup = BeautifulSoup(markup, "html.parser")
+    if _otp_form(soup):
+        raise AlfaBrowserError('otp_required')
     if _login_form(soup):
         raise AlfaBrowserError("reauth_required")
 
@@ -678,6 +703,8 @@ def parse_compose_form(html, *, origin, branch, customer):
     if not markup:
         raise AlfaBrowserError("form_unavailable")
     soup = BeautifulSoup(markup, "html.parser")
+    if _otp_form(soup):
+        raise AlfaBrowserError('otp_required')
     if _login_form(soup):
         raise AlfaBrowserError("reauth_required")
     for form in soup.select("form[action]"):
@@ -726,6 +753,9 @@ def parse_compose_form(html, *, origin, branch, customer):
 
 
 class AlfaMaxBrowser:
+    def __init__(self):
+        self._callback_context = threading.local()
+
     """Runs one short-lived isolated Chromium context per CRM operation."""
 
     @staticmethod
@@ -869,10 +899,10 @@ class AlfaMaxBrowser:
             if self._password_input(page) is not None:
                 raise AlfaBrowserError("credentials_rejected")
             return "active", context.storage_state()
-        except AlfaBrowserError:
-            raise
-        except Exception:
-            raise AlfaBrowserError("login_failed") from None
+        except AlfaBrowserError as error:
+            raise _capture_state(error, context)
+        except Exception as error:
+            raise _capture_state(AlfaBrowserError("login_failed", cause=_browser_cause(error)), context) from None
         finally:
             self._close(manager, browser, context)
 
@@ -894,10 +924,10 @@ class AlfaMaxBrowser:
             if self._otp_input(page) is not None or self._password_input(page) is not None:
                 raise AlfaBrowserError("otp_rejected")
             return "active", context.storage_state()
-        except AlfaBrowserError:
-            raise
-        except Exception:
-            raise AlfaBrowserError("otp_rejected") from None
+        except AlfaBrowserError as error:
+            raise _capture_state(error, context)
+        except Exception as error:
+            raise _capture_state(AlfaBrowserError("crm_unavailable", cause=_browser_cause(error)), context) from None
         finally:
             self._close(manager, browser, context)
 
@@ -918,7 +948,9 @@ class AlfaMaxBrowser:
             stage = "check_session"
             AlfaMaxBrowser._check_origin(page, origin)
             if response is None or response.status != 200:
-                raise AlfaBrowserError("crm_unavailable", http_status=response.status if response else None)
+                status = response.status if response else None
+                code = {401: 'reauth_required', 403: 'crm_access_denied', 429: 'crm_rate_limited'}.get(status, 'crm_unavailable')
+                raise AlfaBrowserError(code, http_status=status)
             stage = "parse_page"
             return parse_history_html(response.text(), origin=origin, branch=branch,
                                       direction=direction, page=page_number)
@@ -1004,7 +1036,7 @@ class AlfaMaxBrowser:
                     results.append(result)
                 except AlfaBrowserError as error:
                     error.request = error.request or request
-                    if not continue_on_error or error.code not in {"invalid_response", "crm_unavailable"}:
+                    if not continue_on_error or error.code not in {"invalid_response", "crm_unavailable", "crm_access_denied"}:
                         raise
                     results.append({"error": error.code, "stage": error.stage, "cause": error.cause,
                                     "http_status": error.http_status, "network_error": error.network_error,
@@ -1017,11 +1049,17 @@ class AlfaMaxBrowser:
                     # Commit each page before a slow or failed later page. A
                     # callback failure is not a navigation/browser failure.
                     in_callback = True
-                    on_result(request, results[-1], state)
+                    previous_context = getattr(self._callback_context, 'value', None)
+                    self._callback_context.value = (origin, context)
+                    try:
+                        on_result(request, results[-1], state)
+                    finally:
+                        self._callback_context.value = previous_context
                     in_callback = False
             stage = "save_session"
             return results, context.storage_state()
         except AlfaBrowserError as error:
+            _capture_state(error, context)
             error.stage = error.stage or stage
             error.request = error.request or request
             raise
@@ -1037,9 +1075,15 @@ class AlfaMaxBrowser:
         origin = normalize_origin(origin)
         if not re.fullmatch(r"[1-9][0-9]{0,18}", str(branch)):
             raise AlfaBrowserError("invalid_response")
-        manager = browser = context = None
+        manager = browser = context = page = None
+        shared = getattr(self._callback_context, 'value', None)
+        borrowed = bool(shared and shared[0] == origin)
         try:
-            manager, browser, context, page = self._open(origin, state)
+            if borrowed:
+                context = shared[1]
+                page = context.new_page()
+            else:
+                manager, browser, context, page = self._open(origin, state)
             page.goto(
                 f"{origin}/settings/{branch}/sms-template/index",
                 wait_until="domcontentloaded",
@@ -1048,6 +1092,10 @@ class AlfaMaxBrowser:
             self._check_origin(page, origin)
             page.wait_for_timeout(2000)
             soup = BeautifulSoup(page.content(), "html.parser")
+            if _otp_form(soup):
+                raise AlfaBrowserError('otp_required')
+            if _login_form(soup):
+                raise AlfaBrowserError('reauth_required')
             templates = []
             for item in soup.select(".sortable1-item[data-id]"):
                 raw_id = item.get("data-id", "")
@@ -1064,7 +1112,18 @@ class AlfaMaxBrowser:
         except Exception:
             raise AlfaBrowserError("crm_unavailable") from None
         finally:
-            self._close(manager, browser, context)
+            if borrowed:
+                try:
+                    state.update(context.storage_state())
+                except Exception:
+                    pass
+                try:
+                    if page:
+                        page.close()
+                except Exception:
+                    pass
+            else:
+                self._close(manager, browser, context)
 
     def send(self, origin, state, branch, customer, text):
         origin = normalize_origin(origin)
@@ -1253,9 +1312,14 @@ class AlfaMaxBrowser:
                 data.get("toastr_success") or data.get("success") is True
             ):
                 raise AlfaBrowserError("send_unknown")
-            return {"accepted": True, "branch_id": int(branch), "text_length": len(text),
-                    "browser_state": context.storage_state()}
+            accepted = {"accepted": True, "branch_id": int(branch), "text_length": len(text)}
+            try:
+                accepted['browser_state'] = context.storage_state()
+            except Exception:
+                logging.getLogger(__name__).warning('Native send accepted; browser state export unavailable')
+            return accepted
         except AlfaBrowserError as error:
+            _capture_state(error, context)
             if error.code in {
                 "form_unavailable", "max_form_missing", "max_recipient_missing",
                 "crm_customer_missing", "crm_access_denied", "crm_rate_limited",

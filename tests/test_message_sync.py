@@ -669,6 +669,12 @@ class MessageSyncTests(unittest.TestCase):
                                  {"w": self.workspace}).scalar_one()
         return cursor
 
+    def test_otp_page_in_background_requests_confirmation_without_password_login(self):
+        cursor = self.run_worker({'projection_version': PROJECTION_VERSION}, browser_effect=AlfaBrowserError('otp_required'))
+        self.assertTrue(cursor['session_control']['needs_check'])
+        self.assertEqual(cursor['session_control']['phase'], 'checking')
+        self.service.browser.login.assert_not_called()
+
     def test_completed_backfill_does_not_restart_on_every_poll(self):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 2},
                                  page_result=lambda request: {"messages": [], "has_more": request[2] == 0})
@@ -2802,7 +2808,19 @@ class MessageSyncTests(unittest.TestCase):
                  "activity": {"client": {"name": "Old operation"}}, "live_cycle": {"added_records": 1}}
         self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:p AS jsonb) WHERE workspace_id=:w"),
                         {"w": self.workspace, "p": json.dumps(saved)})
+        old_cipher = self.db.execute(text("SELECT session_ciphertext FROM alfa_max_settings WHERE workspace_id=:w"), {'w': self.workspace}).scalar_one()
         connection, version = self.service._ensure_channel(None, self.workspace, "test@example.test", self.crm)
+        self.assertEqual(version, 1)
+        self.assertEqual(self.db.execute(text("SELECT session_ciphertext FROM alfa_max_settings WHERE workspace_id=:w"), {'w': self.workspace}).scalar_one(), old_cipher)
+        crm = {'origin': 'https://test.s20.online', 'connection_id': self.crm, 'version': 1}
+        self.service._crm = Mock(return_value=(crm, [1]))
+        self.service.alfa._row = Mock(return_value=crm)
+        self.service.status = Mock(return_value={})
+        self.service.browser.login.return_value = ('active', {'cookies': []})
+        self.service.browser.check_session.return_value = {'cookies': []}
+        self.service.vault.seal_browser_state.return_value = 'new-session'
+        self.service.connect(SimpleNamespace(user_id=self.user), self.workspace, 'test@example.test', SimpleNamespace(get_secret_value=lambda: 'synthetic-only'))
+        version = self.db.execute(text('SELECT version FROM alfa_max_settings WHERE workspace_id=:w'), {'w': self.workspace}).scalar_one()
         cursor = self.db.execute(text("SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w"), {"w": self.workspace}).scalar_one()
         self.assertEqual(connection, self.channel)
         self.assertEqual(version, 2)
@@ -2816,8 +2834,18 @@ class MessageSyncTests(unittest.TestCase):
         self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=CAST(:p AS jsonb) WHERE workspace_id=:w"),
                         {"w": self.workspace, "p": json.dumps({"complete:1:sent": True, "archive_paused": True})})
         self.service._ensure_channel(None, self.workspace, "other@example.test", self.crm)
+        self.assertEqual(self.db.execute(text("SELECT history_cursor->>'complete:1:sent' FROM alfa_max_settings WHERE workspace_id=:w"), {'w': self.workspace}).scalar_one(), 'true')
+        crm = {'origin': 'https://test.s20.online', 'connection_id': self.crm, 'version': 1}
+        self.service._crm = Mock(return_value=(crm, [1]))
+        self.service.alfa._row = Mock(return_value=crm)
+        self.service.status = Mock(return_value={})
+        self.service.browser.login.return_value = ('active', {'cookies': []})
+        self.service.browser.check_session.return_value = {'cookies': []}
+        self.service.vault.seal_browser_state.return_value = 'new-session'
+        self.service.connect(SimpleNamespace(user_id=self.user), self.workspace, 'other@example.test', SimpleNamespace(get_secret_value=lambda: 'synthetic-only'))
         cursor = self.db.execute(text("SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w"), {"w": self.workspace}).scalar_one()
-        self.assertEqual(cursor, {})
+        self.assertNotIn('complete:1:sent', cursor)
+        self.assertNotIn('archive_paused', cursor)
 
     def streaming_browser(self, page, before=None, after=None):
         def read(origin, session, requests, **kwargs):

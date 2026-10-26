@@ -573,18 +573,24 @@
       form.elements.password.value = "";
     }
     show(form, alfaReconnectEditing || (!restoring && payload.state !== "otp_required" && payload.state !== "active"));
-    if (!alfaReconnectEditing && form.elements.auto_reconnect) form.elements.auto_reconnect.checked = recovery.credentials_saved ? Boolean(recovery.enabled) : true;
+    if (!alfaReconnectEditing && form.elements.auto_reconnect) form.elements.auto_reconnect.checked = recovery.configured ? Boolean(recovery.enabled) : true;
     show($("#alfa-max-otp-form"), payload.state === "otp_required");
     show($("#alfa-max-actions"), payload.configured);
     const details = [];
-    details.push(recovery.credentials_saved && recovery.enabled ? "Автоматический вход включён" : "Для автоматического входа один раз сохраните данные подключения");
+    details.push(recovery.configured && !recovery.enabled ? "Автоматическое восстановление выключено" : recovery.credentials_saved && recovery.enabled ? "Автоматический вход включён" : "Для автоматического входа один раз сохраните данные подключения");
     if (recovery.after && restoring) details.push("Следующая проверка: " + date(recovery.after));
     if (payload.last_sync_at) details.push("Последняя синхронизация: " + date(payload.last_sync_at));
     if (payload.crm_configured && payload.branches?.length) details.push("Филиалов: " + payload.branches.length);
     if (!payload.crm_configured) details.push("Сначала настройте подключение AlfaCRM в соседнем блоке.");
     else if (!payload.branches?.length) details.push("Сначала загрузите филиалы AlfaCRM.");
     $("#alfa-max-info").textContent = details.join(" · ");
-    notice(!payload.vault_ready ? "На сервере не настроен ключ хранения веб-сессий." : (payload.error || ""), $("#alfa-max-error"));
+    notice(!payload.vault_ready ? "На сервере не настроен ключ хранения веб-сессий." : ((alfaReconnectEditing && recovery.manual_error) || payload.error || ""), $("#alfa-max-error"));
+    const events = $("#alfa-max-session-events");
+    if (events) {
+      const names = { authorization_check_requested: "Запрошена проверка авторизации", automatic_login_started: "Начат автоматический вход", confirmation_completed: "Код принят, проверяем подключение", manual_disconnect: "Подключение отключено администратором", active: "Авторизация подтверждена", checking: "Проверяем новую сессию", manual_login: "Вход через настройки", manual_login_failed: "Попытка входа не завершена", otp_required: "Нужен код подтверждения", recovery_credentials_required: "Нужны данные для автоматического входа", recovery_retry: "Проверка отложена до повторной попытки", credentials_rejected: "Данные входа не приняты" };
+      events.replaceChildren(...(recovery.recent || []).slice().reverse().map(item => node("p", `${date(item.at)} · ${names[item.event] || "Изменение подключения"}`, "form-note")));
+      if (!events.children.length) events.append(node("p", "События появятся при следующей проверке подключения.", "form-note"));
+    }
     alfaMaxButtons();
     const hasSession = payload.configured && payload.state !== "not_configured";
     show($("#history-monitor-empty"), !hasSession);
@@ -594,7 +600,11 @@
     clearTimeout(alfaSessionTimer);
     const epoch = state.epoch;
     alfaSessionTimer = setTimeout(() => {
-      if (epoch === state.epoch && state.pane === "connections") loadAlfaMax().catch(() => {});
+      const poll = () => {
+        if (epoch !== state.epoch || state.pane !== "connections") return;
+        loadAlfaMax().catch(() => { alfaSessionTimer = setTimeout(poll, 5000); });
+      };
+      poll();
     }, restoring || payload.state === "otp_required" ? 5000 : 15000);
   }
   $("#alfa-max-recovery-setup")?.addEventListener("click", () => {

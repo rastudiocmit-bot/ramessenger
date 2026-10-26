@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from center_messenger.accounts import audit
 from center_messenger.auth_security import AuthError
@@ -30,7 +31,8 @@ def same_session(current, snapshot):
     return bool(current and snapshot and current['connection_id'] == snapshot['connection_id']
                 and current['version'] == snapshot['version']
                 and current['session_ciphertext'] == snapshot['session_ciphertext']
-                and current.get('crm_connection_id') == snapshot.get('crm_connection_id'))
+                and all(current.get(key) == snapshot.get(key) for key in (
+                    'crm_connection_id', 'current_crm_connection_id', 'crm_origin', 'crm_settings_version')))
 
 
 def control(row):
@@ -44,6 +46,16 @@ def stamp(value):
         return result if result.tzinfo else datetime.min.replace(tzinfo=UTC)
     except (TypeError, ValueError):
         return datetime.min.replace(tzinfo=UTC)
+
+
+def event(meta, name, *, row, state=None, source=None, cause=None, new_generation=False):
+    """Bounded non-secret transition history; never copy page/exception text."""
+    item = {'at': datetime.now(UTC).isoformat(), 'event': name, 'from': row['state'],
+            'state': state or row['state'], 'generation': row['version'],
+            'generation_after': row['version'] + int(new_generation),
+            'source': source or meta.get('source'), 'cause': cause}
+    meta.update(at=item['at'], event=name)
+    meta['recent'] = [*meta.get('recent', [])[-9:], item]
 
 
 class NativeSessions:
@@ -63,6 +75,10 @@ class NativeSessions:
             raise
         try:
             yield lease
+        except AlfaBrowserError as error:
+            if administrative and error.code in {'settings_changed', 'browser_busy'}:
+                raise AuthError(409, 'Подключение изменилось. Повторите действие с актуальными настройками.') from None
+            raise
         finally:
             self.release(lease)
 
@@ -87,17 +103,38 @@ class NativeSessions:
             return {'workspace': workspace, 'connection': connection, 'token': token, 'row': dict(row)}
 
     def renew(self, db, lease):
+        db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': lease['workspace']})
         current = self._row(db, lease['workspace'])
         meta = control(current) if current else {}
         if not same_session(current, lease['row']) or meta.get('lease') != lease['token']:
             raise AlfaBrowserError('settings_changed')
-        meta['until'] = (datetime.now(UTC) + timedelta(seconds=180)).isoformat()
-        self._write_control(db, lease['workspace'], meta)
+        now = datetime.now(UTC)
+        if stamp(meta.get('until')) > now + timedelta(seconds=90):
+            return
+        changed = db.execute(text("UPDATE alfa_max_settings SET history_cursor=jsonb_set(history_cursor,"
+            "'{session_control,until}',CAST(:until AS jsonb)) WHERE workspace_id=:w AND connection_id=:c "
+            "AND version=:v AND session_ciphertext IS NOT DISTINCT FROM :s "
+            "AND history_cursor#>>'{session_control,lease}'=:token RETURNING connection_id"),
+            {'w': lease['workspace'], 'c': lease['connection'], 'v': current['version'],
+             's': current['session_ciphertext'], 'token': lease['token'],
+             'until': json.dumps((now + timedelta(seconds=180)).isoformat())}).scalar_one_or_none()
+        if changed is None:
+            raise AlfaBrowserError('settings_changed')
 
     def release(self, lease):
         if not lease:
             return
+        try:
+            self._release(lease)
+        except SQLAlchemyError:
+            # TTL releases a stranded lease. Cleanup must not replace a known
+            # accepted send with an unknown result or trigger its replay.
+            logging.getLogger(__name__).warning('Native CRM lease cleanup deferred workspace=%s connection=%s',
+                                                lease['workspace'], lease['connection'])
+
+    def _release(self, lease):
         with self.service.accounts.transaction(workspace_id=lease['workspace']) as db:
+            db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': lease['workspace']})
             db.execute(text("UPDATE alfa_max_settings SET history_cursor=history_cursor "
                             "#- '{session_control,lease}' #- '{session_control,until}' "
                             "WHERE workspace_id=:w AND connection_id=:c "
@@ -109,12 +146,13 @@ class NativeSessions:
                        {'w': lease['workspace'], 'c': lease['connection']})
 
     def suspect(self, db, workspace, snapshot, source):
+        db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': workspace})
         current = self._row(db, workspace)
         if not same_session(current, snapshot) or current['state'] != 'active':
             return False
         meta = control(current)
-        meta.update(needs_check=True, phase='checking', source=source, after=None,
-                    event='authorization_check_requested', at=datetime.now(UTC).isoformat())
+        meta.update(needs_check=True, phase='checking', source=source, after=None)
+        event(meta, 'authorization_check_requested', row=current, source=source)
         self._write_control(db, workspace, meta)
         self.service._schedule(db, workspace, current['connection_id'])
         audit(db, 'alfa_max_session_check_requested', workspace_id=workspace, subject_id=current['connection_id'])
@@ -130,9 +168,13 @@ class NativeSessions:
             previous = self.service.vault.open_browser_state(workspace, lease['connection'], row['session_ciphertext'])
             encrypted = self.service.vault.seal_browser_state(workspace, lease['connection'], merge_state(previous, browser_state))
             meta = control(row)
-            meta.update(needs_check=needs_check, phase=phase, after=after, attempts=attempts, cause=cause,
-                        event=code or phase, at=datetime.now(UTC).isoformat())
+            transition = (row['state'] != state or meta.get('phase') != phase or code or cause or new_generation)
+            meta.update(needs_check=needs_check, phase=phase, after=after, attempts=attempts, cause=cause)
+            if transition:
+                event(meta, code or phase, row=row, state=state, cause=cause, new_generation=new_generation)
             self._write_control(db, workspace, meta)
+            if code is None and state == 'active' and (row.get('last_error_code') or '').startswith('history_'):
+                code = row['last_error_code']
             changed = db.execute(text(
                 "UPDATE alfa_max_settings SET state=:state,session_ciphertext=:s,last_error_code=:code,"
                 "version=version+:bump,updated_at=now() WHERE workspace_id=:w AND connection_id=:c "
@@ -143,8 +185,10 @@ class NativeSessions:
                 raise AlfaBrowserError('settings_changed')
             db.execute(text('UPDATE connections SET status=:s WHERE workspace_id=:w AND id=:c'),
                        {'w': workspace, 'c': lease['connection'], 's': 'active' if state == 'active' else 'connecting' if state == 'otp_required' else 'reauth_required'})
-            lease['row'].update(version=changed, session_ciphertext=encrypted, state=state)
-            audit(db, 'alfa_max_session_' + phase, workspace_id=workspace, subject_id=lease['connection'])
+            lease['row'].update(version=changed, session_ciphertext=encrypted, state=state,
+                                history_cursor=dict(row.get('history_cursor') or {}) | {CONTROL: meta})
+            if transition:
+                audit(db, 'alfa_max_session_' + phase, workspace_id=workspace, subject_id=lease['connection'])
             logging.getLogger(__name__).info('Native CRM session transition workspace=%s connection=%s phase=%s generation=%s code=%s',
                 workspace, lease['connection'], phase, changed, code)
 
@@ -158,20 +202,31 @@ class NativeSessions:
             meta = control(row)
             if row['state'] == 'not_configured' or row['state'] == 'otp_required':
                 return 300
-            if meta.get('phase') in {'credentials_required', 'credentials_rejected', 'confirmation_required'}:
+            if meta.get('phase') in {'credentials_required', 'credentials_rejected', 'confirmation_required', 'automatic_disabled'}:
                 return 300
             if stamp(meta.get('after')) > now:
                 return max(1, int((stamp(meta['after']) - now).total_seconds()))
             state = self.service.vault.open_browser_state(workspace, connection, row['session_ciphertext'])
             with self.service.accounts.transaction(workspace_id=workspace) as db:
-                branch = db.execute(text('SELECT external_id FROM alfa_branches WHERE workspace_id=:w '
-                    'AND connection_id=:c AND available ORDER BY external_id LIMIT 1'),
-                    {'w': workspace, 'c': row['crm_connection_id']}).scalar_one_or_none()
-            if not branch:
+                branches = db.execute(text('SELECT external_id FROM alfa_branches WHERE workspace_id=:w '
+                    'AND connection_id=:c AND available ORDER BY external_id'),
+                    {'w': workspace, 'c': row['crm_connection_id']}).scalars().all()
+            if not branches:
                 return 300
+            def check_available(browser_state):
+                # A branch-level permission denial does not prove logout.
+                for branch in branches:
+                    with self.service.accounts.transaction(workspace_id=workspace) as db:
+                        self.renew(db, lease)
+                    try:
+                        return self.service.browser.check_session(row['crm_origin'], browser_state, branch)
+                    except AlfaBrowserError as error:
+                        if error.code != 'crm_access_denied':
+                            raise
+                raise AlfaBrowserError('crm_access_denied')
             # A stale/auth-looking response must never trigger a new login by itself.
             try:
-                checked = self.service.browser.check_session(row['crm_origin'], state, branch)
+                checked = check_available(state)
                 self.finish(lease, checked, state='active', new_generation=True)
                 return 0
             except AlfaBrowserError as error:
@@ -180,21 +235,30 @@ class NativeSessions:
                 confirmed_expired = True
             credentials = state.get(SECRET) or {}
             if not credentials.get('enabled') or not credentials.get('password'):
-                self.finish(lease, state, state='reauth_required', code='recovery_credentials_required', phase='credentials_required')
+                disabled = meta.get('enabled') is False
+                self.finish(lease, state, state='reauth_required',
+                            code='recovery_disabled' if disabled else 'recovery_credentials_required',
+                            phase='automatic_disabled' if disabled else 'credentials_required')
                 return 300
             with self.service.accounts.transaction(workspace_id=workspace) as db:
                 self.renew(db, lease)
                 current = self._row(db, workspace)
                 value = control(current)
-                value.update(phase='reconnecting', event='automatic_login_started', at=now.isoformat())
+                value.update(phase='reconnecting')
+                event(value, 'automatic_login_started', row=current)
                 self._write_control(db, workspace, value)
+                audit(db, 'alfa_max_session_login_started', workspace_id=workspace, subject_id=connection)
             stage = 'login'
             status, renewed = self.service.browser.login(row['crm_origin'], credentials['email'], credentials['password'])
             if status == 'active':
+                # Save the new cookies BEFORE the confirmation read. If that
+                # read times out, retry these cookies instead of another login.
+                self.finish(lease, renewed, state='active', phase='checking', needs_check=True, new_generation=True)
+                confirmed_expired = False
                 stage = 'verify_login'
-                renewed = self.service.browser.check_session(row['crm_origin'], renewed, branch)
+                renewed = check_available(renewed)
             self.finish(lease, renewed, state=status, code='otp_required' if status == 'otp_required' else None,
-                        phase='confirmation_required' if status == 'otp_required' else 'active', new_generation=True)
+                        phase='confirmation_required' if status == 'otp_required' else 'active', new_generation=status != 'active')
             return 300 if status == 'otp_required' else 0
         except AlfaBrowserError as error:
             if error.code in {'settings_changed', 'browser_busy'}:
@@ -203,6 +267,12 @@ class NativeSessions:
             row = lease['row']
             # A local IO error preserves the encrypted state and credentials.
             state = self.service.vault.open_browser_state(workspace, connection, row['session_ciphertext'])
+            partial = getattr(error, 'browser_state', None)
+            if isinstance(partial, dict) and isinstance(partial.get('cookies'), list):
+                state = merge_state(state, partial)
+            if error.code == 'otp_required':
+                self.finish(lease, state, state='otp_required', code='otp_required', phase='confirmation_required')
+                return 300
             attempts = int(control(row).get('attempts', 0)) + 1
             blocked = error.code in {'credentials_rejected', 'otp_rejected', 'login_form_unknown', 'otp_unavailable'}
             delay = (60, 300, 900)[min(attempts - 1, 2)]
@@ -210,7 +280,7 @@ class NativeSessions:
             self.finish(lease, state, state='reauth_required' if confirmed_expired or row['state'] == 'reauth_required' else 'active', code=code,
                         phase='credentials_rejected' if blocked else 'waiting', attempts=attempts,
                         after=None if blocked else (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(),
-                        needs_check=not blocked and not confirmed_expired, cause=error.code)
+                        needs_check=not blocked, cause=error.code)
             return delay
         finally:
             self.release(lease)
@@ -227,6 +297,8 @@ class CoordinatedHistoryReader:
             row = operation['row']
             if row['state'] != 'active' or control(row).get('needs_check'):
                 raise AlfaBrowserError('browser_busy')
+            if row.get('crm_origin') != origin:
+                raise AlfaBrowserError('settings_changed')
             fresh = self.service.vault.open_browser_state(self.workspace, self.connection, row['session_ciphertext'])
             on_progress, on_result = options.pop('on_progress', None), options.pop('on_result', None)
             def heartbeat():

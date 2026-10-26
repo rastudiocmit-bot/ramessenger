@@ -379,6 +379,8 @@ def main(argv=None):
             current = operation['row']
             if current['state'] != 'active' or control(current).get('needs_check'):
                 raise AlfaBrowserError('browser_busy')
+            if current.get('crm_origin') != source['origin']:
+                raise AlfaBrowserError('settings_changed')
             state = vault.open_browser_state(workspace, source['connection_id'], current['session_ciphertext'])
             def progress(value):
                 with service.accounts.transaction(workspace_id=workspace) as db:
