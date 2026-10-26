@@ -92,7 +92,9 @@ class ChatReader:
         self.list_windows = ListWindows()
 
     def _can_write(self, db, actor, workspace):
-        return self.max.accounts._workspace(db, actor, workspace)["role"] != "observer"
+        from center_messenger.auth_security import can_send_messages
+        member = self.max.accounts._workspace(db, actor, workspace)
+        return can_send_messages(member["role"], member.get("sections"))
 
     def _require_write(self, db, actor, workspace):
         if not self._can_write(db, actor, workspace):
@@ -268,7 +270,7 @@ class ChatReader:
                     "am.history_cursor AS crm_history_cursor,am.state AS crm_history_state,"
                     "am.last_error_code AS crm_history_error,"
                     "CASE WHEN cn.kind='alfa_max_browser' THEN "
-                    "(am.state='active' AND am.session_ciphertext IS NOT NULL AND EXISTS("
+                    "(am.state='active' AND am.session_ciphertext IS NOT NULL AND coalesce(am.history_cursor#>>'{session_control,needs_check}','false')<>'true' AND EXISTS("
                     "SELECT 1 FROM alfa_settings ax WHERE ax.workspace_id=c.workspace_id "
                     "AND ax.connection_id=am.crm_connection_id "
                     "AND ax.secret_ciphertext IS NOT NULL) AND c.contact_id IS NOT NULL "

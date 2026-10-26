@@ -1,0 +1,244 @@
+"""Fenced native-browser IO and bounded server-side authorization recovery.
+
+Recovery credentials live INSIDE the existing AEAD browser-state envelope.
+Only non-secret coordination metadata lives in the cursor. No schema change.
+"""
+import json
+import logging
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+from sqlalchemy import text
+
+from center_messenger.accounts import audit
+from center_messenger.auth_security import AuthError
+from center_messenger.alfa_max_browser import AlfaBrowserError
+
+CONTROL = 'session_control'
+SECRET = '_cm_login'
+
+
+def merge_state(previous, renewed):
+    result = {key: renewed.get(key, []) for key in ('cookies', 'origins')}
+    if isinstance(previous, dict) and isinstance(previous.get(SECRET), dict):
+        result[SECRET] = dict(previous[SECRET])
+    return result
+
+
+def same_session(current, snapshot):
+    return bool(current and snapshot and current['connection_id'] == snapshot['connection_id']
+                and current['version'] == snapshot['version']
+                and current['session_ciphertext'] == snapshot['session_ciphertext']
+                and current.get('crm_connection_id') == snapshot.get('crm_connection_id'))
+
+
+def control(row):
+    value = (row.get('history_cursor') or {}).get(CONTROL) or {}
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def stamp(value):
+    try:
+        result = datetime.fromisoformat(value)
+        return result if result.tzinfo else datetime.min.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=UTC)
+
+
+class NativeSessions:
+    def __init__(self, service):
+        self.service = service
+
+    def _row(self, db, workspace):
+        return self.service._row(db, workspace)
+
+    @contextmanager
+    def operation(self, workspace, connection, snapshot=None, *, administrative=False):
+        try:
+            lease = self.claim(workspace, connection, snapshot)
+        except AlfaBrowserError:
+            if administrative:
+                raise AuthError(409, 'Браузер AlfaCRM занят или подключение изменилось. Повторите действие через несколько секунд.') from None
+            raise
+        try:
+            yield lease
+        finally:
+            self.release(lease)
+
+    @staticmethod
+    def _write_control(db, workspace, value):
+        db.execute(text("UPDATE alfa_max_settings SET history_cursor=jsonb_set(history_cursor,"
+                        "'{session_control}',CAST(:value AS jsonb)) WHERE workspace_id=:w"),
+                   {'w': workspace, 'value': json.dumps(value)})
+
+    def claim(self, workspace, connection, snapshot=None):
+        with self.service.accounts.transaction(workspace_id=workspace) as db:
+            db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': workspace})
+            row = self._row(db, workspace)
+            if not row or row['connection_id'] != connection or (snapshot and not same_session(row, snapshot)):
+                raise AlfaBrowserError('settings_changed')
+            meta, now = control(row), datetime.now(UTC)
+            if meta.get('lease') and stamp(meta.get('until')) > now:
+                raise AlfaBrowserError('browser_busy')
+            token = str(uuid4())
+            meta.update(lease=token, until=(now + timedelta(seconds=180)).isoformat())
+            self._write_control(db, workspace, meta)
+            return {'workspace': workspace, 'connection': connection, 'token': token, 'row': dict(row)}
+
+    def renew(self, db, lease):
+        current = self._row(db, lease['workspace'])
+        meta = control(current) if current else {}
+        if not same_session(current, lease['row']) or meta.get('lease') != lease['token']:
+            raise AlfaBrowserError('settings_changed')
+        meta['until'] = (datetime.now(UTC) + timedelta(seconds=180)).isoformat()
+        self._write_control(db, lease['workspace'], meta)
+
+    def release(self, lease):
+        if not lease:
+            return
+        with self.service.accounts.transaction(workspace_id=lease['workspace']) as db:
+            db.execute(text("UPDATE alfa_max_settings SET history_cursor=history_cursor "
+                            "#- '{session_control,lease}' #- '{session_control,until}' "
+                            "WHERE workspace_id=:w AND connection_id=:c "
+                            "AND history_cursor#>>'{session_control,lease}'=:token"),
+                       {'w': lease['workspace'], 'c': lease['connection'], 'token': lease['token']})
+
+            db.execute(text("UPDATE alfa_max_settings SET history_cursor=history_cursor-'session_control' "
+                            "WHERE workspace_id=:w AND connection_id=:c AND history_cursor->'session_control'='{}'::jsonb"),
+                       {'w': lease['workspace'], 'c': lease['connection']})
+
+    def suspect(self, db, workspace, snapshot, source):
+        current = self._row(db, workspace)
+        if not same_session(current, snapshot) or current['state'] != 'active':
+            return False
+        meta = control(current)
+        meta.update(needs_check=True, phase='checking', source=source, after=None,
+                    event='authorization_check_requested', at=datetime.now(UTC).isoformat())
+        self._write_control(db, workspace, meta)
+        self.service._schedule(db, workspace, current['connection_id'])
+        audit(db, 'alfa_max_session_check_requested', workspace_id=workspace, subject_id=current['connection_id'])
+        return True
+
+    def finish(self, lease, browser_state, *, state, code=None, phase='active', after=None,
+               attempts=0, new_generation=False, needs_check=False, cause=None):
+        workspace = lease['workspace']
+        with self.service.accounts.transaction(workspace_id=workspace) as db:
+            db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': workspace})
+            self.renew(db, lease)
+            row = self._row(db, workspace)
+            previous = self.service.vault.open_browser_state(workspace, lease['connection'], row['session_ciphertext'])
+            encrypted = self.service.vault.seal_browser_state(workspace, lease['connection'], merge_state(previous, browser_state))
+            meta = control(row)
+            meta.update(needs_check=needs_check, phase=phase, after=after, attempts=attempts, cause=cause,
+                        event=code or phase, at=datetime.now(UTC).isoformat())
+            self._write_control(db, workspace, meta)
+            changed = db.execute(text(
+                "UPDATE alfa_max_settings SET state=:state,session_ciphertext=:s,last_error_code=:code,"
+                "version=version+:bump,updated_at=now() WHERE workspace_id=:w AND connection_id=:c "
+                "AND version=:v AND session_ciphertext=:old RETURNING version"
+            ), {'w': workspace, 'c': lease['connection'], 'state': state, 's': encrypted, 'code': code,
+                'v': row['version'], 'old': row['session_ciphertext'], 'bump': int(new_generation)}).scalar_one_or_none()
+            if changed is None:
+                raise AlfaBrowserError('settings_changed')
+            db.execute(text('UPDATE connections SET status=:s WHERE workspace_id=:w AND id=:c'),
+                       {'w': workspace, 'c': lease['connection'], 's': 'active' if state == 'active' else 'connecting' if state == 'otp_required' else 'reauth_required'})
+            lease['row'].update(version=changed, session_ciphertext=encrypted, state=state)
+            audit(db, 'alfa_max_session_' + phase, workspace_id=workspace, subject_id=lease['connection'])
+            logging.getLogger(__name__).info('Native CRM session transition workspace=%s connection=%s phase=%s generation=%s code=%s',
+                workspace, lease['connection'], phase, changed, code)
+
+    def recover(self, workspace, connection):
+        """One recovery attempt. Queue delay bounds retries across restarts."""
+        lease = self.claim(workspace, connection)
+        confirmed_expired = False
+        stage = 'check_session'
+        try:
+            row, now = lease['row'], datetime.now(UTC)
+            meta = control(row)
+            if row['state'] == 'not_configured' or row['state'] == 'otp_required':
+                return 300
+            if meta.get('phase') in {'credentials_required', 'credentials_rejected', 'confirmation_required'}:
+                return 300
+            if stamp(meta.get('after')) > now:
+                return max(1, int((stamp(meta['after']) - now).total_seconds()))
+            state = self.service.vault.open_browser_state(workspace, connection, row['session_ciphertext'])
+            with self.service.accounts.transaction(workspace_id=workspace) as db:
+                branch = db.execute(text('SELECT external_id FROM alfa_branches WHERE workspace_id=:w '
+                    'AND connection_id=:c AND available ORDER BY external_id LIMIT 1'),
+                    {'w': workspace, 'c': row['crm_connection_id']}).scalar_one_or_none()
+            if not branch:
+                return 300
+            # A stale/auth-looking response must never trigger a new login by itself.
+            try:
+                checked = self.service.browser.check_session(row['crm_origin'], state, branch)
+                self.finish(lease, checked, state='active', new_generation=True)
+                return 0
+            except AlfaBrowserError as error:
+                if error.code != 'reauth_required':
+                    raise
+                confirmed_expired = True
+            credentials = state.get(SECRET) or {}
+            if not credentials.get('enabled') or not credentials.get('password'):
+                self.finish(lease, state, state='reauth_required', code='recovery_credentials_required', phase='credentials_required')
+                return 300
+            with self.service.accounts.transaction(workspace_id=workspace) as db:
+                self.renew(db, lease)
+                current = self._row(db, workspace)
+                value = control(current)
+                value.update(phase='reconnecting', event='automatic_login_started', at=now.isoformat())
+                self._write_control(db, workspace, value)
+            stage = 'login'
+            status, renewed = self.service.browser.login(row['crm_origin'], credentials['email'], credentials['password'])
+            if status == 'active':
+                stage = 'verify_login'
+                renewed = self.service.browser.check_session(row['crm_origin'], renewed, branch)
+            self.finish(lease, renewed, state=status, code='otp_required' if status == 'otp_required' else None,
+                        phase='confirmation_required' if status == 'otp_required' else 'active', new_generation=True)
+            return 300 if status == 'otp_required' else 0
+        except AlfaBrowserError as error:
+            if error.code in {'settings_changed', 'browser_busy'}:
+                return 10
+            logging.getLogger(__name__).warning('Native CRM recovery failed workspace=%s connection=%s stage=%s code=%s', workspace, connection, stage, error.code)
+            row = lease['row']
+            # A local IO error preserves the encrypted state and credentials.
+            state = self.service.vault.open_browser_state(workspace, connection, row['session_ciphertext'])
+            attempts = int(control(row).get('attempts', 0)) + 1
+            blocked = error.code in {'credentials_rejected', 'otp_rejected', 'login_form_unknown', 'otp_unavailable'}
+            delay = (60, 300, 900)[min(attempts - 1, 2)]
+            code = error.code if blocked else 'recovery_retry'
+            self.finish(lease, state, state='reauth_required' if confirmed_expired or row['state'] == 'reauth_required' else 'active', code=code,
+                        phase='credentials_rejected' if blocked else 'waiting', attempts=attempts,
+                        after=None if blocked else (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(),
+                        needs_check=not blocked and not confirmed_expired, cause=error.code)
+            return delay
+        finally:
+            self.release(lease)
+
+
+class CoordinatedHistoryReader:
+    """Operational audits share the same lease/cookie fencing as live workers."""
+    def __init__(self, service, workspace, connection):
+        self.service, self.workspace, self.connection = service, workspace, connection
+
+    def read_histories(self, origin, state, requests, **options):
+        sessions = self.service.sessions
+        with sessions.operation(self.workspace, self.connection) as operation:
+            row = operation['row']
+            if row['state'] != 'active' or control(row).get('needs_check'):
+                raise AlfaBrowserError('browser_busy')
+            fresh = self.service.vault.open_browser_state(self.workspace, self.connection, row['session_ciphertext'])
+            on_progress, on_result = options.pop('on_progress', None), options.pop('on_result', None)
+            def heartbeat():
+                with self.service.accounts.transaction(workspace_id=self.workspace) as db:
+                    sessions.renew(db, operation)
+                if on_progress:
+                    on_progress()
+            def save(request, result, renewed):
+                if not result.get('error') and not result.get('skipped'):
+                    sessions.finish(operation, renewed, state='active')
+                if on_result:
+                    on_result(request, result, renewed)
+            results, renewed = self.service.browser.read_histories(origin, fresh, requests,
+                on_progress=heartbeat, on_result=save, **options)
+            return results, merge_state(fresh, renewed)

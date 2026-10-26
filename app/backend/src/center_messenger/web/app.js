@@ -516,7 +516,9 @@
     await alfaAction(path => api(path, { method: "DELETE" }));
   });
 
+  let alfaSessionTimer = null, alfaReconnectEditing = false;
   function resetAlfaMax() {
+    clearTimeout(alfaSessionTimer); alfaSessionTimer = null; alfaReconnectEditing = false;
     alfaMaxProgress.reset();
     connectionView("monitor"); show($("#history-monitor-empty"), false);
     state.alfaMax = null; state.alfaMaxBusy = false;
@@ -546,11 +548,14 @@
     $("#alfa-max-connect").textContent = state.alfaMaxBusy ? "Подключаем…" : state.alfaMax?.state === "reauth_required" ? "Войти заново" : "Подключить MAX";
   }
   async function loadAlfaMax() {
-    const workspace = state.workspace;
+    const workspace = state.workspace, loadEpoch = state.epoch;
     const payload = await api("/workspaces/" + workspace.id + "/integrations/alfa-max");
-    if (workspace.id !== state.workspace?.id) return;
+    if (workspace.id !== state.workspace?.id || loadEpoch !== state.epoch) return;
     const previousState = state.alfaMax?.state;
     state.alfaMax = payload;
+    const recovery = payload.recovery || {};
+    const restoring = ["checking", "reconnecting", "waiting"].includes(recovery.phase);
+    const sessionLabel = restoring ? (recovery.phase === "checking" ? "Проверяем авторизацию" : "Восстанавливаем подключение автоматически") : null;
     const labels = {
       not_configured: "Не подключено",
       otp_required: "Нужен код из письма",
@@ -558,17 +563,22 @@
       reauth_required: "Нужно войти заново",
       error: "Ошибка подключения",
     };
-    $("#alfa-max-status").textContent = labels[payload.state] || "Состояние не определено";
-    $("#alfa-max-status").dataset.state = payload.state === "active" ? "active" : ["error", "reauth_required"].includes(payload.state) ? "error" : "waiting";
-    connectionSummary("#alfa-max-connection-summary", labels[payload.state] || "Нужна проверка", $("#alfa-max-status").dataset.state);
+    $("#alfa-max-status").textContent = sessionLabel || labels[payload.state] || "Состояние не определено";
+    $("#alfa-max-status").dataset.state = restoring ? "waiting" : payload.state === "active" ? "active" : ["error", "reauth_required"].includes(payload.state) ? "error" : "waiting";
+    connectionSummary("#alfa-max-connection-summary", sessionLabel || labels[payload.state] || "Нужна проверка", $("#alfa-max-status").dataset.state);
     $("#alfa-max-status").classList.toggle("integration-error", ["reauth_required", "error"].includes(payload.state));
     const form = $("#alfa-max-connect-form");
-    if (payload.email) form.elements.email.value = payload.email;
-    form.elements.password.value = "";
-    show(form, payload.state !== "otp_required" && payload.state !== "active");
+    if (!alfaReconnectEditing) {
+      if (payload.email) form.elements.email.value = payload.email;
+      form.elements.password.value = "";
+    }
+    show(form, alfaReconnectEditing || (!restoring && payload.state !== "otp_required" && payload.state !== "active"));
+    if (!alfaReconnectEditing && form.elements.auto_reconnect) form.elements.auto_reconnect.checked = recovery.credentials_saved ? Boolean(recovery.enabled) : true;
     show($("#alfa-max-otp-form"), payload.state === "otp_required");
     show($("#alfa-max-actions"), payload.configured);
     const details = [];
+    details.push(recovery.credentials_saved && recovery.enabled ? "Автоматический вход включён" : "Для автоматического входа один раз сохраните данные подключения");
+    if (recovery.after && restoring) details.push("Следующая проверка: " + date(recovery.after));
     if (payload.last_sync_at) details.push("Последняя синхронизация: " + date(payload.last_sync_at));
     if (payload.crm_configured && payload.branches?.length) details.push("Филиалов: " + payload.branches.length);
     if (!payload.crm_configured) details.push("Сначала настройте подключение AlfaCRM в соседнем блоке.");
@@ -581,7 +591,16 @@
     if (previousState !== payload.state && payload.state !== "active" && !["voice", "agents"].includes(state.connectionsView)) connectionView("settings");
     if (hasSession) alfaMaxProgress.start();
     else { alfaMaxProgress.reset(); connectionSummary("#alfa-history-summary", "Сначала подключите MAX", "waiting"); }
+    clearTimeout(alfaSessionTimer);
+    const epoch = state.epoch;
+    alfaSessionTimer = setTimeout(() => {
+      if (epoch === state.epoch && state.pane === "connections") loadAlfaMax().catch(() => {});
+    }, restoring || payload.state === "otp_required" ? 5000 : 15000);
   }
+  $("#alfa-max-recovery-setup")?.addEventListener("click", () => {
+    alfaReconnectEditing = true;
+    show($("#alfa-max-connect-form")); $("#alfa-max-connect-form").elements.password.focus();
+  });
   async function alfaMaxAction(action, success) {
     if (state.alfaMaxBusy || !state.workspace) return;
     const epoch = state.epoch, workspace = state.workspace;
@@ -599,13 +618,15 @@
       if (epoch === state.epoch) { state.alfaMaxBusy = false; alfaMaxButtons(); }
     }
   }
+  $("#alfa-max-connect-form").addEventListener("input", () => { alfaReconnectEditing = true; });
   $("#alfa-max-connect-form").addEventListener("submit", event => {
     event.preventDefault();
     const form = event.currentTarget;
-    const data = { email: form.elements.email.value.trim(), password: form.elements.password.value };
+    const data = { email: form.elements.email.value.trim(), password: form.elements.password.value, auto_reconnect: Boolean(form.elements.auto_reconnect?.checked) };
     alfaMaxAction(async path => {
       const result = await api(path + "/connect", { method: "POST", data });
       form.elements.password.value = "";
+      alfaReconnectEditing = false;
       state.alfaMax = result;
     }, "Запрос AlfaCRM MAX выполнен.");
     form.elements.password.value = "";

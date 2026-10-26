@@ -1331,3 +1331,17 @@ test('an oversized dictated draft stays intact and cannot be submitted until sho
  input.value='Короткий ответ';input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
  assert.equal(ui.$('#chat-send').disabled,false);assert.equal(ui.$('#chat-send-hint').hidden,true);
 });
+
+
+test("cancelled outgoing message shows a warning rather than a success check", async t => {
+  const ui = setup(t, url => url.pathname.endsWith("/messages") ? history(identifier(1), [message(42, {
+    direction: "out", actor_type: "human", state: "cancelled", error: "Отправка отменена: доступ сотрудника изменён."
+  })]) : undefined);
+  ui.window.CenterIcon = name => { const span = ui.window.document.createElement("span"); span.dataset.icon = name; return span; };
+  await ui.app.enter(); await flush();
+  const status = ui.$("#chat-history .state-cancelled");
+  assert.ok(status);
+  assert.ok(status.querySelector('[data-icon="warn"]'));
+  assert.equal(status.querySelector('[data-icon="check"]'), null);
+  assert.match(ui.$("#chat-history .chat-message-error").textContent, /Отправка отменена/);
+});

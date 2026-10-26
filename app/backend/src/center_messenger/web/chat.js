@@ -741,7 +741,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       meta.append(node("time", time(message.occurred_at)));
       if (message.direction === "out") {
         const status = node("span", undefined, `send-state state-${message.state}`); status.title = sendLabels[message.state] || "";
-        status.append(icon(["delivered", "read"].includes(message.state) ? "checks" : ["queued", "sending", "unknown"].includes(message.state) ? "clock" : message.state === "failed" ? "warn" : "check"), node("span", sendLabels[message.state] || "", "sr")); meta.append(status);
+        status.append(icon(["delivered", "read"].includes(message.state) ? "checks" : ["queued", "sending", "unknown"].includes(message.state) ? "clock" : ["failed", "cancelled"].includes(message.state) ? "warn" : "check"), node("span", sendLabels[message.state] || "", "sr")); meta.append(status);
       }
       content.append(meta); bubble.append(content);
       if (message.error) bubble.append(node("small", message.error, "chat-message-error"));

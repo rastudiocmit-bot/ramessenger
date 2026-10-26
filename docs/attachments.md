@@ -32,9 +32,10 @@ transport cannot receive attachments. `markup_only` never proves downloading.
 The opt-in module `center_messenger.attachment_audit` uses the existing encrypted
 browser session from the DB. It opens a separate Chromium context and allows
 only explicitly requested GET navigation/fetches. Automatic images, scripts,
-POSTs, other resources and redirects are blocked. DB transactions are READ ONLY
-and released before browser work; messages, cursors and stored sessions are not
-updated. Original sample bytes are consumed in Chromium and discarded.
+POSTs, other resources and redirects are blocked. Message history and pagination cursors are not changed. Technical browser-lease
+metadata is updated in short transactions released before browser work; renewed
+cookies are preserved through the shared coordinator to avoid a concurrent
+session check invalidating production work. Original sample bytes are consumed in Chromium and discarded.
 
 After the source containing this module is deployed:
 

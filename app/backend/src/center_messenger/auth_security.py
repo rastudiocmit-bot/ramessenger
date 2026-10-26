@@ -155,6 +155,12 @@ class WorkspaceInput(InputModel):
 MEMBER_SECTIONS = ("overview", "security", "messages")
 
 
+def can_send_messages(role, sections):
+    return role in {"owner", "admin"} or (
+        role in {"operator", "branch_manager"} and "messages" in (sections or [])
+    )
+
+
 class MemberSectionsInput(InputModel):
     sections: list[str] = Field(max_length=len(MEMBER_SECTIONS))
 

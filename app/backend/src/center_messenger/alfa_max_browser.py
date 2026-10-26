@@ -178,6 +178,24 @@ def _history_url(origin, branch, direction, page):
     return base if page == 0 else f"{base}?page={page + 1}"
 
 
+def _login_form(soup):
+    """A hidden password/change-password dialog is not evidence of logout."""
+    def hidden(node):
+        return any(el.has_attr('hidden') or el.get('aria-hidden') == 'true'
+                   or re.search(r'(?:display\s*:\s*none|visibility\s*:\s*hidden)', el.get('style', ''), re.I)
+                   or 'hidden' in el.get('class', []) for el in [node, *node.parents] if getattr(el, 'attrs', None))
+    for form in soup.select('form'):
+        passwords = [p for p in form.select('input[type="password"]') if not hidden(p)]
+        identities = [p for p in form.select('input[name]') if not hidden(p)
+                      and re.search(r'email|login|username', p.get('name', ''), re.I)]
+        action = urlsplit(form.get('action', '')).path
+        login_marker = re.search(r'/(?:auth/)?(?:login|sign-?in)(?:/|$)', action, re.I)
+        named_login = any(re.search(r'loginform\[password\]', p.get('name', ''), re.I) for p in passwords)
+        if passwords and identities and (login_marker or named_login):
+            return True
+    return False
+
+
 def _reject_history_response(reason, branch, direction, page, observed_page=None):
     safe_branch = str(branch) if re.fullmatch(r"[1-9][0-9]{0,18}", str(branch)) else "<invalid>"
     safe_direction = direction if direction in {"receive", "sent"} else "<invalid>"
@@ -281,7 +299,7 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
     if html_size > MAX_HTML_BYTES:
         _reject_history_response("html_too_large", branch, direction, page)
     soup = BeautifulSoup(html, "html.parser")
-    if soup.select_one('input[type="password"]'):
+    if not soup.select_one('table.crm-table') and _login_form(soup):
         raise AlfaBrowserError("reauth_required")
     table = soup.select_one("table.crm-table")
     if table is None:
@@ -611,7 +629,7 @@ def _customer_card_compose_url(markup, *, origin, branch, customer):
     if not isinstance(markup, str) or len(markup.encode("utf-8", "ignore")) > MAX_HTML_BYTES:
         raise AlfaBrowserError("form_unavailable")
     soup = BeautifulSoup(markup, "html.parser")
-    if soup.select_one('input[type="password"]'):
+    if _login_form(soup):
         raise AlfaBrowserError("reauth_required")
 
     candidates = []
@@ -660,7 +678,7 @@ def parse_compose_form(html, *, origin, branch, customer):
     if not markup:
         raise AlfaBrowserError("form_unavailable")
     soup = BeautifulSoup(markup, "html.parser")
-    if soup.select_one('input[type="password"]'):
+    if _login_form(soup):
         raise AlfaBrowserError("reauth_required")
     for form in soup.select("form[action]"):
         action = _validated_bulk_url(
@@ -751,7 +769,10 @@ class AlfaMaxBrowser:
                 headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
             )
             stage = "open_context"
-            context = browser.new_context(storage_state=storage_state, locale="ru-RU", timezone_id="Europe/Moscow")
+            # Our encrypted envelope may also contain server-only recovery data.
+            state = ({key: storage_state[key] for key in ('cookies', 'origins') if key in storage_state}
+                     if storage_state is not None else None)
+            context = browser.new_context(storage_state=state, locale="ru-RU", timezone_id="Europe/Moscow")
             context.route("**/*", AlfaMaxBrowser._route_factory(origin))
             stage = "open_page"
             page = context.new_page()
@@ -883,6 +904,10 @@ class AlfaMaxBrowser:
     def read_history(self, origin, state, branch, direction, page_number=0):
         results, next_state = self.read_histories(origin, state, [(branch, direction, page_number)])
         return results[0], next_state
+
+    def check_session(self, origin, state, branch):
+        _, renewed = self.read_history(origin, state, branch, 'receive')
+        return renewed
 
     @staticmethod
     def _read_history_page(page, origin, branch, direction, page_number):
@@ -1228,7 +1253,8 @@ class AlfaMaxBrowser:
                 data.get("toastr_success") or data.get("success") is True
             ):
                 raise AlfaBrowserError("send_unknown")
-            return {"accepted": True, "branch_id": int(branch), "text_length": len(text)}
+            return {"accepted": True, "branch_id": int(branch), "text_length": len(text),
+                    "browser_state": context.storage_state()}
         except AlfaBrowserError as error:
             if error.code in {
                 "form_unavailable", "max_form_missing", "max_recipient_missing",
