@@ -1,7 +1,7 @@
 """Voice input through Yandex Cloud and the workspace's AI agents.
 
-Speech is always recognised by Yandex SpeechKit; an agent may rewrite the text
-with a Yandex model or with DeepSeek, each provider with its own sealed key.
+Recognition, text processing and synthesis use independent gateway routes.
+Each provider and billing account has its own sealed key; there is no paid fallback.
 
 Settings and agents belong to owners and administrators; recognition is open to
 members who may write in chats. Network calls never run inside a database
@@ -14,7 +14,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import text
 
-from center_messenger import ai_deepseek
+from center_messenger import ai_deepseek, ai_mimo, ai_gateways
 from center_messenger.accounts import audit
 from center_messenger.ai_deepseek import DeepSeekClient
 from center_messenger.ai_yandex import (
@@ -27,13 +27,19 @@ SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:yandex-ai")
 PURPOSE = "yandex-ai"
 DEEPSEEK_SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:deepseek-ai")
 DEEPSEEK_PURPOSE = "deepseek-ai"
-PROVIDERS = {"yandex": "Yandex Cloud", "deepseek": "DeepSeek"}
+PROVIDERS = {"yandex": "Yandex Cloud", "deepseek": "DeepSeek", "mimo": "MiMo", "mimo_plan": "MiMo Token Plan"}
 
 # Every model an agent may use: provider, title and price in roubles per 1000 tokens.
 CATALOG = {key: {"provider": "yandex", "title": value["title"], "input": value["input"], "output": value["output"]}
            for key, value in MODELS.items()} | {
     key: {"provider": "deepseek", "title": value["title"], **ai_deepseek.rub_per_1k(key)}
     for key, value in ai_deepseek.MODELS.items()}
+
+CATALOG.update({key: {"provider": "mimo", "title": value["title"],
+    "input": value["input"] * ai_mimo.USD_RUB / 1000, "output": value["output"] * ai_mimo.USD_RUB / 1000}
+    for key, value in ai_mimo.MODELS.items()})
+CATALOG.update({key: {"provider": "mimo_plan", "title": value["title"], "input": 0, "output": 0}
+    for key, value in ai_mimo.PLAN_MODELS.items()})
 
 
 def provider_of(model):
@@ -43,7 +49,7 @@ def provider_of(model):
 def model_cost(model, input_tokens, output_tokens):
     price = CATALOG.get(model, CATALOG[DEFAULT_MODEL])
     return (input_tokens * price["input"] + output_tokens * price["output"]) / 1000
-TASKS = {"voice_input": "Голосовой ввод"}
+TASKS = {"voice_input": "Голосовой ввод", "text_processing": "Обработка текста"}
 VOICE_PER_HOUR = 60
 # Uvicorn's configured INFO handler also captures successful/slow attempts;
 # the unconfigured application root logger otherwise drops INFO events.
@@ -114,10 +120,12 @@ def _clean_agent(data):
 
 
 class AiVoice:
-    def __init__(self, alfa, client=None, deepseek=None):
+    def __init__(self, alfa, client=None, deepseek=None, mimo=None):
         self.accounts, self.vault = alfa.accounts, alfa.vault
         self.client = client or YandexClient()
         self.deepseek = deepseek or DeepSeekClient()
+        self.mimo = mimo or ai_mimo.MimoClient()
+        self.gateways = ai_gateways.Gateways(self)
         from center_messenger.voice_jobs import VoiceJobs
         self.jobs = VoiceJobs(self)
 
@@ -141,7 +149,10 @@ class AiVoice:
     def voice_available(db, workspace):
         """Whether the chat composer shows the microphone; used by the chat context."""
         return bool(db.execute(text(
-            "SELECT voice_enabled AND key_ciphertext IS NOT NULL AND folder_id<>'' "
+            "SELECT voice_enabled AND CASE coalesce(gateway_config->>'recognition_provider','yandex') "
+            "WHEN 'mimo' THEN mimo_key_ciphertext IS NOT NULL "
+            "WHEN 'mimo_plan' THEN mimo_plan_key_ciphertext IS NOT NULL "
+            "ELSE key_ciphertext IS NOT NULL AND folder_id<>'' END "
             "FROM ai_settings WHERE workspace_id=:w"
         ), {"w": workspace}).scalar_one_or_none())
 
@@ -154,6 +165,7 @@ class AiVoice:
         row, spent = self._settings(db, workspace), self._month_spent(db, workspace)
         error = row["last_error_code"] if row else None
         return {
+            "gateways": ai_gateways.public(row),
             "configured": bool(row and row["key_ciphertext"] and row["folder_id"]),
             "folder_id": row["folder_id"] if row else "",
             "key_hint": row["key_hint"] if row else "",
@@ -183,18 +195,18 @@ class AiVoice:
             self.accounts._workspace(db, actor, workspace, manage=True)
             return self._public(db, workspace)
 
-    def _credentials(self, db, workspace, *, yandex=True):
+    def _credentials(self, db, workspace, *, yandex=True, selected=None):
         """Decrypted keys: {"yandex", "folder", "deepseek"}; a missing provider is None."""
         row = self._settings(db, workspace)
         if yandex and (not row or not row["key_ciphertext"] or not row["folder_id"]):
             raise AuthError(409, "Сначала укажите API-ключ и ID каталога Yandex Cloud.")
         creds = {"yandex": None, "folder": row["folder_id"] if row else "", "deepseek": None}
-        if row and row["key_ciphertext"]:
+        if row and row["key_ciphertext"] and (selected is None or "yandex" in selected):
             creds["yandex"] = self.vault.open(workspace, SECRET_ID, row["key_ciphertext"], purpose=PURPOSE)["api_key"]
-        if row and row["deepseek_key_ciphertext"]:
+        if row and row["deepseek_key_ciphertext"] and (selected is None or "deepseek" in selected):
             creds["deepseek"] = self.vault.open(workspace, DEEPSEEK_SECRET_ID, row["deepseek_key_ciphertext"],
                                                 purpose=DEEPSEEK_PURPOSE)["api_key"]
-        return creds
+        return creds | ai_gateways.credentials(self, row, workspace, selected)
 
     def _usage(self, actor, workspace, *, kind, agent=None, seconds=0, tokens=(0, 0), cost=0.0,
                outcome="ok", error=None):
@@ -212,7 +224,7 @@ class AiVoice:
         with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
             old = self._settings(db, workspace, lock=True)
-            folder = str(data.get("folder_id") or "").strip()
+            folder = str(data.get("folder_id", old["folder_id"] if old else "") or "").strip()
             key = str(data.get("api_key") or "").strip()
             if folder and not valid_folder(folder):
                 raise AuthError(422, "ID каталога — латинские строчные буквы и цифры, например b1g…")
@@ -223,15 +235,16 @@ class AiVoice:
                 if not valid_key(key):
                     raise AuthError(422, "API-ключ выглядит неверно: латинские буквы, цифры, «-» и «_».")
                 cipher, hint = self.vault.seal(workspace, SECRET_ID, {"api_key": key}, purpose=PURPOSE), key_hint(key)
-            voice = bool(data.get("voice_enabled"))
+            voice = bool(data.get("voice_enabled", old["voice_enabled"] if old else False))
             duration = data.get("voice_max_seconds")
             if duration is None:
                 duration = old.get("voice_max_seconds", MAX_SECONDS) if old else MAX_SECONDS
             if type(duration) is not int or not 15 <= duration <= MAX_SECONDS:
                 raise AuthError(422, "Длительность записи — целое число от 15 до 180 секунд.")
-            if voice and not (cipher and folder):
+            recognizer = ai_gateways.config(old).get("recognition_provider", "yandex")
+            if voice and not ((cipher and folder) if recognizer == "yandex" else old and old.get(recognizer + "_key_ciphertext")):
                 raise AuthError(422, "Чтобы включить голосовой ввод, укажите API-ключ и ID каталога.")
-            limit = data.get("monthly_limit_rub")
+            limit = data.get("monthly_limit_rub", old["monthly_limit_rub"] if old else None)
             if limit in ("", None):
                 limit = None
             else:
@@ -262,7 +275,7 @@ class AiVoice:
     def verify(self, actor, workspace):
         with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
-            creds = self._credentials(db, workspace)
+            creds = self._credentials(db, workspace, selected={"yandex"})
         key, folder = creds["yandex"], creds["folder"]
         cost, tokens, error = stt_cost(0.5), (0, 0), None
         try:
@@ -306,7 +319,7 @@ class AiVoice:
     def verify_deepseek(self, actor, workspace):
         with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
-            key = self._credentials(db, workspace, yandex=False)["deepseek"]
+            key = self._credentials(db, workspace, yandex=False, selected={"deepseek"})["deepseek"]
         if not key:
             raise AuthError(409, "Сначала сохраните API-ключ DeepSeek.")
         model = next(iter(ai_deepseek.MODELS))
@@ -357,10 +370,10 @@ class AiVoice:
     @staticmethod
     def _version(db, workspace, agent_id, version, values, actor):
         db.execute(text(
-            "INSERT INTO ai_agent_versions(workspace_id,agent_id,version,name,model,prompt,temperature,created_by) "
-            "VALUES (:w,:a,:v,:n,:m,:p,:t,:u)"
+            "INSERT INTO ai_agent_versions(workspace_id,agent_id,version,name,model,prompt,temperature,task,created_by) "
+            "VALUES (:w,:a,:v,:n,:m,:p,:t,:task,:u)"
         ), {"w": workspace, "a": agent_id, "v": version, "n": values["name"], "m": values["model"],
-            "p": values["prompt"], "t": values["temperature"], "u": actor.user_id})
+            "p": values["prompt"], "t": values["temperature"], "task": values["task"], "u": actor.user_id})
 
     def create_agent(self, actor, workspace, data):
         values = _clean_agent(data)
@@ -393,7 +406,7 @@ class AiVoice:
             self.accounts._workspace(db, actor, workspace, manage=True)
             self._lock_workspace(db, workspace)
             old = self._agent(db, workspace, agent_id, lock=True)
-            content = any(str(old[k]) != str(values[k]) for k in ("name", "model", "prompt")) or \
+            content = any(str(old[k]) != str(values[k]) for k in ("name", "model", "prompt", "task")) or \
                 float(old["temperature"]) != values["temperature"]
             version = old["version"] + (1 if content else 0)
             if values["is_default"]:
@@ -425,12 +438,12 @@ class AiVoice:
             self.accounts._workspace(db, actor, workspace, manage=True)
             self._agent(db, workspace, agent_id)
             rows = db.execute(text(
-                "SELECT v.version,v.name,v.model,v.prompt,v.temperature,v.created_at,u.display_name "
+                "SELECT v.version,v.name,v.model,v.prompt,v.temperature,v.task,v.created_at,u.display_name "
                 "FROM ai_agent_versions v LEFT JOIN auth_users u ON u.id=v.created_by "
                 "WHERE v.workspace_id=:w AND v.agent_id=:a ORDER BY v.version DESC LIMIT 50"
             ), {"w": workspace, "a": agent_id}).mappings().all()
             return {"versions": [{"version": r["version"], "name": r["name"], "model": r["model"],
-                                  "prompt": r["prompt"], "temperature": float(r["temperature"]),
+                                  "task": r["task"], "prompt": r["prompt"], "temperature": float(r["temperature"]),
                                   "created_at": _iso(r["created_at"]), "author": r["display_name"]}
                                  for r in rows]}
 
@@ -439,18 +452,27 @@ class AiVoice:
         if not raw:
             return raw, (0, 0), 0.0, False, None
         provider = provider_of(agent["model"])
-        client, key = (self.deepseek, creds["deepseek"]) if provider == "deepseek" else (self.client, creds["yandex"])
+        client = self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == "deepseek" else self.client
+        key = creds.get(provider)
+        extra = {}
+        if provider in ai_gateways.PROVIDERS:
+            extra = ai_gateways.options(creds, provider)
+            extra.pop("api_key")
+            extra["protocol"] = creds.get("gateways", {}).get(provider, {}).get("protocol", "chat")
+        voice_task = agent.get("task", "voice_input") == "voice_input"
+        if not voice_task:
+            extra["rules"] = False
         if not key:
             return raw, (0, 0), 0.0, True, "not_connected"
         try:
             answer = client.complete(raw, prompt=agent["prompt"], model=agent["model"],
                                      temperature=float(agent["temperature"]), api_key=key,
-                                     folder_id=creds["folder"], max_tokens=min(6000, max(200, len(raw) * 2)))
+                                     folder_id=creds["folder"], max_tokens=min(6000, max(200, len(raw) * 2)) if voice_task else 3000, **extra)
         except YandexError as failure:
             return raw, (0, 0), 0.0, True, failure.code
         tokens = (answer["input_tokens"], answer["output_tokens"])
         cost = model_cost(agent["model"], *tokens)
-        normalized = None if answer["truncated"] else accept_normalized(raw, answer["text"])
+        normalized = None if answer["truncated"] else (accept_normalized(raw, answer["text"]) if voice_task else answer["text"].strip())
         return (normalized, tokens, cost, False, None) if normalized else (raw, tokens, cost, True, "unusable")
 
     def test_agent(self, actor, workspace, data):
@@ -460,7 +482,11 @@ class AiVoice:
             raise AuthError(422, "Введите проверочный текст, до 2000 символов.")
         with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
-            creds = self._credentials(db, workspace, yandex=False)
+            row = self._settings(db, workspace)
+            if row and row["monthly_limit_rub"] is not None and self._month_spent(db, workspace) >= float(row["monthly_limit_rub"]):
+                raise AuthError(429, "Месячный лимит исчерпан.")
+            creds = self._credentials(db, workspace, yandex=False, selected={provider_of(values["model"])})
+        self.accounts.throttle(f"ai-test:{workspace}:{actor.user_id}", limit=20, minutes=1)
         normalized, tokens, cost, fallback, error = self._normalize(sample, values, creds)
         if error != "not_connected":
             self._usage(actor, workspace, kind="test", tokens=tokens, cost=cost,
@@ -468,6 +494,7 @@ class AiVoice:
         if fallback and error not in (None, "unusable"):
             raise _fail(error, provider_of(values["model"]))
         return {"text": normalized, "fallback": fallback, "cost_rub": round(cost, 4),
+                "billing": "subscription" if provider_of(values["model"]) == "mimo_plan" else "pay_as_you_go",
                 "tokens": {"input": tokens[0], "output": tokens[1]}}
 
     # ── recognition ────────────────────────────────────────────────────────
@@ -495,7 +522,7 @@ class AiVoice:
             if member["role"] == "observer":
                 raise AuthError(403, "Наблюдатель не может писать сообщения.")
             row = self._settings(db, workspace)
-            if not row or not row["voice_enabled"] or not row["key_ciphertext"] or not row["folder_id"]:
+            if not ai_gateways.ready(row):
                 raise AuthError(409, "Голосовой ввод не настроен. Обратитесь к администратору.")
             check_limit = row.get("voice_max_seconds", MAX_SECONDS)
             if seconds > check_limit:
@@ -510,8 +537,11 @@ class AiVoice:
             ), {"w": workspace, "id": str(agent_id) if agent_id else None}).mappings().one_or_none()
             if agent_id and agent is None:
                 raise AuthError(404, "Агент не найден или выключен.")
-            creds = self._credentials(db, workspace)
-        key = creds["yandex"]
+            recognizer = ai_gateways.config(row).get("recognition_provider", "yandex")
+            selected = {recognizer} | ({provider_of(agent["model"])} if agent else set())
+            creds = self._credentials(db, workspace, yandex=False, selected=selected)
+        recognizer = ai_gateways.config(row).get("recognition_provider", "yandex")
+        key = creds[recognizer]
         try:
             self.accounts.throttle(f"ai-voice:{workspace}:{actor.user_id}", limit=VOICE_PER_HOUR, minutes=60)
         except AuthError as error:
@@ -519,13 +549,17 @@ class AiVoice:
                 raise AuthError(429, "Слишком много голосовых сообщений за час. Повторите позже.",
                                 retry_after=error.retry_after) from None
             raise
-        cost = audio_cost(audio)
+        cost = audio_cost(audio) if recognizer == "yandex" else ai_mimo.audio_cost(seconds, plan=recognizer == "mimo_plan")
         try:
-            raw = self.client.recognize(audio, api_key=key)
+            if recognizer == "yandex":
+                raw = self.client.recognize(audio, api_key=key)
+            else:
+                raw = self.mimo.recognize(audio, **ai_gateways.options(creds, recognizer),
+                    plan=recognizer == "mimo_plan", language=ai_gateways.config(row).get("recognition_language", "auto"))["text"]
         except YandexError as failure:
             self._usage(actor, workspace, kind="voice", seconds=seconds, cost=getattr(failure, "billed_cost", 0.0), outcome="error",
                         error=failure.code)
-            raise _fail(failure.code) from None
+            raise _fail(failure.code, recognizer) from None
         result = {"raw_text": raw, "text": raw, "seconds": round(seconds, 1), "agent": None,
                   "fallback": False, "warning": None}
         tokens, error = (0, 0), None

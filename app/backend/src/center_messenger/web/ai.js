@@ -3,7 +3,11 @@
 // Owners and administrators only; the server enforces the same rule.
 window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   const form = $("#ai-settings-form"), agentForm = $("#ai-agent-form"), list = $("#ai-agent-list");
-  const dsForm = $("#ai-deepseek-form");
+  const dsForm = $("#ai-deepseek-form"), routesForm = $("#ai-routes-form");
+  const gatewayCards = [...document.querySelectorAll("[data-gateway]")];
+  let audioUrl = null;
+  const providerNames = { yandex: "Yandex Cloud", deepseek: "DeepSeek", mimo: "MiMo", mimo_plan: "MiMo Token Plan" };
+  const providerReady = provider => provider === "yandex" ? settings.configured : provider === "deepseek" ? settings.deepseek?.configured : settings.gateways?.[provider]?.configured;
   const money = value => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(Number(value || 0));
   const statusText = { active: "Работает", error: "Ошибка", not_configured: "Не проверено" };
   let settings = null, agents = [], editing = null, seq = 0;
@@ -42,12 +46,13 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     };
     fill(agentForm.elements.task, settings.tasks);
     renderModels(agentForm.elements.model.value || editing?.model || settings.default_model);
+    renderGateways();
     renderPipeline();
   }
 
   function renderPipeline() {
-    const main = agents.find(agent => agent.enabled && agent.is_default);
-    $("#voice-active-summary").textContent = `Распознавание: Yandex SpeechKit · Запись: до ${settings?.voice_max_seconds || 180} сек. · `
+    const main = agents.find(agent => agent.enabled && agent.is_default && agent.task === "voice_input");
+    $("#voice-active-summary").textContent = `Распознавание: ${providerNames[settings?.gateways?.recognition_provider || "yandex"]} · Запись: до ${settings?.voice_max_seconds || 180} сек. · `
       + (main ? `Обработка текста: ${main.model_title} (${main.name})` : "Текст вставляется без обработки AI-агентом.");
   }
   function renderModels(chosen) {
@@ -58,7 +63,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     for (const item of settings.models) {
       if ((item.provider || "yandex") !== provider) continue;
       if (!groups.has(provider)) {
-        const ready = provider === "deepseek" ? settings.deepseek?.configured : settings.configured;
+        const ready = providerReady(provider);
         const group = document.createElement("optgroup");
         group.label = (item.provider_title || "Yandex Cloud") + (ready ? "" : " — ключ не добавлен");
         groups.set(provider, group);
@@ -67,9 +72,9 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     }
     model.replaceChildren(...groups.values());
     if (settings.models.some(item => item.id === chosen)) model.value = chosen;
-    $("#ai-agent-provider-note").textContent = (provider === "deepseek" ? "Текст обрабатывает DeepSeek." : "Текст обрабатывает Yandex AI Studio.")
-      + " Аудио распознаёт Yandex SpeechKit."
-      + ((provider === "deepseek" ? settings.deepseek?.configured : settings.configured) ? "" : " Добавьте ключ во вкладке «Голосовой ввод».");
+    $("#ai-agent-provider-note").textContent = `Текст обрабатывает ${providerNames[provider] || provider}.`
+      + (provider === "mimo_plan" ? " Используется квота подписки." : "")
+      + (providerReady(provider) ? "" : " Добавьте ключ в разделе «Страница и шлюзы».");
   }
 
   function renderAgents() {
@@ -174,6 +179,72 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     renderSettings(); toast("Ключ DeepSeek удалён.");
   }, $("#ai-deepseek-error")));
 
+  function renderGateways() {
+    const gateways = settings.gateways || {};
+    if (routesForm) {
+      for (const [key, fallback] of Object.entries({ recognition_provider: "yandex", recognition_language: "ru", synthesis_provider: "disabled" }))
+        routesForm.elements[key].value = gateways[key] || fallback;
+      routesForm.elements.synthesis_voice.replaceChildren(...(gateways.synthesis_voices || ["Mia"]).map(voice => new Option(voice, voice)));
+      routesForm.elements.synthesis_voice.value = gateways.synthesis_voice || "Mia";
+    }
+    for (const card of gatewayCards) {
+      const item = gateways[card.dataset.gateway] || {}, f = card.querySelector("form").elements;
+      f.api_key.value = ""; f.api_key.placeholder = item.key_hint ? `Сохранён ключ …${item.key_hint}` : "Вставьте ключ";
+      if (item.base_url) f.base_url.value = item.base_url;
+      f.protocol.value = item.protocol || "chat";
+      card.querySelector(".gateway-status").textContent = item.configured ? "Ключ сохранён" : "Не подключено";
+      card.querySelector(".gateway-clear").disabled = !item.configured;
+      for (const button of card.querySelectorAll("[data-verify]")) {
+        button.disabled = !item.configured;
+        const check = item.checks?.[button.dataset.verify];
+        card.querySelector(`[data-check="${button.dataset.verify}"]`).textContent = !check ? "Не проверено"
+          : (check.ok ? "Работает" : check.error_code === "no_balance" ? "Недостаточно средств" : "Ошибка: " + check.error_code)
+            + (check.checked_at ? " · " + new Date(check.checked_at).toLocaleString("ru-RU") : "");
+      }
+    }
+  }
+  for (const card of gatewayCards) {
+    const f = card.querySelector("form"), errorTarget = card.querySelector(".gateway-error"), path = () => `${base()}/gateways/${card.dataset.gateway}`;
+    f.addEventListener("submit", event => {
+      event.preventDefault();
+      guarded(f.querySelector('[type="submit"]'), async () => {
+        const key = f.elements.api_key.value.trim();
+        settings = await api(path(), { method: "PUT", data: { api_key: key || null,
+          base_url: f.elements.base_url.value, protocol: f.elements.protocol.value } });
+        renderSettings();
+      }, errorTarget);
+    });
+    card.querySelector(".gateway-clear").addEventListener("click", event => guarded(event.currentTarget, async () => {
+      if (!(await confirm("Удалить ключ шлюза?", "Назначенные этому шлюзу действия станут недоступны. Другой шлюз автоматически не включится.", "Удалить"))) return;
+      settings = await api(path(), { method: "PUT", data: { clear_key: true } }); renderSettings();
+    }, errorTarget));
+    for (const button of card.querySelectorAll("[data-verify]")) button.addEventListener("click", () => guarded(button, async () => {
+      settings = await api(path() + "/verify", { method: "POST", timeoutMs: 65000, data: { capability: button.dataset.verify } });
+      renderSettings();
+    }, errorTarget));
+  }
+  routesForm?.addEventListener("submit", event => {
+    event.preventDefault();
+    guarded(routesForm.querySelector('[type="submit"]'), async () => {
+      const data = {};
+      for (const key of ["recognition_provider", "recognition_language", "synthesis_provider", "synthesis_voice"]) data[key] = routesForm.elements[key].value;
+      settings = await api(`${base()}/gateways/routes`, { method: "PUT", data }); renderSettings();
+    }, $("#ai-routes-error"));
+  });
+  routesForm?.elements.recognition_provider.addEventListener("change", () => {
+    routesForm.elements.recognition_language.value = routesForm.elements.recognition_provider.value === "yandex" ? "ru" : "auto";
+  });
+  $("#ai-synthesis-test")?.addEventListener("click", event => guarded(event.currentTarget, async () => {
+    const text = $("#ai-synthesis-text").value.trim();
+    if (!text) throw new Error("Введите текст для синтеза.");
+    const answer = await api(`${base()}/synthesize`, { method: "POST", timeoutMs: 65000, data: { text } });
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    const bytes = Uint8Array.from(atob(answer.audio), char => char.charCodeAt(0));
+    audioUrl = URL.createObjectURL(new Blob([bytes], { type: answer.content_type }));
+    const audio = $("#ai-synthesis-audio"); audio.src = audioUrl; show(audio);
+    $("#ai-synthesis-result").textContent = answer.billing === "subscription" ? "Использована квота Token Plan. Нажмите воспроизведение для прослушивания." : "Промотариф MiMo: стоимость синтеза сейчас не начисляется. Нажмите воспроизведение.";
+  }, $("#ai-routes-error")));
+
   $("#ai-agent-new").addEventListener("click", () => edit(null));
   for (const radio of agentForm.querySelectorAll('[name="provider"]')) radio.addEventListener("change", () => {
     renderModels(settings.models.find(item => item.provider === agentForm.elements.provider.value)?.id);
@@ -200,10 +271,10 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   $("#ai-agent-test").addEventListener("click", () => guarded($("#ai-agent-test"), async () => {
     const sample = $("#ai-agent-sample").value.trim(), result = $("#ai-agent-result");
     if (!sample) { notice("Введите фразу для проверки.", $("#ai-agents-error")); return; }
-    const { name, enabled, is_default, task, ...rest } = values();
+    const { name, enabled, is_default, ...rest } = values();
     const answer = await api(`${base()}/agents/test`, { method: "POST", timeoutMs: 30000, data: { text: sample, ...rest } });
     result.replaceChildren(node("strong", answer.fallback ? "Модель не справилась, текст без изменений:" : "Результат:"), node("span", answer.text),
-      node("small", `Стоимость проверки: ${money(answer.cost_rub)} ₽`));
+      node("small", answer.billing === "subscription" ? "Использована квота Token Plan" : `Оценка стоимости: ${money(answer.cost_rub)} ₽`));
     show(result);
   }, $("#ai-agents-error")));
   $("#ai-agent-versions").addEventListener("toggle", async () => {
@@ -218,7 +289,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
           node("span", version.prompt));
         const restore = node("button", "Вернуть в форму", "text-button"); restore.type = "button";
         restore.addEventListener("click", () => {
-          const f = agentForm.elements; f.name.value = version.name; renderModels(version.model); f.prompt.value = version.prompt;
+          const f = agentForm.elements; f.name.value = version.name; f.task.value = version.task || "voice_input"; renderModels(version.model); f.prompt.value = version.prompt;
           f.temperature.value = version.temperature; temperature(version.temperature);
           toast("Версия перенесена в форму. Нажмите «Сохранить агента», чтобы применить.");
         });
