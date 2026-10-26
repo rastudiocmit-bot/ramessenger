@@ -1,6 +1,6 @@
 # AI gateways and action routing
 
-Connections → **Страница и шлюзы** contains credentials and action routes. AI agents remain in their own tab; each agent chooses a task, provider, model and prompt. Existing Yandex/DeepSeek credentials, the enabled microphone and the 15–180 second recording setting survive migration 0019. No default provider changes on upgrade.
+Connections → **ИИ-шлюзы** contains credentials and action routes. AI agents remain in their own tab; each agent chooses a task, provider, model and prompt. Existing Yandex/DeepSeek credentials, the enabled microphone and the 15–180 second recording setting survive migration 0019. No default provider changes on upgrade.
 
 ## Independent accounts
 
@@ -35,3 +35,5 @@ Official references:
 - https://mimo.mi.com/docs/en-US/quick-start/usage-guide/audio/Speech-Recognition
 - https://mimo.mi.com/docs/en-US/quick-start/faq/token-plan/Plans&Pricing
 - https://mimo.mi.com/docs/en-US/price/pay-as-you-go
+
+The gateway header reflects saved per-capability checks: active only when all three pass, partial for incomplete verification, error when any check fails. “Проверить всё” runs the three checks sequentially, blocks conflicting actions on that card, and shows the current stage. Credentials, action routes and common recording options have independent save forms.

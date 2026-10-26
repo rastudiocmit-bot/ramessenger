@@ -70,9 +70,15 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       history:conversations.length?{conversation:conversations[0],messages,next_seq:messages.length,total:messages.length,has_more:false,more_changes:false}:null};
     else if (p.endsWith('/chats/preferences')) { Object.assign(preferences, entry.body); payload=preferences; }
     else if (p.endsWith('/ai/settings')) {
-      if (method === 'PUT') Object.assign(ai.settings, { voice_max_seconds: entry.body.voice_max_seconds ?? ai.settings.voice_max_seconds, folder_id: entry.body.folder_id, voice_enabled: entry.body.voice_enabled, monthly_limit_rub: entry.body.monthly_limit_rub,
-        key_hint: entry.body.clear_key ? '' : entry.body.api_key ? entry.body.api_key.slice(-4) : ai.settings.key_hint, status: 'not_configured' },
-        { configured: Boolean(entry.body.folder_id) && !entry.body.clear_key && Boolean(entry.body.api_key || ai.settings.key_hint) });
+      if (method === 'PUT') {
+        const oldFolder=ai.settings.folder_id;
+        for (const key of ['voice_max_seconds','folder_id','voice_enabled','monthly_limit_rub'])
+          if (key in entry.body) ai.settings[key]=entry.body[key];
+        if (entry.body.clear_key) ai.settings.key_hint='';
+        else if (entry.body.api_key) ai.settings.key_hint=entry.body.api_key.slice(-4);
+        if (entry.body.api_key || entry.body.clear_key || oldFolder!==ai.settings.folder_id) ai.settings.status='not_configured';
+        ai.settings.configured=Boolean(ai.settings.folder_id && ai.settings.key_hint);
+      }
       payload = ai.settings;
     } else if (p.endsWith('/ai/deepseek')) {
       ai.settings.deepseek = entry.body.clear_key ? { configured: false, key_hint: '', status: 'not_configured', error: null }

@@ -3,9 +3,10 @@
 // Owners and administrators only; the server enforces the same rule.
 window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   const form = $("#ai-settings-form"), agentForm = $("#ai-agent-form"), list = $("#ai-agent-list");
-  const dsForm = $("#ai-deepseek-form"), routesForm = $("#ai-routes-form");
+  const dsForm = $("#ai-deepseek-form"), routesForm = $("#ai-routes-form"), voiceForm = $("#ai-voice-options-form");
+  const verifying = new Map();
   const gatewayCards = [...document.querySelectorAll("[data-gateway]")];
-  let audioUrl = null;
+  let audioUrl = null, synthesisRoute = null;
   const providerNames = { yandex: "Yandex Cloud", deepseek: "DeepSeek", mimo: "MiMo", mimo_plan: "MiMo Token Plan" };
   const providerReady = provider => provider === "yandex" ? settings.configured : provider === "deepseek" ? settings.deepseek?.configured : settings.gateways?.[provider]?.configured;
   const money = value => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(Number(value || 0));
@@ -19,9 +20,9 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     form.elements.folder_id.value = settings.folder_id || "";
     form.elements.api_key.value = "";
     form.elements.api_key.placeholder = settings.key_hint ? `Сохранён ключ …${settings.key_hint}` : "Вставьте API-ключ";
-    form.elements.monthly_limit_rub.value = settings.monthly_limit_rub ?? "";
-    form.elements.voice_enabled.checked = Boolean(settings.voice_enabled);
-    form.elements.voice_max_seconds.value = settings.voice_max_seconds || 180;
+    voiceForm.elements.monthly_limit_rub.value = settings.monthly_limit_rub ?? "";
+    voiceForm.elements.voice_enabled.checked = Boolean(settings.voice_enabled);
+    voiceForm.elements.voice_max_seconds.value = settings.voice_max_seconds || 180;
     state.voiceMaxSeconds = settings.voice_max_seconds || 180;
     $("#ai-spent").textContent = `Потрачено в этом месяце: ${money(settings.month_spent_rub)} ₽`
       + (settings.monthly_limit_rub != null ? ` из ${money(settings.monthly_limit_rub)} ₽` : "");
@@ -46,7 +47,17 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     };
     fill(agentForm.elements.task, settings.tasks);
     renderModels(agentForm.elements.model.value || editing?.model || settings.default_model);
+    for (const [selector, configured] of [["#ai-cloud-card", settings.configured], ["#ai-deepseek-card", ds.configured]]) {
+      const details = $(selector).querySelector(".gateway-credentials"); if (details) details.open = !configured;
+    }
     renderGateways();
+    const selectedSynthesis = settings.gateways?.synthesis_provider || "disabled";
+    const nextRoute = selectedSynthesis + ":" + (settings.gateways?.synthesis_voice || "Mia");
+    $("#ai-synthesis-test").disabled = selectedSynthesis === "disabled" || !settings.gateways?.[selectedSynthesis]?.configured;
+    if (synthesisRoute !== nextRoute) {
+      if (audioUrl) URL.revokeObjectURL(audioUrl); audioUrl = null; synthesisRoute = nextRoute;
+      $("#ai-synthesis-audio").removeAttribute("src"); show($("#ai-synthesis-audio"), false); $("#ai-synthesis-result").textContent = "";
+    }
     renderPipeline();
   }
 
@@ -74,7 +85,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     if (settings.models.some(item => item.id === chosen)) model.value = chosen;
     $("#ai-agent-provider-note").textContent = `Текст обрабатывает ${providerNames[provider] || provider}.`
       + (provider === "mimo_plan" ? " Используется квота подписки." : "")
-      + (providerReady(provider) ? "" : " Добавьте ключ в разделе «Страница и шлюзы».");
+      + (providerReady(provider) ? "" : " Добавьте ключ в разделе «ИИ-шлюзы».");
   }
 
   function renderAgents() {
@@ -98,7 +109,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
 
   async function load() {
     if (!admin() || !state.workspace) return;
-    const mine = ++seq;
+    const mine = ++seq; verifying.clear();
     try {
       const [loaded, listed] = await Promise.all([api(`${base()}/settings`), api(`${base()}/agents`)]);
       if (mine !== seq) return;
@@ -142,21 +153,31 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   form.addEventListener("submit", event => {
     event.preventDefault();
     guarded($("button[type=submit]", form), async () => {
-      const f = form.elements, limit = f.monthly_limit_rub.value.trim();
+      const f = form.elements;
       settings = await api(`${base()}/settings`, { method: "PUT", data: {
-        folder_id: f.folder_id.value.trim(), api_key: f.api_key.value.trim() || null,
-        voice_enabled: f.voice_enabled.checked, voice_max_seconds: Number(f.voice_max_seconds.value), monthly_limit_rub: limit === "" ? null : Number(limit) } });
+        folder_id: f.folder_id.value.trim(), api_key: f.api_key.value.trim() || null } });
       renderSettings(); toast("Настройки Yandex Cloud сохранены.");
     }, $("#ai-error"));
   });
+  voiceForm.addEventListener("submit", event => {
+    event.preventDefault();
+    guarded(voiceForm.querySelector('[type="submit"]'), async () => {
+      const f = voiceForm.elements, limit = f.monthly_limit_rub.value.trim();
+      settings = await api(`${base()}/settings`, { method: "PUT", data: {
+        voice_enabled: f.voice_enabled.checked, voice_max_seconds: Number(f.voice_max_seconds.value),
+        monthly_limit_rub: limit === "" ? null : Number(limit) } });
+      renderSettings(); $("#ai-voice-options-result").textContent = "Параметры записи сохранены.";
+    }, $("#ai-voice-options-error"));
+  });
+
   $("#ai-verify").addEventListener("click", () => guarded($("#ai-verify"), async () => {
     settings = await api(`${base()}/settings/verify`, { method: "POST", timeoutMs: 40000 });
     renderSettings(); toast(settings.ok ? "Yandex SpeechKit отвечает: распознавание работает." : "Проверка не прошла.", !settings.ok);
   }, $("#ai-error")));
   $("#ai-clear").addEventListener("click", () => guarded($("#ai-clear"), async () => {
-    if (!(await confirm("Удалить ключ Yandex Cloud?", "Голосовой ввод отключится у всех сотрудников.", "Удалить"))) return;
-    settings = await api(`${base()}/settings`, { method: "PUT", data: { folder_id: form.elements.folder_id.value.trim(), clear_key: true, voice_enabled: false,
-      monthly_limit_rub: settings?.monthly_limit_rub ?? null } });
+    if (!(await confirm("Удалить ключ Yandex Cloud?", "Если для распознавания выбран Яндекс, голосовой ввод отключится.", "Удалить"))) return;
+    settings = await api(`${base()}/settings`, { method: "PUT", data: { folder_id: form.elements.folder_id.value.trim(), clear_key: true,
+      ...((settings?.gateways?.recognition_provider || "yandex") === "yandex" ? { voice_enabled: false } : {}) } });
     renderSettings(); toast("Ключ удалён.");
   }, $("#ai-error")));
 
@@ -179,6 +200,40 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     renderSettings(); toast("Ключ DeepSeek удалён.");
   }, $("#ai-deepseek-error")));
 
+  const checkNames = { text: "Обработка текста", recognition: "Распознавание речи", synthesis: "Синтез речи" };
+  const checkErrors = { no_balance: "Недостаточно средств", unauthorized: "Ключ отклонён", rate_limited: "Лимит запросов — повторите позже",
+    unavailable: "Сервис временно недоступен", network: "Нет связи с сервисом", bad_response: "Сервис вернул некорректный ответ",
+    bad_request: "Сервис не принял запрос", not_connected: "Добавьте ключ", speech_language: "Язык не поддерживается" };
+  function renderGatewayStatus(card, item) {
+    const provider = card.dataset.gateway, checks = item.checks || {}, pending = verifying.get(provider)?.capability;
+    const passed = Object.keys(checkNames).filter(key => checks[key]?.ok === true).length;
+    const failed = Object.keys(checkNames).filter(key => checks[key]?.ok === false);
+    const badge = card.querySelector(".gateway-status"), count = card.querySelector(".gateway-check-count");
+    badge.textContent = pending ? "Проверяем…" : !item.configured ? "Не подключено" : failed.length ? "Есть ошибки"
+      : passed === 3 ? "Работает" : passed ? `Проверено ${passed} из 3` : "Не проверено";
+    badge.dataset.state = pending ? "pending" : !item.configured ? "" : failed.length ? "error" : passed === 3 ? "active" : passed ? "partial" : "";
+    badge.title = pending ? `Проверяется: ${checkNames[pending] || "возможности сервиса"}` : !item.configured ? "Сначала сохраните API-ключ."
+      : failed.length ? failed.map(key => `${checkNames[key]}: ${checkErrors[checks[key].error_code] || "Проверка не прошла"}`).join(". ")
+      : `Успешно проверено возможностей: ${passed} из 3.`;
+    if (count) count.textContent = pending ? `Проверяем: ${checkNames[pending]}` : item.configured ? `Доступно ${passed} из 3 возможностей` : "Добавьте ключ для проверки";
+    card.querySelector(".gateway-clear").disabled = !item.configured || Boolean(pending);
+    card.querySelector(".gateway-verify-all").disabled = !item.configured || Boolean(pending);
+    card.querySelector('button[type="submit"]').disabled = Boolean(pending);
+    for (const button of card.querySelectorAll("[data-verify]")) {
+      const capability = button.dataset.verify, check = item.configured ? checks[capability] : null;
+      button.disabled = !item.configured || Boolean(pending);
+      button.textContent = pending === capability ? "Проверяем…" : "Проверить";
+      const output = card.querySelector(`[data-check="${capability}"]`);
+      output.dataset.state = !check ? "" : check.ok ? "active" : "error";
+      output.textContent = !check ? "Не проверено" : (check.ok ? "Работает" : checkErrors[check.error_code] || "Проверка не прошла");
+      output.title = check?.checked_at ? `Последняя проверка: ${new Date(check.checked_at).toLocaleString("ru-RU")}` : "Проверка ещё не запускалась";
+      const row = output.closest(".gateway-capability");
+      let time = row.querySelector("time");
+      if (!time) { time = document.createElement("time"); row.querySelector("span").append(time); }
+      time.hidden = !check?.checked_at;
+      if (check?.checked_at) { time.dateTime = check.checked_at; time.textContent = new Date(check.checked_at).toLocaleString("ru-RU"); }
+    }
+  }
   function renderGateways() {
     const gateways = settings.gateways || {};
     if (routesForm) {
@@ -192,15 +247,8 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       f.api_key.value = ""; f.api_key.placeholder = item.key_hint ? `Сохранён ключ …${item.key_hint}` : "Вставьте ключ";
       if (item.base_url) f.base_url.value = item.base_url;
       f.protocol.value = item.protocol || "chat";
-      card.querySelector(".gateway-status").textContent = item.configured ? "Ключ сохранён" : "Не подключено";
-      card.querySelector(".gateway-clear").disabled = !item.configured;
-      for (const button of card.querySelectorAll("[data-verify]")) {
-        button.disabled = !item.configured;
-        const check = item.checks?.[button.dataset.verify];
-        card.querySelector(`[data-check="${button.dataset.verify}"]`).textContent = !check ? "Не проверено"
-          : (check.ok ? "Работает" : check.error_code === "no_balance" ? "Недостаточно средств" : "Ошибка: " + check.error_code)
-            + (check.checked_at ? " · " + new Date(check.checked_at).toLocaleString("ru-RU") : "");
-      }
+      const details = card.querySelector(".gateway-credentials"); if (details) details.open = !item.configured;
+      renderGatewayStatus(card, item);
     }
   }
   for (const card of gatewayCards) {
@@ -218,10 +266,28 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       if (!(await confirm("Удалить ключ шлюза?", "Назначенные этому шлюзу действия станут недоступны. Другой шлюз автоматически не включится.", "Удалить"))) return;
       settings = await api(path(), { method: "PUT", data: { clear_key: true } }); renderSettings();
     }, errorTarget));
-    for (const button of card.querySelectorAll("[data-verify]")) button.addEventListener("click", () => guarded(button, async () => {
-      settings = await api(path() + "/verify", { method: "POST", timeoutMs: 65000, data: { capability: button.dataset.verify } });
-      renderSettings();
-    }, errorTarget));
+    async function verifyCapabilities(capabilities) {
+      const provider = card.dataset.gateway, mine = seq, requestPath = path(), token = {};
+      if (verifying.has(provider) || !settings.gateways?.[provider]?.configured) return;
+      notice("", errorTarget);
+      try {
+        for (const capability of capabilities) {
+          if (mine !== seq) return;
+          verifying.set(provider, { capability, token }); renderGatewayStatus(card, settings.gateways[provider]);
+          const loaded = await api(requestPath + "/verify", { method: "POST", timeoutMs: 65000, data: { capability } });
+          if (mine !== seq) return;
+          // Independent cards may finish out of order: merge only this provider's checks.
+          settings.gateways[provider] = loaded.gateways[provider];
+          renderGatewayStatus(card, settings.gateways[provider]);
+        }
+      } catch (error) { if (mine === seq && error.name !== "AbortError") notice(error.message, errorTarget); }
+      finally {
+        if (verifying.get(provider)?.token === token) verifying.delete(provider);
+        if (mine === seq) renderGatewayStatus(card, settings.gateways[provider]);
+      }
+    }
+    for (const button of card.querySelectorAll("[data-verify]")) button.addEventListener("click", () => verifyCapabilities([button.dataset.verify]));
+    card.querySelector(".gateway-verify-all").addEventListener("click", () => verifyCapabilities(Object.keys(checkNames)));
   }
   routesForm?.addEventListener("submit", event => {
     event.preventDefault();
@@ -243,7 +309,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     audioUrl = URL.createObjectURL(new Blob([bytes], { type: answer.content_type }));
     const audio = $("#ai-synthesis-audio"); audio.src = audioUrl; show(audio);
     $("#ai-synthesis-result").textContent = answer.billing === "subscription" ? "Использована квота Token Plan. Нажмите воспроизведение для прослушивания." : "Промотариф MiMo: стоимость синтеза сейчас не начисляется. Нажмите воспроизведение.";
-  }, $("#ai-routes-error")));
+  }, $("#ai-synthesis-error")));
 
   $("#ai-agent-new").addEventListener("click", () => edit(null));
   for (const radio of agentForm.querySelectorAll('[name="provider"]')) radio.addEventListener("change", () => {
