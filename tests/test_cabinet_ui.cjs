@@ -9,6 +9,8 @@ const all = { summary: true, messages: true, queue: true, clients: true, team: t
 function setup(t, handler = async () => ({}), role = "owner") {
   const dom = new JSDOM(fs.readFileSync(web + "/index.html", "utf8"), { url: "https://cabinet.example.test", runScripts: "outside-only" });
   const { window } = dom, $ = selector => window.document.querySelector(selector);
+  if (!window.HTMLDialogElement.prototype.showModal) window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  if (!window.HTMLDialogElement.prototype.close) window.HTMLDialogElement.prototype.close = function () { this.open = false; };
   const state = { user: { id: "user" }, workspace: { id: "first", name: "First", timezone: "Europe/Moscow", role }, epoch: 1, pane: "messages", chatView: "all" };
   window.setTimeout = () => 1; window.clearTimeout = () => {};
   window.eval(fs.readFileSync(web + "/icons.js", "utf8"));
@@ -62,4 +64,42 @@ test("an old metadata response cannot replace the new workspace's branches", asy
   resolve({ channels: [{ enabled: true }], branches: [{ id: "1", name: "Private old branch" }] }); await pending;
   assert.equal(ui.$("#profile-channels").textContent, "");
   assert.doesNotMatch(ui.$("#organization-branches").textContent, /Private/);
+});
+
+const summaryData = { incoming: 12, previous_incoming: 2, waiting: 3, new_leads: 1,
+  average_response_seconds: 60, days: [], branches: [], operators: [], computed_at: "2026-10-26T12:00:00Z" };
+test("summary retains last good metrics with timestamp and retry after temporary failure", async t => {
+  let fail = false;
+  const ui = setup(t, async () => { if (fail) throw Object.assign(new Error("Сервис временно недоступен."), { status: 503 }); return summaryData; });
+  ui.state.pane = "summary"; ui.app.update(all); await ui.app.summary(); fail = true; await ui.app.summary();
+  assert.ok(ui.$("#summary-content .kpi-grid"));
+  assert.match(ui.$("#summary-error").textContent, /Показаны данные на.*26\.10\.2026/);
+  assert.equal(ui.$("#summary-error button").textContent, "Повторить");
+});
+test("first summary failure ends loading without inventing zeros", async t => {
+  const ui = setup(t, async () => { throw new Error("Unavailable"); });
+  ui.state.pane = "summary"; ui.app.update(all); await ui.app.summary();
+  assert.match(ui.$("#summary-content").textContent, /пока недоступны/);
+  assert.equal(ui.$("#summary-content .kpi-grid"), null);
+});
+test("summary stops duplicate requests and aborts on leaving", async t => {
+  let resolve, signal, count = 0;
+  const ui = setup(t, (path, options) => { count++; signal = options.signal; return new Promise(yes => { resolve = yes; }); });
+  ui.state.pane = "summary"; ui.app.update(all);
+  const pending = ui.app.summary(); await ui.app.summary(); assert.equal(count, 1);
+  ui.app.leave(); assert.equal(signal.aborted, true); resolve(summaryData); await pending;
+  assert.equal(ui.$("#summary-content .kpi-grid"), null);
+});
+test("summary permission rejection removes previously rendered private metrics", async t => {
+  let denied = false;
+  const ui = setup(t, async () => { if (denied) throw Object.assign(new Error("Нет доступа"), { status: 403 }); return summaryData; });
+  ui.state.pane = "summary"; ui.app.update(all); await ui.app.summary(); denied = true; await ui.app.summary();
+  assert.equal(ui.$("#summary-content").textContent, "");
+  assert.equal(ui.$("#summary-error button"), null);
+});
+test("logout reset clears private summary and error text", async t => {
+  const ui = setup(t, async () => summaryData);
+  ui.state.pane = "summary"; ui.app.update(all); await ui.app.summary(); ui.app.reset();
+  assert.equal(ui.$("#summary-content").textContent, "");
+  assert.equal(ui.$("#summary-error").textContent, "");
 });

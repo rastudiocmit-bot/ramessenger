@@ -1151,6 +1151,26 @@ class MessageSyncTests(unittest.TestCase):
             summary(self.reader.max, None, self.workspace, now=self.at)
         self.assertEqual(error.exception.status, 403)
 
+    def test_summary_ignores_old_projection_and_rebuilds_missing_state_correctly(self):
+        from center_messenger.cabinet_summary import summary
+        from center_messenger.chat_queue import PROJECTION_VERSION as queue_version
+        self.project(self.row("1"))
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||CAST(:p AS jsonb) "
+            "WHERE workspace_id=:w AND topic='chat.list.state'"),
+            {"w": self.workspace, "p": json.dumps({"projection_version": queue_version - 1, "needs_reply": False})})
+        self.assertEqual(summary(self.reader.max, None, self.workspace, now=self.at)["waiting"], 1)
+        self.db.execute(text("DELETE FROM outbox_events WHERE workspace_id=:w AND topic='chat.list.state'"), {"w": self.workspace})
+        self.assertEqual(summary(self.reader.max, None, self.workspace, now=self.at)["waiting"], 1)
+
+    def test_summary_previous_week_starts_at_local_midnight_across_dst(self):
+        from center_messenger.cabinet_summary import summary
+        self.membership["timezone"] = "Europe/Berlin"
+        # Current week begins after the autumn transition; previous week before it.
+        now = datetime(2026, 11, 1, 12, tzinfo=UTC)
+        previous_start = datetime(2026, 10, 18, 22, tzinfo=UTC)
+        self.project(self.row("1", at=previous_start + timedelta(minutes=30)))
+        self.assertEqual(summary(self.reader.max, None, self.workspace, now=now)["previous_incoming"], 1)
+
     def test_settings_change_during_browser_read_cannot_publish_stale_history(self):
         def changed_settings(origin, session, requests, **kwargs):
             self.db.execute(text("UPDATE alfa_max_settings SET version=version+1 WHERE workspace_id=:w"),

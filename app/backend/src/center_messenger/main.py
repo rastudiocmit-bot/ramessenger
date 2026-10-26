@@ -17,14 +17,12 @@ from center_messenger.accounts import Accounts
 from center_messenger.accounts_api import router as accounts_router
 from center_messenger.alfa_api import router as alfa_router
 from center_messenger.alfa_client import AlfaClient
-from center_messenger.alfa_max import AlfaMaxConnections, AlfaMaxWorker
+from center_messenger.alfa_max import AlfaMaxConnections
 from center_messenger.alfa_max_api import router as alfa_max_router
 from center_messenger.alfa_service import AlfaConnections
-from center_messenger.alfa_sync import AlfaSync, SyncWorker
+from center_messenger.alfa_sync import AlfaSync
 from center_messenger.auth_security import AuthError, Passwords
-from center_messenger.chat_queue import QueueProjectionWorker
-from center_messenger.family_cache import FamilyCacheWorker
-from center_messenger.active_review import ActiveReviewWorker
+from center_messenger.loader.bootstrap import build_loader
 from center_messenger.chat_api import ChatReader
 from center_messenger.chat_api import hooks as max_hooks
 from center_messenger.chat_api import router as chat_router
@@ -38,7 +36,7 @@ from center_messenger.ai_voice import AiVoice
 from center_messenger.http_security import SecurityMiddleware, StaticCompressionMiddleware
 from center_messenger.max_client import MaxClient
 from center_messenger.max_connections import MaxConnections
-from center_messenger.messaging import Messaging, MessagingWorker
+from center_messenger.messaging import Messaging
 
 logger = logging.getLogger(__name__)
 
@@ -86,53 +84,17 @@ def create_app(
             else None
         )
         app.state.chats = ChatReader(app.state.messaging) if app.state.messaging else None
-        worker = (
-            SyncWorker(app.state.alfa_sync)
-            if config.crm_sync_worker and app.state.alfa_sync
-            else None
-        )
-        if worker:
-            worker.start()
-        max_worker = (
-            MessagingWorker(app.state.messaging)
-            if config.max_worker and app.state.messaging
-            else None
-        )
-        if max_worker:
-            max_worker.start()
-        alfa_max_worker = (
-            AlfaMaxWorker(app.state.alfa_max)
-            if config.crm_sync_worker and app.state.alfa_max
-            else None
-        )
-        if alfa_max_worker:
-            alfa_max_worker.start()
-        queue_worker = QueueProjectionWorker(app.state.accounts) if app.state.accounts else None
-        if queue_worker:
-            queue_worker.start()
-        card_worker = FamilyCacheWorker(app.state.alfa) if config.crm_sync_worker and app.state.alfa else None
-        if card_worker:
-            card_worker.start()
-        active_worker = ActiveReviewWorker(app.state.alfa) if config.crm_sync_worker and app.state.alfa else None
-        if active_worker:
-            active_worker.start()
-        yield
-        if active_worker:
-            active_worker.stop()
-        if card_worker:
-            card_worker.stop()
-        if queue_worker:
-            queue_worker.stop()
-        if alfa_max_worker:
-            alfa_max_worker.stop()
-        if max_worker:
-            max_worker.stop()
-        if worker:
-            worker.stop()
-        if app.state.ai_voice:
-            await asyncio.to_thread(app.state.ai_voice.jobs.pool.shutdown, wait=True, cancel_futures=True)
-        if engine is not None:
-            engine.dispose()
+        app.state.loader = build_loader(app.state, config)
+        app.state.loader.start()
+        try:
+            yield
+        finally:
+            if not app.state.loader.stop():
+                logger.warning("Loader stopping with in-flight operations; durable leases remain authoritative")
+            if app.state.ai_voice:
+                await asyncio.to_thread(app.state.ai_voice.jobs.pool.shutdown, wait=True, cancel_futures=True)
+            if engine is not None:
+                engine.dispose()
 
     app = FastAPI(
         title="Center Messenger",

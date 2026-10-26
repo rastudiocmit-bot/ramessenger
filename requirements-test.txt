@@ -1,0 +1,3 @@
+-r requirements.txt
+# Starlette TestClient; this dependency is not needed by the production image.
+httpx2==2.16.0

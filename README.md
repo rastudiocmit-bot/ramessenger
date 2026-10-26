@@ -3,6 +3,10 @@
 Кабинет мессенджера для клиентов студии: единое окно с переписками,
 командой, настройками подключений CRM и ботами MAX.
 
+Инструкция разработчику: [общий загрузчик и подключение новых каналов](app/backend/src/center_messenger/loader/README.md).
+В ней описаны адаптеры телефонии, вложений и мессенджеров, очереди, сохранение
+курсоров, пример без сети и проверки совместимости.
+
 ## Стек
 
 - **API** — FastAPI (Python 3.12), точка входа `center_messenger.main:app`
@@ -39,8 +43,9 @@ curl --fail --silent --show-error http://127.0.0.1:8100/health/ready
 ## Проверки
 
 ```bash
+python3 -m pip install -r requirements-test.txt
 python3 -m compileall -q app/backend/src app/backend/migrations scripts
-python3 -m unittest discover -s tests -p 'test_*.py' -v
+PYTHONPATH=app/backend/src python3 -m unittest discover -s tests -p 'test_*.py' -v
 npm ci --ignore-scripts
 npm test
 docker run --rm --entrypoint alembic <image> -c /app/alembic.ini history

@@ -201,6 +201,29 @@ class QueueProjectionWorker:
         self.accounts, self.stopping = accounts, threading.Event()
         self.thread = threading.Thread(target=self.run, name="chat-queue-projection", daemon=True)
 
+    def run_next(self):
+        """One bounded repair batch; workspace discovery uses routing tables only."""
+        pending = getattr(self, "_pending_scopes", [])
+        if not pending:
+            with self.accounts.transaction() as db:
+                pending = list(db.execute(text("SELECT workspace_id FROM max_routes UNION "
+                    "SELECT workspace_id FROM alfa_max_sync_queue ORDER BY workspace_id")).scalars())
+            self._pending_scopes = pending
+        if not pending:
+            return False
+        workspace = pending.pop(0)
+        with self.accounts.transaction(workspace_id=workspace) as db:
+            connection = db.execute(text("SELECT id FROM connections WHERE workspace_id=:w AND "
+                "kind IN ('max_bot','alfa_max_browser') AND (capabilities->'chat_queue_projection' "
+                "IS NULL OR capabilities->'chat_queue_projection'->>'version'<>:version OR "
+                "capabilities->'chat_queue_projection'->>'complete' IS DISTINCT FROM 'true') "
+                "ORDER BY id LIMIT 1"), {"version": str(PROJECTION_VERSION), "w": workspace}).scalar_one_or_none()
+        if connection:
+            with self.accounts.transaction(workspace_id=workspace) as db:
+                db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
+                repair_batch(db, workspace, connection)
+        return bool(connection or pending)
+
     def run(self):
         while not self.stopping.is_set():
             worked = False
