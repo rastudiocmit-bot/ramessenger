@@ -75,7 +75,7 @@ class NativeSendRuntimeTests(unittest.TestCase):
 
     def test_explicit_rejection_is_failed_not_replayed(self):
         with self.assertRaises(AlfaBrowserError) as raised:
-            self.run_child("submit(); emit({'event':'error','code':'crm_rejected'})")
+            self.run_child("submit(); emit({'event':'error','code':'crm_rejected'}); time.sleep(60)")
         self.assertEqual(raised.exception.code, 'crm_rejected')
 
     def test_unrelated_and_detached_child_processes_are_distinguished(self):
@@ -154,6 +154,15 @@ class InlineSendTests(unittest.TestCase):
         with self.assertRaises(AlfaBrowserError) as raised:
             self.send()
         self.assertEqual(raised.exception.code, 'send_prepare_timeout')
+
+    def test_explicit_rejection_is_reported_before_cookie_export(self):
+        seen = []
+        self.page.evaluate.side_effect = [self.reply(self.form), self.reply('{"errors":["Synthetic refusal"]}')]
+        self.context.storage_state.side_effect = lambda: seen.append('cookies') or {'cookies': []}
+        with self.assertRaises(AlfaBrowserError) as raised:
+            self.send(on_rejected=lambda code: seen.append(code))
+        self.assertEqual(raised.exception.code, 'crm_rejected')
+        self.assertEqual(seen[:2], ['crm_rejected', 'cookies'])
 
     def test_post_script_actually_aborts_a_stalled_fetch(self):
         import subprocess

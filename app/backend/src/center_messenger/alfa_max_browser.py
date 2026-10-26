@@ -1130,7 +1130,7 @@ class AlfaMaxBrowser:
         return run_send(origin, state, branch, customer, text, **options)
 
     def _send_inline(self, origin, state, branch, customer, text, *, deadline=None,
-                     before_post=None, on_accepted=None):
+                     before_post=None, on_accepted=None, on_rejected=None):
         # Only the supervised child calls this in production.
         deadline = deadline if deadline is not None else time.monotonic() + 90
 
@@ -1351,6 +1351,8 @@ class AlfaMaxBrowser:
                 logging.getLogger(__name__).warning('Native send accepted; browser state export unavailable')
             return accepted
         except AlfaBrowserError as error:
+            if post_started and error.code in {'crm_rejected', 'max_recipient_missing'} and on_rejected:
+                on_rejected(error.code)
             _capture_state(error, context)
             if error.code in {
                 "form_unavailable", "max_form_missing", "max_recipient_missing",

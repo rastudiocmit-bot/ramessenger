@@ -414,6 +414,9 @@ class Messaging:
             )
             if command["state"] == "sending":
                 self._state(db, job, command, "unknown", "unknown")
+                delivery = command['payload'].get('native_delivery') or {}
+                if delivery.get('attempt_id'):
+                    self._native_phase(db, job, delivery['attempt_id'], 'unknown')
                 self._remove(db, job)
                 return
             context(db, user_id=command["requested_by"])
@@ -482,6 +485,9 @@ class Messaging:
                         raise AlfaBrowserError('access_changed')
                     latest = self.alfa_max._send_target_in_transaction(
                         db, job['workspace_id'], job['connection_id'], current['conversation_id'])
+                    from center_messenger.alfa_session import control
+                    if control(latest['session_snapshot']).get('needs_check'):
+                        raise AlfaBrowserError('session_check_pending')
                     if (latest['branch'], latest['customer']) != (target['branch'], target['customer']):
                         raise AlfaBrowserError('settings_changed')
                     self._native_phase(db, job, attempt, 'post_started')
@@ -596,8 +602,15 @@ class Messaging:
                     command = self._command(db, job)
                     if command and command["state"] == "sending":
                         self._state(db, job, command, "unknown", "unknown")
+                        delivery = command['payload'].get('native_delivery') or {}
+                        if delivery.get('attempt_id'):
+                            self._native_phase(db, job, delivery['attempt_id'], 'unknown')
                         self._remove(db, job)
                     else:
+                        delivery = (command['payload'].get('native_delivery') or {}) if command else {}
+                        if command and command['state'] == 'queued' and delivery.get('attempt_id'):
+                            self._state(db, job, command, 'queued', 'send_prepare_failed')
+                            self._native_phase(db, job, delivery['attempt_id'], 'waiting')
                         db.execute(
                             text(
                                 "UPDATE message_jobs SET due_at=now()+interval '5 seconds',"

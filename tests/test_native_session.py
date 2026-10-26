@@ -551,6 +551,7 @@ class NativeSessionTests(unittest.TestCase):
                 calls = self.service.browser.send.call_count
                 messaging.run_next('send', 'alfa_max_browser')
                 self.assertEqual(self.native_command(command)['state'], 'unknown')
+                self.assertEqual(self.native_command(command)['payload']['native_delivery']['phase'], 'unknown')
                 self.assertEqual(self.service.browser.send.call_count, calls)
 
     def test_revocation_while_preparing_is_checked_again_before_post(self):
@@ -582,6 +583,20 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(posted, [])
         self.assertEqual(self.native_command(command)['last_error_code'], 'settings_changed')
         self.assertEqual(self.native_command(command)['state'], 'queued')
+
+    def test_new_authorization_suspicion_during_preparation_defers_post(self):
+        messaging, command = self.queue_operator_reply()
+        posted = []
+        def send(*args, **options):
+            self.pending()
+            options['before_post']()
+            posted.append(True)
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(posted, [])
+        self.assertEqual(self.native_command(command)['state'], 'queued')
+        self.assertEqual(self.native_command(command)['last_error_code'], 'session_check_pending')
+        self.assertEqual(self.setting()['state'], 'active')
 
     def test_heartbeat_renews_both_leases_and_intent_is_durable_before_submit(self):
         messaging, command = self.queue_operator_reply()

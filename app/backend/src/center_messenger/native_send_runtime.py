@@ -77,16 +77,20 @@ class ProcessTree:
         for pid in pending - self.owned.keys():
             if pid not in table:
                 continue
+            fd = None
             try:
                 fd = os.pidfd_open(pid)
                 # Do not retain a recycled PID between enumeration and pidfd_open.
                 if _process_info(Path('/proc') / str(pid) / 'stat')[:2] != table[pid][:2]:
-                    os.close(fd)
                     continue
                 self.owned[pid] = (fd, table[pid][1])
+                fd = None
                 added.append(pid)
             except (ProcessLookupError, FileNotFoundError):
                 pass
+            finally:
+                if fd is not None:
+                    os.close(fd)
         return added
 
     def _signal(self, pid, sig):
@@ -262,7 +266,8 @@ def main():
     try:
         result = AlfaMaxBrowser()._send_inline(data['origin'], data['state'], data['branch'], data['customer'],
             data['text'], deadline=data['deadline'], before_post=prepare,
-            on_accepted=lambda receipt: _emit({'event': 'accepted', 'result': receipt}))
+            on_accepted=lambda receipt: _emit({'event': 'accepted', 'result': receipt}),
+            on_rejected=lambda code: _emit({'event': 'error', 'code': code}))
         _emit({'event': 'result', 'result': result})
     except AlfaBrowserError as error:
         packet = {'event': 'error', 'code': error.code}
