@@ -14,9 +14,9 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    if(width<720){await page.locator('#more-tab').click();await page.locator('#navigation-options [data-pane="connections"]').click();}
    else await page.locator('#connections-tab').click();
    await page.locator('#connections-voice-tab').click();await page.waitForSelector('#ai-cloud-card');
-   assert.equal(await page.locator('#ai-settings-form [name=voice_max_seconds]').inputValue(),'180');
-   await page.locator('#ai-settings-form [name=voice_max_seconds]').fill('90');
-   await page.locator('#ai-settings-form button[type=submit]').click();
+   assert.equal(await page.locator('#ai-voice-options-form [name=voice_max_seconds]').inputValue(),'180');
+   await page.locator('#ai-voice-options-form [name=voice_max_seconds]').fill('90');
+   await page.locator('#ai-voice-options-form button[type=submit]').click();
    await page.waitForFunction(()=>document.querySelector('#voice-active-summary').textContent.includes('90 сек.'));
    assert.equal(await page.locator('#alfa-form').isVisible(),false);
    assert.equal(await page.locator('#ai-agent-new').isVisible(),false);

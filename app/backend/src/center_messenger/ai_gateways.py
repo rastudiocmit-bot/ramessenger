@@ -24,6 +24,15 @@ def ready(row):
     return bool(row.get(provider + '_key_ciphertext')) if provider in PROVIDERS else bool(row['key_ciphertext'] and row['folder_id'])
 
 
+def check_summary(configured, checks):
+    """Derive current state from persisted checks, never from key presence alone."""
+    known = [checks.get(key, {}) for key in ('text', 'recognition', 'synthesis')] if configured else []
+    passed = sum(item.get('ok') is True for item in known)
+    failed = sum(item.get('ok') is False for item in known)
+    status = 'error' if failed else 'active' if passed == 3 else 'partial' if passed else 'not_configured'
+    return {'status': status, 'passed_checks': passed, 'failed_checks': failed, 'total_checks': 3}
+
+
 def public(row):
     saved = config(row)
     result = {key: saved.get(key, default) for key, default in (
@@ -32,6 +41,7 @@ def public(row):
     for provider in PROVIDERS:
         item = saved.get(provider, {})
         result[provider] = {
+            **check_summary(bool(row and row.get(provider + '_key_ciphertext')), item.get('checks', {})),
             'configured': bool(row and row.get(provider + '_key_ciphertext')),
             'key_hint': item.get('key_hint', ''), 'checks': item.get('checks', {}),
             'protocol': item.get('protocol', 'chat'),

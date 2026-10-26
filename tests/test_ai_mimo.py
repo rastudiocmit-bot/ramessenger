@@ -96,6 +96,27 @@ class MimoTests(unittest.TestCase):
             with self.assertRaises(YandexError):complete(m.MimoClient(FakeOpener(payload)))
         self.assertTrue(complete(m.MimoClient(FakeOpener(reply(finish='length'))))['truncated'])
 
+    def test_common_voice_options_preserve_yandex_credentials_and_enabled_state(self):
+        ai,db=service(role='owner')
+        before=dict(db.settings)
+        result=ai.save_settings(ACTOR,WS,{'voice_max_seconds':60,'monthly_limit_rub':500})
+        self.assertEqual(db.settings['key_ciphertext'],before['key_ciphertext'])
+        self.assertEqual(db.settings['folder_id'],before['folder_id'])
+        self.assertTrue(result['voice_enabled']);self.assertEqual(result['voice_max_seconds'],60)
+        self.assertEqual(result['monthly_limit_rub'],500)
+
+    def test_overall_status_is_derived_from_all_saved_capabilities(self):
+        good={name:{'ok':True} for name in ('text','recognition','synthesis')}
+        self.assertEqual(g.check_summary(True,good)['status'],'active')
+        self.assertEqual(g.check_summary(True,{'text':good['text']})['status'],'partial')
+        self.assertEqual(g.check_summary(False,good)['status'],'not_configured')
+        self.assertEqual(g.check_summary(True,{})['status'],'not_configured')
+        failed=good|{'synthesis':{'ok':False,'error_code':'no_balance'}}
+        self.assertEqual(g.check_summary(True,failed),{'status':'error','passed_checks':2,'failed_checks':1,'total_checks':3})
+        for provider in ('mimo','mimo_plan'):
+            row=blank_settings()|{provider+'_key_ciphertext':'sealed','gateway_config':{provider:{'checks':good}}}
+            self.assertEqual(g.public(row)[provider]['status'],'active')
+
     def test_gateway_public_metadata_never_contains_ciphertexts(self):
         row=blank_settings()|{'mimo_key_ciphertext':'sealed-secret','gateway_config':{'mimo':{'key_hint':'abcd'}}}
         result=g.public(row)

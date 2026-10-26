@@ -62,12 +62,16 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await page.waitForSelector('#ai-cloud-card'); await page.locator('#ai-cloud-card').scrollIntoViewIfNeeded();
     assert.equal(await page.locator('#ai-status').textContent(), 'Работает');
     assert.match(await page.locator('#ai-settings-form [name=api_key]').getAttribute('placeholder'), /k3y9/);
+    await page.locator('#ai-cloud-card .gateway-credentials summary').click();
     await page.locator('#ai-settings-form [name=api_key]').fill('AQVN' + 'x'.repeat(36));
-    await page.locator('#ai-settings-form [name=monthly_limit_rub]').fill('500');
     await page.locator('#ai-settings-form button[type=submit]').click();
+    await page.locator('#ai-voice-options-form [name=monthly_limit_rub]').fill('500');
+    await page.locator('#ai-voice-options-form button[type=submit]').click();
     await page.waitForFunction(() => document.querySelector('#ai-spent').textContent.includes('500'));
     const put = data.mutations.find(m => m.method === 'PUT' && m.path.endsWith('/ai/settings'));
-    assert.deepEqual({ ...put.body, api_key: put.body.api_key.length }, { folder_id: 'b1gexamplefolder0000', api_key: 40, voice_enabled: true, voice_max_seconds:180, monthly_limit_rub: 500 });
+    assert.deepEqual({ ...put.body, api_key: put.body.api_key.length }, { folder_id: 'b1gexamplefolder0000', api_key: 40 });
+    const optionsPut=data.mutations.find(m=>m.method==='PUT'&&m.path.endsWith('/ai/settings')&&m.body.voice_max_seconds);
+    assert.deepEqual(optionsPut.body,{voice_enabled:true,voice_max_seconds:180,monthly_limit_rub:500});
     assert.equal(await page.locator('#ai-settings-form [name=api_key]').inputValue(), '', 'the key is not kept in the form');
     await page.locator('#ai-verify').click(); await page.waitForFunction(() => document.querySelector('#ai-status').textContent === 'Работает');
 
