@@ -1385,7 +1385,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .gateway-options-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; align-items: start; }
 .gateway-options-grid > .card { min-width: 0; margin: 0; }
 .gateway-options-grid h3 { margin: 0; font-size: 15px; }
-#connections-voice-view .gateway-routes { max-width: none; margin-bottom: 0; }
+#connections-voice-view .gateway-routes { width: 100%; min-width: 0; max-width: none; margin: 0; }
 .gateway-text-note { padding: 10px 12px; margin: 0 0 18px; border-radius: 10px; background: var(--surface-2); color: var(--muted); font-size: 12px; line-height: 1.65; }
 .gateway-synthesis textarea { display: block; width: 100%; min-height: 100px; resize: vertical; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; line-height: 1.5; }
 .gateway-synthesis .fld { display: flex; flex-direction: column; gap: 6px; }
