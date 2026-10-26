@@ -2,7 +2,9 @@
 
 import json
 import logging
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -35,6 +37,20 @@ router = APIRouter(prefix="/api/workspaces/{workspace_id}")
 hooks = APIRouter()
 ERRORS = {**MAX_ERRORS, **ALFA_MAX_ERRORS}
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def family_read_stage(stage):
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = (perf_counter() - started) * 1000
+        if elapsed >= 250:
+            # Same searchable prefix as the request timing; never include IDs,
+            # query parameters, customer names or underlying exception text.
+            logger.warning("Slow API read route=/api/workspaces/{workspace_id}/chats/{conversation_id}/family "
+                           "stage=%s duration_ms=%.0f", stage, elapsed)
 
 # Cached columns are used only after the resumable repair has completed.
 # During repair the same policy supplies live values, so no stale zero is shown.
@@ -256,6 +272,37 @@ class ChatReader:
                     for r in latest.values()
                 ],
             }
+
+    @staticmethod
+    def _family_conversation(db, workspace, conversation):
+        """Resolve the authorized CRM link without reading message history.
+
+        Family reads don't use unread counters, send eligibility or previews.
+        In particular, a missing queue projection must not trigger a full
+        history calculation before an already cached card can be returned.
+        """
+        row = db.execute(text(
+            "SELECT c.id,c.connection_id,c.contact_id,c.external_chat_id,c.crm_link_manual,cn.kind AS channel_kind "
+            "FROM conversations c JOIN connections cn ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id "
+            "LEFT JOIN max_settings s ON s.workspace_id=c.workspace_id AND s.connection_id=c.connection_id "
+            "LEFT JOIN alfa_max_settings am ON am.workspace_id=c.workspace_id AND am.connection_id=c.connection_id "
+            "WHERE c.workspace_id=:w AND c.id=:id AND c.kind='direct' AND "
+            "((cn.kind='max_bot' AND s.connection_id IS NOT NULL) OR "
+            "(cn.kind='alfa_max_browser' AND am.connection_id IS NOT NULL))"),
+            {"w": workspace, "id": conversation}).mappings().one_or_none()
+        if row is None:
+            raise AuthError(404, "Диалог недоступен.")
+        if row["channel_kind"] == "alfa_max_browser" and row["contact_id"] and not row["crm_link_manual"]:
+            external = f"alfa-contact:{row['contact_id']}"
+            if row["external_chat_id"] != external:
+                canonical = db.execute(text("SELECT id FROM conversations WHERE workspace_id=:w "
+                    "AND connection_id=:connection AND contact_id=:contact "
+                    "AND external_chat_id=:external AND external_topic_id=''"),
+                    {"w": workspace, "connection": row["connection_id"], "contact": row["contact_id"],
+                     "external": external}).scalar_one_or_none()
+                if canonical:
+                    return ChatReader._family_conversation(db, workspace, canonical)
+        return row
 
     @staticmethod
     def _conversation(db, workspace, conversation, *, lock=None, cached=False):
@@ -1107,13 +1154,15 @@ def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request, aut
                 known_version: str | None = Query(default=None, pattern="^[0-9a-f]{64}$")):
     _, reader = components(request)
     actor = identity(request)
-    with reader.max.chat_transaction(actor, workspace_id, snapshot=True) as db:
-        row = reader._conversation(db, workspace_id, conversation_id)
-        contact, conversation = row["contact_id"], row["id"]
-        if contact is None:
-            raise AuthError(404, "Диалог пока не связан с карточкой CRM.")
-    return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, auto=auto,
-                                               cached_only=cached_only, compact=compact, known_version=known_version)
+    with family_read_stage("family.resolve"):
+        with reader.max.chat_transaction(actor, workspace_id, snapshot=True) as db:
+            row = reader._family_conversation(db, workspace_id, conversation_id)
+            contact, conversation = row["contact_id"], row["id"]
+            if contact is None:
+                raise AuthError(404, "Диалог пока не связан с карточкой CRM.")
+    with family_read_stage("family.prepare"):
+        return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, auto=auto,
+                                                   cached_only=cached_only, compact=compact, known_version=known_version)
 
 
 @router.post("/chats/{conversation_id}/family/refresh", status_code=202)
@@ -1121,7 +1170,7 @@ def refresh_chat_family(workspace_id: UUID, conversation_id: UUID, request: Requ
     _, reader = components(request)
     actor = identity(request, mutation=True)
     with reader.max.chat_transaction(actor, workspace_id, snapshot=True) as db:
-        row = reader._conversation(db, workspace_id, conversation_id)
+        row = reader._family_conversation(db, workspace_id, conversation_id)
         contact, conversation = row["contact_id"], row["id"]
         if contact is None:
             raise AuthError(404, "Диалог пока не связан с карточкой CRM.")
