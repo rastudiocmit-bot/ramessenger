@@ -5,6 +5,9 @@ log them (x-data-logging-enabled: false). Audio is 16 kHz, 16-bit, mono LPCM,
 the format SpeechKit's synchronous API accepts without conversion.
 """
 
+import base64
+import io
+import wave
 import json
 import math
 import re
@@ -13,6 +16,16 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from array import array
 from urllib.parse import urlencode
+
+TTS_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+TTS_VOICES = {"marina": "Марина · русский", "filipp": "Филипп · русский", "ermil": "Ермил · русский",
+              "jane": "Джейн · русский", "omazh": "Омаж · русский", "zahar": "Захар · русский",
+              "john": "John · английский"}
+
+
+def tts_cost(text):
+    return len(text.strip()) * 1342 / 1_000_000  # API v1, RUB incl. VAT; budget estimate
+
 
 STT_URL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
 COMPLETION_URL = "https://ai.api.cloud.yandex.net/foundationModels/v1/completion"
@@ -147,9 +160,15 @@ def _status_code(status):
     return "unavailable"
 
 
+class NoTtsRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 class YandexClient:
     def __init__(self, opener=None):
         self.opener = opener or urllib.request.urlopen
+        self.tts_opener = opener or urllib.request.build_opener(NoTtsRedirect()).open
 
     def _post(self, url, data, headers, timeout):
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")
@@ -234,3 +253,27 @@ class YandexClient:
             raise YandexError("bad_response")
         return {"text": answer, "input_tokens": input_tokens, "output_tokens": output_tokens,
                 "truncated": status == "ALTERNATIVE_STATUS_TRUNCATED_FINAL"}
+
+
+    def synthesize(self, text, *, api_key, voice="marina"):
+        """Service-account API v1 returns raw signed PCM; add a playable WAV container."""
+        if voice not in TTS_VOICES or not isinstance(text, str) or not 1 <= len(text.strip()) <= 500:
+            raise YandexError("bad_request")
+        body = urlencode({"text": text.strip(), "voice": voice, "lang": "en-US" if voice == "john" else "ru-RU",
+                          "format": "lpcm", "sampleRateHertz": "16000"}).encode()
+        request = urllib.request.Request(TTS_URL, data=body, method="POST",
+            headers=self._headers(api_key, "application/x-www-form-urlencoded"))
+        try:
+            with self.tts_opener(request, timeout=25) as response:
+                audio = response.read(MAX_AUDIO_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            raise YandexError(_status_code(error.code), error.code) from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            raise YandexError("network") from None
+        if not audio or len(audio) % 2 or len(audio) > MAX_AUDIO_BYTES:
+            raise YandexError("bad_response")
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(SAMPLE_RATE); wav.writeframes(audio)
+        return {"audio": base64.b64encode(output.getvalue()).decode(), "content_type": "audio/wav",
+                "seconds": len(audio) / BYTES_PER_SECOND}

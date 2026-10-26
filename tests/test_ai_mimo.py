@@ -180,4 +180,36 @@ class MimoTests(unittest.TestCase):
             ai.gateways.routes(ACTOR,WS,{'recognition_provider':'mimo','recognition_language':'ru','synthesis_provider':'disabled','synthesis_voice':'Mia'})
         self.assertEqual(denied.exception.status,422)
 
+
+class YandexSynthesisTests(unittest.TestCase):
+    def test_yandex_synthesis_wraps_binary_pcm_and_uses_service_account_auth(self):
+        from center_messenger.ai_yandex import YandexClient,TTS_URL,tts_cost
+        from urllib.parse import parse_qs
+        pcm=silence(1);wire=FakeOpener(pcm)
+        result=YandexClient(wire).synthesize('Здравствуйте.',api_key='fake-service-key',voice='marina')
+        request=wire.requests[0][0];body=parse_qs(request.data.decode())
+        self.assertEqual(request.full_url,TTS_URL);self.assertEqual(body['format'],['lpcm'])
+        self.assertEqual(body['sampleRateHertz'],['16000']);self.assertEqual(body['lang'],['ru-RU'])
+        self.assertNotIn('folderId',body);self.assertEqual(request.get_header('Authorization'),'Api-Key fake-service-key')
+        with wave.open(io.BytesIO(base64.b64decode(result['audio'])),'rb') as wav:
+            self.assertEqual(wav.readframes(wav.getnframes()),pcm)
+        self.assertEqual(result['seconds'],1);self.assertGreater(tts_cost('Здравствуйте.'),0)
+        YandexClient(wire).synthesize('Hello.',api_key='fake',voice='john')
+        self.assertEqual(parse_qs(wire.requests[-1][0].data.decode())['lang'],['en-US'])
+
+    def test_yandex_invalid_voice_oversized_text_and_bad_pcm_are_rejected(self):
+        from center_messenger.ai_yandex import YandexClient
+        wire=FakeOpener(silence(1));client=YandexClient(wire)
+        for voice,text in [('Dean','Hello'),('marina','x'*501)]:
+            with self.assertRaises(YandexError):client.synthesize(text,api_key='fake',voice=voice)
+        self.assertEqual(wire.requests,[])
+        for pcm in (b'',b'1'):
+            with self.assertRaises(YandexError):YandexClient(FakeOpener(pcm)).synthesize('Hello',api_key='fake')
+
+    def test_yandex_synthesis_permission_error_is_sanitized(self):
+        from center_messenger.ai_yandex import YandexClient
+        with self.assertRaises(YandexError) as failure:
+            YandexClient(FakeOpener(error=http_error(403))).synthesize('Hello',api_key='secret',voice='john')
+        self.assertEqual(failure.exception.code,'unauthorized');self.assertNotIn('secret',str(failure.exception))
+
 if __name__=='__main__':unittest.main()

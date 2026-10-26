@@ -43,7 +43,7 @@ class GatewayCheck(InputModel):
 class ActionRoutes(InputModel):
     recognition_provider: Literal["yandex", "mimo", "mimo_plan"]
     recognition_language: Literal["ru", "auto", "en", "zh"]
-    synthesis_provider: Literal["disabled", "mimo", "mimo_plan"] = "disabled"
+    synthesis_provider: Literal["disabled", "yandex", "mimo", "mimo_plan"] = "disabled"
     synthesis_voice: str = Field(default="Mia", max_length=30)
 
 

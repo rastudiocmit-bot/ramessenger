@@ -48,7 +48,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url()), p = url.pathname, method = request.method();
     if (url.hostname !== (options.hostname || 'cabinet.example.test')) return route.abort();
-    if (p === '/') return route.fulfill({ contentType: 'text/html', body: fs.readFileSync(web + '/index.html') });
+    if (p === '/') return route.fulfill({ headers:options.csp?{'Content-Security-Policy':options.csp}:{}, contentType: 'text/html', body: fs.readFileSync(web + '/index.html') });
     if (p.startsWith('/assets/')) {
       const file = path.join(web, path.basename(p));
       if (!fs.existsSync(file)) { unexpected.push(p); return route.abort(); }
@@ -86,12 +86,18 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       payload = ai.settings;
     } else if (p.endsWith('/ai/deepseek/verify')) { ai.settings.deepseek.status = 'active'; payload = { ...ai.settings, ok: true }; }
     else if (p.endsWith('/ai/settings/verify')) { ai.settings.status = 'active'; payload = { ...ai.settings, ok: true }; }
+    else if (p.endsWith('/ai/gateways/yandex/verify')) { ai.settings.gateways.yandex={configured:ai.settings.configured,checks:{synthesis:{ok:true,checked_at:'2026-10-26T12:00:00Z'}}};payload={...ai.settings,ok:true}; }
     else if (p.endsWith('/ai/gateways/routes')) { ai.settings.gateways={...ai.settings.gateways,...entry.body};payload=ai.settings; }
     else if (/\/ai\/gateways\/(mimo|mimo_plan)(\/verify)?$/.test(p)) {
       const provider=p.includes('mimo_plan')?'mimo_plan':'mimo',old=ai.settings.gateways[provider];
       if(p.endsWith('/verify'))old.checks={...old.checks,[entry.body.capability]:{ok:true,checked_at:'2026-10-26T12:00:00Z'}};
       else ai.settings.gateways[provider]={...old,configured:!entry.body.clear_key,key_hint:entry.body.api_key?.slice(-4)||'',base_url:entry.body.base_url||old.base_url,protocol:entry.body.protocol||old.protocol};
       payload=ai.settings;
+    }
+    else if (p.endsWith('/ai/synthesize')) {
+      const pcm=Buffer.alloc(32000);for(let n=0;n<16000;n++)pcm.writeInt16LE(Math.round(Math.sin(n*2*Math.PI*440/16000)*2000),n*2);
+      const wav=Buffer.alloc(44+pcm.length);wav.write('RIFF',0);wav.writeUInt32LE(36+pcm.length,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(16000,24);wav.writeUInt32LE(32000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(pcm.length,40);pcm.copy(wav,44);
+      payload={audio:(ai.synthesisBroken?Buffer.from('invalid wave'):wav).toString('base64'),content_type:'audio/wav',seconds:1,billing:ai.settings.gateways.synthesis_provider==='yandex'?'pay_as_you_go':'subscription',cost_rub:.02};
     }
     else if (p.endsWith('/ai/agents/test')) payload = { text: 'Здравствуйте! Занятие завтра переносится на 17:00.', fallback: false, cost_rub: 0.12, tokens: { input: 140, output: 18 } };
     else if (/\/ai\/agents\/[^/]+\/versions$/.test(p)) payload = { versions: [{ version: 1, name: 'Чистовик', model: 'yandexgpt-5.1', prompt: 'Первая версия', temperature: 0.2, created_at: '2026-10-24T20:00:00Z', author: 'Олег Иванов' }] };
