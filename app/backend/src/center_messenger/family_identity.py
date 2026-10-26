@@ -39,7 +39,7 @@ def repair(db, workspace, snapshot, *, limit=100):
         db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES(:w,:id,:name) "
             "ON CONFLICT(workspace_id,id) DO UPDATE SET display_name=EXCLUDED.display_name"),
             {"w": workspace, "id": student, "name": sources[0]["name"]})
-        db.execute(text("UPDATE alfa_customers SET student_id=:s,needs_review=true "
+        db.execute(text("UPDATE alfa_customers SET student_id=:s "
             "WHERE workspace_id=:w AND run_id=:r AND external_id=:customer"),
             params | {"s": student, "customer": customer})
         for source in sources:
@@ -48,8 +48,6 @@ def repair(db, workspace, snapshot, *, limit=100):
                 old_links.add((contact, source["student_id"]))
             db.execute(text("INSERT INTO contact_student_links(workspace_id,contact_id,student_id,managed_by_alfa) "
                 "VALUES(:w,:c,:s,true) ON CONFLICT DO NOTHING"), {"w": workspace, "c": contact, "s": student})
-            db.execute(text("UPDATE alfa_directory SET needs_review=true WHERE workspace_id=:w AND run_id=:r AND contact_id=:c"),
-                       params | {"c": contact})
     for contact, student in old_links:
         db.execute(text("DELETE FROM contact_student_links l WHERE l.workspace_id=:w AND l.contact_id=:c AND l.student_id=:s "
             "AND l.managed_by_alfa AND NOT EXISTS(SELECT 1 FROM alfa_customers a WHERE a.workspace_id=:w AND a.run_id=:r "

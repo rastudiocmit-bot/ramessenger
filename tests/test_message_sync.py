@@ -1985,6 +1985,117 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual([m['id'] for m in self.messages()],messages_before)
         self.assertEqual(len(reader.detail(None,self.workspace,self.contact)['students']),3)
 
+    def test_current_review_clears_legacy_flags_without_reimporting_or_changing_identities(self):
+        from center_messenger import crm_review
+        reader,_,_=self.family_worker_fixture()
+        self.project(self.row())
+        self.db.execute(text('UPDATE alfa_directory SET needs_review=true WHERE workspace_id=:w'),{'w':self.workspace})
+        self.db.execute(text('UPDATE alfa_customers SET needs_review=true WHERE workspace_id=:w'),{'w':self.workspace})
+        before=[(m['id'],m['conversation_id'],m['payload']) for m in self.messages()]
+        identities=list(self.db.execute(text('SELECT contact_id,student_id FROM alfa_customers WHERE workspace_id=:w'),{'w':self.workspace}))
+        current=reader.detail(None,self.workspace,self.contact)
+        self.assertFalse(current['needs_review']);self.assertEqual(current['review_reasons'],[])
+        self.assertTrue(self.db.execute(text('SELECT needs_review FROM alfa_directory WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one())
+        self.assertEqual(crm_review.repair(self.db,self.workspace,self.snapshot,limit=1),1)
+        self.assertFalse(self.db.execute(text('SELECT needs_review FROM alfa_directory WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one())
+        self.assertFalse(self.db.execute(text('SELECT needs_review FROM alfa_customers WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one())
+        self.assertEqual(crm_review.repair(self.db,self.workspace,self.snapshot,limit=1),0)
+        self.assertEqual(list(self.db.execute(text('SELECT contact_id,student_id FROM alfa_customers WHERE workspace_id=:w'),{'w':self.workspace})),identities)
+        self.assertEqual([(m['id'],m['conversation_id'],m['payload']) for m in self.messages()],before)
+
+    def test_current_review_preserves_real_cross_branch_conflicts_and_ignores_closed_branches(self):
+        from center_messenger import crm_review
+        from center_messenger.family_identity import repair
+        reader,_,_=self.family_worker_fixture()
+        self.add_customer(self.contact,2,7)
+        self.db.execute(text("UPDATE alfa_customers SET name=CASE branch_id WHEN 1 THEN 'First child' ELSE 'Other child' END,"
+            "dob=CASE branch_id WHEN 1 THEN DATE '2016-01-01' ELSE DATE '2017-02-02' END WHERE workspace_id=:w"),{'w':self.workspace})
+        repair(self.db,self.workspace,self.snapshot)
+        current=reader.detail(None,self.workspace,self.contact)
+        self.assertEqual({r['code'] for r in current['review_reasons']},{'customer_name_conflict','customer_birthdate_conflict'})
+        crm_review.repair(self.db,self.workspace,self.snapshot)
+        self.assertTrue(self.db.execute(text('SELECT needs_review FROM alfa_directory WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one())
+        self.db.execute(text('UPDATE alfa_branches SET available=false WHERE workspace_id=:w AND external_id=2'),{'w':self.workspace})
+        self.assertFalse(reader.detail(None,self.workspace,self.contact)['needs_review'])
+
+    def test_cached_review_finds_a_cross_family_student_collision_without_disclosing_foreign_data(self):
+        from center_messenger.family_identity import repair
+        reader,_,student=self.family_worker_fixture()
+        foreign=uuid4();self.add_customer(foreign,1,8)
+        self.db.execute(text("UPDATE alfa_customers SET student_id=:s,name='Foreign child',legal_name='Foreign parent',"
+            "phones='[\"+79990000099\"]'::jsonb WHERE workspace_id=:w AND external_id=8"),{'w':self.workspace,'s':student})
+        current=reader.detail(None,self.workspace,self.contact)
+        reasons=current['review_reasons']
+        self.assertEqual({r['code'] for r in reasons},{'shared_student_binding'})
+        self.assertEqual(reasons[0]['customer_ids'],['7'])
+        self.assertNotIn('Foreign',json.dumps(reasons))
+        repair(self.db,self.workspace,self.snapshot)
+        self.assertFalse(reader.detail(None,self.workspace,self.contact)['needs_review'])
+
+    def test_preferred_active_card_does_not_inherit_an_old_review_flag(self):
+        policy,reader,_,_,_,conversation=self.preferred_card_fixture()
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        self.db.execute(text('UPDATE alfa_directory SET needs_review=true WHERE workspace_id=:w'),{'w':self.workspace})
+        current=reader.detail(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(current['selection']['customer'],'9160')
+        self.assertFalse(current['needs_review'])
+        self.assertEqual(current['students'][0]['balance'],'487.50')
+
+    def test_review_of_a_fixed_phone_cohort_does_not_trust_a_stale_ambiguity_hint(self):
+        policy,reader,_,active,_,conversation=self.preferred_card_fixture()
+        self.db.execute(text('UPDATE alfa_customers SET legal_type=2 WHERE workspace_id=:w AND contact_id=:c'),{'w':self.workspace,'c':active})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        flagged=reader.detail(None,self.workspace,self.contact,conversation=conversation)
+        self.assertIn('shared_business_phone',{r['code'] for r in flagged['review_reasons']})
+        self.db.execute(text('UPDATE alfa_customers SET legal_type=1 WHERE workspace_id=:w AND contact_id=:c'),{'w':self.workspace,'c':active})
+        self.assertEqual(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)['ambiguous'],'shared_business_phone')
+        self.assertFalse(reader.detail(None,self.workspace,self.contact,conversation=conversation)['needs_review'])
+
+    def test_a_refused_card_redirect_keeps_its_current_conflict_without_exposing_the_candidate(self):
+        policy,reader,_,active,_,conversation=self.preferred_card_fixture()
+        self.db.execute(text("INSERT INTO alfa_customers(workspace_id,run_id,branch_id,external_id,name,legal_name,"
+            "legal_type,dob,phones,status,contact_id,student_id) SELECT workspace_id,run_id,1,external_id,'Different child',legal_name,"
+            "legal_type,dob,phones,status,contact_id,student_id FROM alfa_customers "
+            "WHERE workspace_id=:w AND branch_id=2 AND external_id=9160"),{'w':self.workspace})
+        policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
+        current=reader.detail(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(current['selection']['ambiguous'],'conflicting_customer')
+        reasons=current['review_reasons']
+        self.assertIn('conflicting_customer',{r['code'] for r in reasons})
+        self.assertNotIn('Different child',json.dumps(reasons))
+        self.assertNotIn('9160',json.dumps(reasons))
+        self.db.execute(text("UPDATE alfa_customers SET name='Мария Забунова' WHERE workspace_id=:w AND contact_id=:c"),
+                        {'w':self.workspace,'c':active})
+        self.assertFalse(reader.detail(None,self.workspace,self.contact,conversation=conversation)['needs_review'])
+
+    def test_derived_review_repair_is_scoped_and_bounded_under_runtime_rls(self):
+        from center_messenger import crm_review
+        self.family_worker_fixture()
+        for customer in (8,9):self.add_customer(uuid4(),1,customer)
+        self.db.execute(text('UPDATE alfa_directory SET needs_review=true WHERE workspace_id=:w'),{'w':self.workspace})
+        self.db.execute(text('SET CONSTRAINTS ALL IMMEDIATE'));self.db.execute(text('SET CONSTRAINTS ALL DEFERRED'))
+        self.db.execute(text(f'GRANT USAGE ON SCHEMA "{self.schema}" TO cm_app'))
+        self.db.execute(text('SET LOCAL ROLE cm_app'))
+        self.db.execute(text("SELECT set_config('app.workspace_id',:w,true)"),{'w':str(self.workspace)})
+        for expected in (2,1):
+            self.assertEqual(crm_review.repair(self.db,self.workspace,self.snapshot,limit=1),1)
+            self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_directory WHERE needs_review')).scalar_one(),expected)
+        self.assertEqual(crm_review.repair(self.db,self.workspace,self.snapshot,limit=1),1)
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_directory WHERE needs_review')).scalar_one(),0)
+
+    def test_review_cleanup_waits_for_an_in_progress_identity_repair(self):
+        from center_messenger import crm_review
+        from center_messenger.family_identity import repair
+        self.family_worker_fixture()
+        self.db.execute(text('UPDATE alfa_directory SET needs_review=true WHERE workspace_id=:w'),{'w':self.workspace})
+        self.db.execute(text("INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) "
+            "VALUES(:w,:id,'crm.student.identity',CAST(:conn AS text),CAST(:p AS jsonb),'published')"),
+            {'w':self.workspace,'id':uuid4(),'conn':self.crm,
+             'p':json.dumps({'run':str(self.run),'version':1,'complete':False,'processed':0,'after':0})})
+        self.assertEqual(crm_review.repair(self.db,self.workspace,self.snapshot),0)
+        repair(self.db,self.workspace,self.snapshot)
+        self.assertEqual(crm_review.repair(self.db,self.workspace,self.snapshot),1)
+
     def test_same_customer_entering_another_branch_keeps_its_parent_and_child_without_optional_branch_ids(self):
         from center_messenger.active_review import apply_customer
         reader,worker,student=self.family_worker_fixture()

@@ -1372,7 +1372,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const badges = $("#chat-details-badges"); badges.replaceChildren();
     for (const status of found) badges.append(chip(statuses[status], status));
     if (family.max_connected || family.max_bot_connected) { const max = chip("MAX", "max"); max.title = "Родитель подключён к MAX"; badges.append(max); }
-    if (family.needs_review) badges.append(chip("Нужна проверка в CRM", "unlinked"));
+    if (family.needs_review) {
+      const review = chip("Нужна проверка в CRM", "unlinked");
+      review.title = (family.review_reasons || []).map(reason => reason.text +
+        (reason.customer_ids?.length ? ` ID AlfaCRM: ${reason.customer_ids.join(", ")}.` : "") +
+        (reason.branch_ids?.length ? ` Филиалы: ${reason.branch_ids.join(", ")}.` : "")).join("\n") || "Неоднозначная связь карточек CRM.";
+      badges.append(review);
+    }
     const contact = $("#chat-details-contact"); contact.replaceChildren();
     for (const phone of family.phones || []) contact.append(contactRow("phone", phone));
     for (const email of family.emails || []) contact.append(contactRow("email", email));

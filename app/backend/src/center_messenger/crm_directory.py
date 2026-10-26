@@ -187,6 +187,7 @@ def project_directory(connection: UUID, rows, previous=()):
     Conflicting payer names sharing an address remain separate and require review.
     Different Customer IDs always remain separate children, including namesakes.
     """
+    rows = list(rows)
     sources, address_names = defaultdict(list), defaultdict(set)
     for row in rows:
         sources[row["external_id"]].append(row)
@@ -212,7 +213,11 @@ def project_directory(connection: UUID, rows, previous=()):
             address + (("|payer:" + name) if name else f"|card:{key}") if conflict else address
         )
         groups[identity].append(key)
-    identities, changed_aliases = student_bindings(connection, representatives, previous)
+    identities, _ = student_bindings(connection, representatives, previous)
+    from center_messenger.crm_review import ReviewIndex
+    contact_ids = {key: uuid5(connection, "contact:" + identity)
+                   for identity, keys in groups.items() for key in keys}
+    current_review = ReviewIndex(rows, identities=identities, contacts=contact_ids)
     contacts, students, bindings = [], {}, []
     for identity, keys in sorted(groups.items()):
         contact = uuid5(connection, "contact:" + identity)
@@ -222,11 +227,7 @@ def project_directory(connection: UUID, rows, previous=()):
         )
         phones = sorted({p for r in cards for p in r["phones"]})
         emails = sorted({p for r in cards for p in r["emails"]})
-        review = any(
-            len(address_names[addresses[key]]) > 1 or key in changed_aliases
-            for key in keys
-        )
-        review = review or any(len({(normalized_name(r["name"]), r["dob"]) for r in sources[key]}) > 1 for key in keys)
+        review = bool(current_review.reasons(keys))
         label = (
             legal_names[0]
             if legal_names

@@ -242,6 +242,8 @@ class FamilyCacheWorker:
             if snapshot:
                 from center_messenger.family_identity import repair
                 repair(db, workspace, snapshot)
+                from center_messenger.crm_review import repair as repair_review
+                repair_review(db, workspace, snapshot)
                 card_preference.repair(db, workspace, snapshot)
                 enqueue(db, workspace, snapshot)
 
