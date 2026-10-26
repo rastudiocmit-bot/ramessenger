@@ -791,7 +791,6 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* The history monitor and service forms are separate work areas. */
 .connection-tabs{display:flex;gap:6px;margin:0 auto 18px;padding:0 var(--gut-r) 12px var(--gut-l);max-width:1280px;border-bottom:1px solid var(--line);overflow-x:auto;overscroll-behavior-x:contain}
 .connection-tabs button{flex-shrink:0}
-.voice-agent-link{margin-bottom:18px}
 #connections-voice-view .ai-services{display:block;max-width:880px}
 #connections-voice-view .ai-providers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;align-items:start}
 #connections-agents-view #ai-agents-card{max-width:880px}
