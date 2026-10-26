@@ -5,11 +5,11 @@
   <title>Личный кабинет · РазвивайсяMessenger</title>
   <script src="/assets/appearance.js?v=2.0"></script>
   <link rel="stylesheet" href="/assets/app.css?v=0.8.36">
-  <link rel="stylesheet" href="/assets/cabinet.css?v=2.27.1">
+  <link rel="stylesheet" href="/assets/cabinet.css?v=2.27.2">
   <script src="/assets/icons.js?v=1.2.1" defer=""></script><script src="/assets/directory.js?v=0.9.1" defer=""></script>
-  <script src="/assets/chat.js?v=0.15.3" defer=""></script><script src="/assets/voice.js?v=1.6.0" defer=""></script><script src="/assets/ai.js?v=1.4.0" defer=""></script>
+  <script src="/assets/chat.js?v=0.15.4" defer=""></script><script src="/assets/voice.js?v=1.6.0" defer=""></script><script src="/assets/ai.js?v=1.4.0" defer=""></script>
   <script src="/assets/alfa-progress.js?v=0.12.2" defer=""></script>
-  <script src="/assets/cabinet.js?v=2.6" defer=""></script><script src="/assets/app.js?v=0.14.1" defer=""></script>
+  <script src="/assets/cabinet.js?v=2.6" defer=""></script><script src="/assets/app.js?v=0.14.2" defer=""></script>
 </head>
 <body>
   <div id="loading" class="loading" role="status"><span class="spinner"></span>Открываем кабинет…</div>
@@ -108,6 +108,7 @@
             <form id="alfa-max-connect-form" autocomplete="off">
               <label class="fld">Почта пользователя AlfaCRM<input name="email" type="email" required="" maxlength="254" autocomplete="off"></label>
               <label class="fld">Пароль AlfaCRM<input name="password" type="password" required="" maxlength="256" autocomplete="new-password"></label>
+              <label class="fld native-auto-login"><span><input id="alfa-max-auto-reconnect" name="auto_reconnect" type="checkbox" checked> Автоматически восстанавливать вход</span><small>Данные входа сохраняются на сервере в зашифрованном виде. Если AlfaCRM запросит код, потребуется подтверждение.</small></label>
               <small class="form-note">Для этого входа используется почта и пароль сотрудника AlfaCRM. API-ключи v2api и X-APP-KEY сюда не вводятся.</small>
               <button id="alfa-max-connect" class="primary btn" type="submit">Подключить штатный MAX</button>
             </form>
@@ -117,6 +118,7 @@
             </form>
             <div id="alfa-max-actions" class="integration-actions connection-actions" hidden="">
 
+              <button id="alfa-max-recovery-setup" class="text-button" type="button">Настроить автоматический вход</button>
               <button id="alfa-max-disconnect" class="text-button" type="button">Отключить сессию</button>
             </div>
           </div></div><div class="settings-card card"><div class="card-heading card-h"><h2>АльфаCRM</h2><span id="alfa-status" class="connection-status"></span></div><div class="card-b">

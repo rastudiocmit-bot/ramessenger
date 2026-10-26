@@ -27,8 +27,13 @@ from center_messenger.chat_store import changed, refresh_unread
 from center_messenger.crm_api import DirectoryReader
 from center_messenger.database import log_database_error
 from center_messenger.message_order import message_order, source_order, visible_message
+from center_messenger.alfa_session import NativeSessions, SECRET, CONTROL, merge_state, control, same_session, stamp
 
 ERRORS = {
+    "browser_busy": "Браузер AlfaCRM занят. Операция продолжится автоматически.",
+    "session_check_pending": "Проверяем авторизацию AlfaCRM. Отправка продолжится после восстановления.",
+    "recovery_credentials_required": "Для автоматического входа один раз сохраните почту и пароль AlfaCRM в настройках подключения.",
+    "recovery_retry": "Восстанавливаем подключение AlfaCRM автоматически. Повторим после паузы.",
     "browser_unavailable": "Серверный браузер AlfaCRM не установлен. Обновите сервис и повторите.",
     "unsafe_address": "Адрес CRM не прошёл проверку безопасности.",
     "network": "Не удалось связаться с AlfaCRM. Повторите позже.",
@@ -80,6 +85,7 @@ class AlfaMaxConnections:
         self.alfa, self.accounts, self.vault = alfa, alfa.accounts, alfa.vault
         self.monitor = AlfaSyncMonitor()
         self.browser = browser or AlfaMaxBrowser()
+        self.sessions = NativeSessions(self)
         self._sms_templates = []
         self._sms_templates_at = None
         self._sms_template_scope = None
@@ -174,10 +180,12 @@ class AlfaMaxConnections:
             "error": ERRORS.get(row["last_error_code"]),
             "can_send": (
                 state == "active"
+                and not control(row).get('needs_check')
                 and row["session_ciphertext"] is not None
                 and row["current_crm_connection_id"] is not None
             ),
             "kind": "alfa_max_browser",
+            "recovery": {key: control(row).get(key) for key in ('phase', 'enabled', 'credentials_saved', 'at', 'after', 'attempts', 'event', 'cause')},
         }
 
     def status(self, actor, workspace):
@@ -315,6 +323,9 @@ class AlfaMaxConnections:
         with self._transaction(actor, workspace, lock=True) as db:
             existing = self._row(db, workspace)
             if existing:
+                metadata = control(existing)
+                if metadata.get('lease') and stamp(metadata.get('until')) > datetime.now(UTC):
+                    raise AuthError(409, ERRORS['browser_busy'])
                 db.execute(
                     text("DELETE FROM alfa_max_sync_queue WHERE workspace_id=:w"),
                     {"w": workspace},
@@ -377,21 +388,30 @@ class AlfaMaxConnections:
                 raise AuthError(409, "Сначала загрузите филиалы AlfaCRM.")
             return dict(row), list(branches)
 
-    def connect(self, actor, workspace, email, password):
+    def connect(self, actor, workspace, email, password, auto_reconnect=True):
         self.accounts.throttle(f"alfa-max-login:{workspace}:{actor.user_id}", limit=8, minutes=10)
         if not self.vault.ready:
             raise AuthError(503, "Ключ хранилища веб-сессий недоступен на сервере.")
-        crm, _ = self._crm(actor, workspace)
+        crm, branches = self._crm(actor, workspace)
         connection, version = self._ensure_channel(actor, workspace, email, crm["connection_id"])
-        try:
-            state, browser_state = self.browser.login(
-                crm["origin"], email, password.get_secret_value()
-            )
-        except AlfaBrowserError as error:
-            self._set_error(actor, workspace, connection, version, error.code)
-            raise _failure(
-                error.code, 401 if error.code == "credentials_rejected" else 502
-            ) from None
+        with self.sessions.operation(workspace, connection, administrative=True) as operation:
+            if operation['row']['version'] != version:
+                raise AuthError(409, 'Подключение изменилось. Повторите вход.')
+            try:
+                state, browser_state = self.browser.login(crm["origin"], email, password.get_secret_value())
+                if state == 'active':
+                    browser_state = self.browser.check_session(crm['origin'], browser_state, branches[0])
+            except AlfaBrowserError as error:
+                self._set_error(actor, workspace, connection, version, error.code)
+                # An external CRM rejection must not log the employee out of Messenger.
+                raise _failure(error.code, 422 if error.code == "credentials_rejected" else 502) from None
+            browser_state = merge_state({}, browser_state)
+            if auto_reconnect:
+                browser_state[SECRET] = {'email': email, 'password': password.get_secret_value(), 'enabled': True}
+            self._connected(actor, workspace, connection, version, state, browser_state)
+        return self.status(actor, workspace)
+
+    def _connected(self, actor, workspace, connection, version, state, browser_state):
         encrypted = self.vault.seal_browser_state(workspace, connection, browser_state)
         with self._transaction(actor, workspace, lock=True) as db:
             current = self._row(db, workspace)
@@ -418,6 +438,11 @@ class AlfaMaxConnections:
             )
             if state == "active":
                 self._schedule(db, workspace, connection)
+            metadata = control(current)
+            metadata.update(enabled=bool(browser_state.get(SECRET)), credentials_saved=bool(browser_state.get(SECRET)),
+                            phase='confirmation_required' if state == 'otp_required' else 'active',
+                            needs_check=False, attempts=0, after=None, event='manual_login', at=datetime.now(UTC).isoformat())
+            self.sessions._write_control(db, workspace, metadata)
             audit(
                 db,
                 "alfa_max_web_connected" if state == "active" else "alfa_max_otp_requested",
@@ -425,9 +450,16 @@ class AlfaMaxConnections:
                 workspace_id=workspace,
                 subject_id=connection,
             )
-        return self.status(actor, workspace)
 
     def verify_otp(self, actor, workspace, code):
+        with self._transaction(actor, workspace) as db:
+            row = self._row(db, workspace)
+        if row is None:
+            raise AuthError(409, 'Сначала начните подключение AlfaCRM MAX.')
+        with self.sessions.operation(workspace, row['connection_id'], dict(row), administrative=True):
+            return self._verify_otp(actor, workspace, code)
+
+    def _verify_otp(self, actor, workspace, code):
         self.accounts.throttle(f"alfa-max-otp:{workspace}:{actor.user_id}", limit=10, minutes=10)
         with self._transaction(actor, workspace) as db:
             row = self._row(db, workspace)
@@ -446,6 +478,7 @@ class AlfaMaxConnections:
             state, browser_state = self.browser.verify_otp(row["crm_origin"], session, code)
         except AlfaBrowserError as error:
             raise _failure(error.code, 422 if error.code == "otp_rejected" else 502) from None
+        browser_state = merge_state(session, browser_state)
         encrypted = self.vault.seal_browser_state(workspace, row["connection_id"], browser_state)
         with self._transaction(actor, workspace, lock=True) as db:
             current = self._row(db, workspace)
@@ -463,6 +496,10 @@ class AlfaMaxConnections:
                 {"w": workspace, "c": row["connection_id"]},
             )
             self._schedule(db, workspace, row["connection_id"])
+            metadata = control(current)
+            metadata.update(phase='checking', needs_check=True, attempts=0, after=None,
+                            event='confirmation_completed', at=datetime.now(UTC).isoformat())
+            self.sessions._write_control(db, workspace, metadata)
             audit(
                 db,
                 "alfa_max_web_connected",
@@ -557,7 +594,7 @@ class AlfaMaxConnections:
             db.execute(
                 text(
                     "UPDATE alfa_max_settings SET state='not_configured',session_ciphertext=NULL,"
-                    "last_error_code=NULL,version=version+1,updated_at=now() WHERE workspace_id=:w"
+                    "last_error_code=NULL,version=version+1,history_cursor=history_cursor-'session_control',updated_at=now() WHERE workspace_id=:w"
                 ),
                 {"w": workspace},
             )
@@ -567,6 +604,7 @@ class AlfaMaxConnections:
                 ),
                 {"w": workspace, "c": row["connection_id"]},
             )
+            self.sessions._write_control(db, workspace, {'phase': 'disabled', 'event': 'manual_disconnect', 'at': datetime.now(UTC).isoformat()})
             db.execute(
                 text("DELETE FROM alfa_max_sync_queue WHERE workspace_id=:w"), {"w": workspace}
             )
@@ -1100,6 +1138,8 @@ class AlfaMaxConnections:
 
     def _send_target_in_transaction(self, db, workspace, connection, conversation):
         row = self._row(db, workspace)
+        if row and row['state'] == 'not_configured' and control(row).get('event') == 'manual_disconnect':
+            raise AlfaBrowserError('disconnected')
         if (
             row is None
             or row["connection_id"] != connection
@@ -1128,14 +1168,28 @@ class AlfaMaxConnections:
             "state": session,
             "branch": int(target["customer_branch_id"]),
             "customer": int(target["customer_id"]),
+            "session_snapshot": dict(row),
         }
 
     def send_native(self, workspace, connection, conversation, message, *, target=None):
         target = target or self.send_target(workspace, connection, conversation)
-        result = self.browser.send(
-            target["origin"], target["state"], target["branch"], target["customer"], message
-        )
-        return result
+        with self.sessions.operation(workspace, connection, target.get('session_snapshot')) as operation:
+            if control(operation['row']).get('needs_check'):
+                raise AlfaBrowserError('session_check_pending')
+            try:
+                result = self.browser.send(target["origin"], target["state"], target["branch"], target["customer"], message)
+            except AlfaBrowserError as error:
+                if error.code == 'reauth_required':
+                    with self.accounts.transaction(workspace_id=workspace) as db:
+                        self.sessions.suspect(db, workspace, operation['row'], 'send')
+                    raise AlfaBrowserError('session_check_pending') from None
+                raise
+            if isinstance(result.get('browser_state'), dict):
+                try:
+                    self.sessions.finish(operation, result['browser_state'], state='active')
+                except Exception:
+                    logging.getLogger(__name__).warning('Native send accepted; session save deferred workspace=%s', workspace)
+            return result
 
 
 class AlfaMaxWorker:
@@ -1238,6 +1292,8 @@ class AlfaMaxWorker:
             return False
         workspace, connection = claim["workspace_id"], claim["connection_id"]
         delay, code = 90, None
+        io_lease = None
+        session_snapshot = None
         phase = "load_settings"
         sync_start = time.monotonic()
         activity = {"started_at": datetime.now(UTC).isoformat(), "phase": "repair"}
@@ -1245,11 +1301,21 @@ class AlfaMaxWorker:
         snapshot = lambda committed=False: self.service.monitor.snapshot(workspace, connection, lease, committed=committed) or dict(activity)
         try:
             with self._transaction(workspace, connection, lease) as db:
+                pending = self.service._row(db, workspace)
+                recovery_due = bool(pending and pending["session_ciphertext"] and
+                    (pending["state"] == "reauth_required" or control(pending).get("needs_check")))
+            if recovery_due:
+                delay = self.service.sessions.recover(workspace, connection)
+                with self._transaction(workspace, connection, lease) as db:
+                    self._release(db, workspace, connection, lease, delay)
+                return True
+            with self._transaction(workspace, connection, lease) as db:
                 row = self.service._row(db, workspace)
+                needs_recovery = bool(row and (row["state"] == "reauth_required" or control(row).get("needs_check")))
                 if (
                     row is None
                     or row["connection_id"] != connection
-                    or row["state"] != "active"
+                    or (row["state"] != "active" and not needs_recovery)
                     or row["session_ciphertext"] is None
                     or row["crm_origin"] is None
                 ):
@@ -1299,6 +1365,7 @@ class AlfaMaxWorker:
                 expected_cursor = dict(original_cursor)
                 origin = row["crm_origin"]
                 settings_version = row["version"]
+                session_snapshot = dict(row)
                 crm_settings_version = row.get("crm_settings_version")
                 activity.update(phase="reading", operation="read_page", flow="live", client=None, record_id=None,
                                 position=None, position_total=None, completed_pages=0, total_pages=len(requests))
@@ -1311,7 +1378,7 @@ class AlfaMaxWorker:
             read_step = 0
             processed = set()
             saved_pages = 0
-            controls = {"archive_paused", "archive_pause_changed_at", "retry_requests"}
+            controls = {"archive_paused", "archive_pause_changed_at", "retry_requests", CONTROL}
             semantic = lambda value: {k: v for k, v in value.items() if k not in controls | {"activity"}}
             cycle = {"id": str(uuid4()), "started_at": datetime.now(UTC).isoformat(),
                      "journals": len(branches) * 2, "checked": 0, "failed": 0, "added_records": 0}
@@ -1357,6 +1424,7 @@ class AlfaMaxWorker:
                     or current["session_ciphertext"] is None or current["version"] != settings_version
                     or current["current_crm_connection_id"] != crm_connection or current["crm_origin"] != origin
                     or current.get("crm_settings_version") != crm_settings_version
+                    or (session_snapshot is not None and not same_session(current, session_snapshot))
                     or semantic(current["history_cursor"] or {}) != semantic(expected_cursor)):
                     raise AlfaBrowserError("settings_changed")
                 merge_controls(current["history_cursor"] or {})
@@ -1388,6 +1456,8 @@ class AlfaMaxWorker:
                     observe(value)
                 observe({"phase": "waiting_db", "operation": "waiting_db", "flow": flow, "client": None})
                 with self._transaction(workspace, connection, lease) as db:
+                    if io_lease:
+                        self.service.sessions.renew(db, io_lease)
                     check_current(self.service._row(db, workspace))
                     previous = dict(cursor)
                     observe({"phase": "projecting", "branch_id": str(branch), "direction": direction,
@@ -1409,12 +1479,16 @@ class AlfaMaxWorker:
                     cursor["activity"] = snapshot(True)
                     status_error = next((cursor.get(f"{prefix}:{key}") for key in cursor["streams"]
                         for prefix in ("live_error", "error") if cursor.get(f"{prefix}:{key}")), None)
+                    encrypted = self.service.vault.seal_browser_state(workspace, connection, merge_state(session, browser_state))
                     db.execute(text(
                         "UPDATE alfa_max_settings SET session_ciphertext=:session,history_cursor=CAST(:cursor AS jsonb),"
                         "last_sync_at=CASE WHEN :success THEN now() ELSE last_sync_at END,"
                         "last_error_code=:error,updated_at=now() WHERE workspace_id=:w"),
-                        {"w": workspace, "session": self.service.vault.seal_browser_state(workspace, connection, browser_state),
+                        {"w": workspace, "session": encrypted,
                          "cursor": json.dumps(cursor), "success": not result.get("error"), "error": status_error})
+                session_snapshot['session_ciphertext'] = encrypted
+                if io_lease:
+                    io_lease['row']['session_ciphertext'] = encrypted
                 expected_cursor = json.loads(json.dumps(cursor))
                 saved_pages += 1
                 self.service.monitor.committed(workspace, connection, lease)
@@ -1426,9 +1500,12 @@ class AlfaMaxWorker:
                         workspace, *request, result["missing_ids"])
 
             if requests:
-                results, session = self.service.browser.read_histories(
+                io_lease = self.service.sessions.claim(workspace, connection, session_snapshot)
+                initial_session = session
+                results, renewed_session = self.service.browser.read_histories(
                     origin, session, requests, on_progress=heartbeat, continue_on_error=True,
                     before_read=before_read, on_result=persist_page)
+                session = merge_state(initial_session, renewed_session)
                 # Adapters without streaming callbacks still use the same fenced
                 # per-page persistence; the browser implementation streams them.
                 for request, result in zip(requests, results, strict=True):
@@ -1453,7 +1530,9 @@ class AlfaMaxWorker:
         except AlfaBrowserError as error:
             code = error.code
             delay = (
-                30
+                5
+                if code == "browser_busy"
+                else 30
                 if code == "settings_changed"
                 else 60
                 if code in {"network", "crm_unavailable"}
@@ -1464,30 +1543,14 @@ class AlfaMaxWorker:
                 observe({"phase": "error", "operation": "error", "client": None, "error_code": code})
                 with self._transaction(workspace, connection, lease) as db:
                     self._activity(db, workspace, connection, snapshot())
-                    if code == "reauth_required":
-                        db.execute(
-                            text(
-                                "UPDATE alfa_max_settings SET state='reauth_required',"
-                                "last_error_code=:code,updated_at=now() WHERE workspace_id=:w"
-                            ),
-                            {"w": workspace, "code": code},
-                        )
-                        db.execute(
-                            text(
-                                "UPDATE connections SET status='reauth_required' "
-                                "WHERE workspace_id=:w AND id=:c"
-                            ),
-                            {"w": workspace, "c": connection},
-                        )
-                    else:
-                        db.execute(
-                            text(
-                                "UPDATE alfa_max_settings SET "
-                                "last_error_code=:code,updated_at=now() "
-                                "WHERE workspace_id=:w"
-                            ),
-                            {"w": workspace, "code": code},
-                        )
+                    current = self.service._row(db, workspace)
+                    if code == "reauth_required" and session_snapshot is not None:
+                        if self.service.sessions.suspect(db, workspace, session_snapshot, 'history'):
+                            delay = 0
+                    elif session_snapshot is None or same_session(current, session_snapshot):
+                        db.execute(text("UPDATE alfa_max_settings SET last_error_code=:code,updated_at=now() "
+                                        "WHERE workspace_id=:w AND connection_id=:c"),
+                                   {"w": workspace, "c": connection, "code": code})
                     self._release(db, workspace, connection, lease, delay)
             except Exception:
                 pass
@@ -1517,6 +1580,7 @@ class AlfaMaxWorker:
                     phase, type(error).__name__, delay, traceback.format_exc(),
                 )
         finally:
+            self.service.sessions.release(io_lease)
             self.service.monitor.close(workspace, connection, lease)
         duration = time.monotonic() - sync_start
         logging.getLogger(__name__).info(

@@ -22,6 +22,7 @@ BROWSER_ERRORS = {
     "invalid_response": "AlfaCRM вернула неполную страницу или журнал неизвестного формата.",
     "unsafe_address": "Адрес AlfaCRM не прошёл проверку безопасности.",
     "network": "Не удалось установить соединение с AlfaCRM.",
+    "browser_busy": "Браузер занят синхронизацией или восстановлением. Повторите проверку позже.",
     "redirect_blocked": "AlfaCRM перенаправила браузер на другой домен.",
 }
 STAGES = {"open_browser", "start_driver", "launch_browser", "open_context", "open_page",
@@ -162,8 +163,14 @@ def main(argv=None):
                 def progress(value):
                     print(f"History source: branch={args.branch} direction={args.direction} "
                           f"page={value['page'] + 1} checked={value['pages_checked']}", file=sys.stderr, flush=True)
+                from center_messenger.accounts import Accounts
+                from center_messenger.alfa_service import AlfaConnections
+                from center_messenger.alfa_max import AlfaMaxConnections
+                from center_messenger.alfa_session import CoordinatedHistoryReader
+                native = AlfaMaxConnections(AlfaConnections(Accounts(engine, config), ConnectorVault(config.connection_master_key_file)))
                 verification = compare_source_history(
-                    AlfaMaxBrowser(), source["origin"], session, args.branch, args.direction, saved_ids,
+                    CoordinatedHistoryReader(native, workspace, settings['connection_id']),
+                    source["origin"], session, args.branch, args.direction, saved_ids,
                     on_progress=progress if args.progress else None)
                 reports[-1]["source_verification"] = verification
                 if verification["status"] == "failed":

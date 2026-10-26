@@ -28,6 +28,15 @@ class Messaging:
         self.alfa_max = alfa_max
 
     @staticmethod
+    def _sender_allowed(db, workspace, user):
+        from center_messenger.auth_security import can_send_messages
+        member = db.execute(text(
+            "SELECT m.role,m.sections FROM workspace_memberships m JOIN auth_users u ON u.id=m.user_id "
+            "WHERE m.workspace_id=:w AND m.user_id=:u AND m.active AND u.active"
+        ), {"w": workspace, "u": user}).mappings().one_or_none()
+        return bool(member and can_send_messages(member["role"], member["sections"]))
+
+    @staticmethod
     def enqueue(db, workspace, connection, subject, kind, channel_kind="max_bot"):
         db.execute(
             text(
@@ -275,16 +284,7 @@ class Messaging:
                 self._remove(db, job)
                 return
             context(db, user_id=command["requested_by"])
-            allowed = db.execute(
-                text(
-                    "SELECT m.user_id FROM workspace_memberships m JOIN auth_users u ON "
-                    "u.id=m.user_id "
-                    "WHERE m.workspace_id=:w AND m.user_id=:u AND m.active AND u.active "
-                    "AND m.role IN ('owner','admin')"
-                ),
-                {"w": job["workspace_id"], "u": command["requested_by"]},
-            ).scalar_one_or_none()
-            if allowed is None:
+            if not self._sender_allowed(db, job["workspace_id"], command["requested_by"]):
                 self._state(db, job, command, "cancelled", "access_changed")
                 self._remove(db, job)
                 return
@@ -371,25 +371,22 @@ class Messaging:
                 self._state(db, job, command, "unknown", "unknown")
                 self._remove(db, job)
                 return
+            context(db, user_id=command["requested_by"])
+            if not self._sender_allowed(db, job["workspace_id"], command["requested_by"]):
+                self._state(db, job, command, "cancelled", "access_changed")
+                self._remove(db, job)
+                return
             try:
                 target = self.alfa_max._send_target_in_transaction(
                     db, job["workspace_id"], job["connection_id"], command["conversation_id"]
                 )
             except AlfaBrowserError as error:
-                self._state(db, job, command, "failed", error.code)
-                self._remove(db, job)
-                return
-            context(db, user_id=command["requested_by"])
-            allowed = db.execute(
-                text(
-                    "SELECT m.user_id FROM workspace_memberships m JOIN auth_users u "
-                    "ON u.id=m.user_id WHERE m.workspace_id=:w AND m.user_id=:u "
-                    "AND m.active AND u.active AND m.role IN ('owner','admin')"
-                ),
-                {"w": job["workspace_id"], "u": command["requested_by"]},
-            ).scalar_one_or_none()
-            if allowed is None:
-                self._state(db, job, command, "cancelled", "access_changed")
+                if error.code in {'browser_busy', 'session_check_pending', 'reauth_required'}:
+                    self._state(db, job, command, 'queued', 'session_check_pending')
+                    db.execute(text("UPDATE message_jobs SET due_at=now()+interval '10 seconds',"
+                                    "lease_owner=NULL,lease_until='-infinity' WHERE id=:id"), {'id': job['id']})
+                    return
+                self._state(db, job, command, "cancelled" if error.code == "disconnected" else "failed", error.code)
                 self._remove(db, job)
                 return
             db.execute(
@@ -432,24 +429,14 @@ class Messaging:
                 command = self._command(db, job)
                 if command is None or command["state"] != "sending":
                     raise LostLease from None
+                if error.code in {'browser_busy', 'settings_changed', 'session_check_pending'}:
+                    self._state(db, job, command, 'queued', 'session_check_pending')
+                    db.execute(text("UPDATE message_jobs SET due_at=now()+interval '10 seconds',"
+                                    "lease_owner=NULL,lease_until='-infinity' WHERE id=:id"), {'id': job['id']})
+                    return
                 state = "unknown" if error.code == "send_unknown" else "failed"
                 public_code = "unknown" if state == "unknown" else error.code
                 self._state(db, job, command, state, public_code)
-                if error.code == "reauth_required":
-                    db.execute(
-                        text(
-                            "UPDATE alfa_max_settings SET state='reauth_required',"
-                            "last_error_code=:code WHERE workspace_id=:w"
-                        ),
-                        {"w": job["workspace_id"], "code": error.code},
-                    )
-                    db.execute(
-                        text(
-                            "UPDATE connections SET status='reauth_required' "
-                            "WHERE workspace_id=:w AND id=:c"
-                        ),
-                        {"w": job["workspace_id"], "c": job["connection_id"]},
-                    )
                 self._remove(db, job)
             return
         with self._transaction(job, lease) as db:

@@ -1,7 +1,8 @@
 """Read-only native-browser probe: python -m center_messenger.attachment_audit --progress.
 
 Samples recent journal attachments using the existing encrypted CRM session.
-No API tokens, sends, cursor updates, persistent file writes or session updates.
+No API tokens, sends, history resets or persistent file writes. Uses the shared
+browser lease and preserves renewed cookies.
 """
 
 import argparse
@@ -238,7 +239,7 @@ def safe_error(error):
     allowed = {'browser_unavailable', 'crm_unavailable', 'reauth_required', 'unsafe_address',
                'network', 'invalid_response', 'form_unavailable', 'multiple_recipients',
                'invalid_recipient', 'recipient_missing', 'csrf_missing', 'redirect_blocked',
-               'workspace_required', 'workspace_unavailable', 'branch_unavailable', 'source_unavailable'}
+               'workspace_required', 'workspace_unavailable', 'branch_unavailable', 'source_unavailable', 'browser_busy', 'settings_changed'}
     code = getattr(error, 'code', None)
     if isinstance(error, ValueError) and str(error) in allowed:
         code = str(error)
@@ -368,14 +369,28 @@ def main(argv=None):
         config = Settings()
         engine = make_engine(config)
         workspace, source, branches = load_source(engine, args.workspace, args.branch)
-        state = ConnectorVault(config.connection_master_key_file).open_browser_state(
-            workspace, source['connection_id'], source['session_ciphertext'])
-        def progress(value):
-            print(f"Attachment probe: {value['stage']} branch={value['branch']} "
-                  f"direction={value['direction']} number={value['number']}", file=sys.stderr, flush=True)
-        with BrowserProbe(source['origin'], state) as probe:
-            report = audit_browser(probe, branches, direction=args.direction, pages=args.pages,
-                downloads=args.downloads, customer=args.customer, on_progress=progress if args.progress else None)
+        from center_messenger.accounts import Accounts
+        from center_messenger.alfa_service import AlfaConnections
+        from center_messenger.alfa_max import AlfaMaxConnections
+        from center_messenger.alfa_session import control
+        vault = ConnectorVault(config.connection_master_key_file)
+        service = AlfaMaxConnections(AlfaConnections(Accounts(engine, config), vault))
+        with service.sessions.operation(workspace, source['connection_id']) as operation:
+            current = operation['row']
+            if current['state'] != 'active' or control(current).get('needs_check'):
+                raise AlfaBrowserError('browser_busy')
+            state = vault.open_browser_state(workspace, source['connection_id'], current['session_ciphertext'])
+            def progress(value):
+                with service.accounts.transaction(workspace_id=workspace) as db:
+                    service.sessions.renew(db, operation)
+                if args.progress:
+                    print(f"Attachment probe: {value['stage']} branch={value['branch']} "
+                          f"direction={value['direction']} number={value['number']}", file=sys.stderr, flush=True)
+            with BrowserProbe(source['origin'], state) as probe:
+                report = audit_browser(probe, branches, direction=args.direction, pages=args.pages,
+                    downloads=args.downloads, customer=args.customer, on_progress=progress)
+                if report['streams'] and all(not item.get('error_code') for item in report['streams']) and not report.get('customer_inspection', {}).get('error_code'):
+                    service.sessions.finish(operation, probe.context.storage_state(), state='active')
         print(json.dumps(report, ensure_ascii=False, indent=2))
         # 2 means inconclusive/partial; never interpret a no-sample run as success.
         errors = any(stream.get('error_code') for stream in report['streams']) or any(

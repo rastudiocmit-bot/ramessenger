@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api/workspaces/{workspace_id}/integrations/alfa-max"
 class ConnectInput(InputModel):
     email: EmailStr
     password: SecretStr
+    auto_reconnect: bool = True
 
     @field_validator("password", mode="before")
     @classmethod
@@ -51,6 +52,7 @@ def connect(workspace_id: UUID, model: ConnectInput, request: Request):
         workspace_id,
         str(model.email).casefold(),
         model.password,
+        model.auto_reconnect,
     )
 
 

@@ -1402,3 +1402,7 @@ body:has(#cabinet[hidden]){overflow:auto}
   .iconbtn:not(:disabled):hover svg, .icon-button:not(:disabled):hover svg, .family-copy:hover svg, .family-crm:hover svg { scale: 1.08; }
 }
 :is(.iconbtn,.icon-button,.family-copy,.family-crm):focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; box-shadow: none; }
+
+/* Native CRM recovery keeps a normal-sized checkbox beside its label. */
+#alfa-max-connect-form .native-auto-login>span{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink)}
+#alfa-max-auto-reconnect{width:18px;height:18px;min-height:18px;padding:0;margin:0;flex:none;accent-color:var(--primary)}
