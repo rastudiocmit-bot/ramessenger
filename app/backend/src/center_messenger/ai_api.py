@@ -31,6 +31,26 @@ class DeepSeekInput(InputModel):
     clear_key: bool = False
 
 
+class GatewayInput(DeepSeekInput):
+    base_url: str | None = Field(default=None, max_length=150)
+    protocol: Literal["chat", "responses"] | None = None
+
+
+class GatewayCheck(InputModel):
+    capability: Literal["text", "recognition", "synthesis"] = "text"
+
+
+class ActionRoutes(InputModel):
+    recognition_provider: Literal["yandex", "mimo", "mimo_plan"]
+    recognition_language: Literal["ru", "auto", "en", "zh"]
+    synthesis_provider: Literal["disabled", "mimo", "mimo_plan"] = "disabled"
+    synthesis_voice: str = Field(default="Mia", max_length=30)
+
+
+class SynthesisInput(InputModel):
+    text: str = Field(min_length=1, max_length=500)
+
+
 class AgentInput(InputModel):
     name: str = Field(min_length=1, max_length=120)
     task: str = Field(default="voice_input", max_length=40)
@@ -42,6 +62,7 @@ class AgentInput(InputModel):
 
 
 class AgentTestInput(InputModel):
+    task: str = Field(default="voice_input", max_length=40)
     text: str = Field(min_length=1, max_length=2000)
     model: str = Field(max_length=80)
     prompt: str = Field(min_length=1, max_length=4000)
@@ -83,7 +104,7 @@ def ai_settings(workspace_id: UUID, request: Request):
 
 @router.put("/ai/settings")
 def save_ai_settings(workspace_id: UUID, model: AiSettingsInput, request: Request):
-    data = model.model_dump()
+    data = model.model_dump(exclude_unset=True)
     return voice(request).save_settings(identity(request, mutation=True), workspace_id, data)
 
 
@@ -170,3 +191,23 @@ def cancel_voice_job(workspace_id: UUID, job_id: UUID, request: Request):
 @router.post("/voice/diagnostic", status_code=204)
 def voice_diagnostic(workspace_id: UUID, model: VoiceDiagnosticInput, request: Request):
     voice(request).diagnostic(identity(request, mutation=True), workspace_id, model.model_dump())
+
+
+@router.put("/ai/gateways/routes")
+def gateway_routes(workspace_id: UUID, model: ActionRoutes, request: Request):
+    return voice(request).gateways.routes(identity(request, mutation=True), workspace_id, model.model_dump())
+
+
+@router.put("/ai/gateways/{provider}")
+def save_gateway(workspace_id: UUID, provider: str, model: GatewayInput, request: Request):
+    return voice(request).gateways.save(identity(request, mutation=True), workspace_id, provider, model.model_dump(exclude_unset=True))
+
+
+@router.post("/ai/gateways/{provider}/verify")
+def verify_gateway(workspace_id: UUID, provider: str, model: GatewayCheck, request: Request):
+    return voice(request).gateways.verify(identity(request, mutation=True), workspace_id, provider, model.capability)
+
+
+@router.post("/ai/synthesize")
+def synthesize(workspace_id: UUID, model: SynthesisInput, request: Request):
+    return voice(request).gateways.synthesize(identity(request, mutation=True), workspace_id, model.text)

@@ -3364,5 +3364,65 @@ class MessageSyncTests(unittest.TestCase):
         row=self.db.execute(text('SELECT voice_max_seconds,key_ciphertext,voice_enabled FROM ai_settings WHERE workspace_id=:w'),{'w':self.workspace}).one()
         self.assertEqual(tuple(row),(180,'sealed-yandex',True))
 
+    def test_gateway_sql_routes_and_migration_preserve_existing_voice_settings(self):
+        from center_messenger.ai_voice import AiVoice
+        self.db.execute(text("INSERT INTO ai_settings(workspace_id,folder_id,key_ciphertext,voice_enabled,voice_max_seconds,deepseek_key_ciphertext) "
+                             "VALUES(:w,'b1gtestfolder','sealed-yandex',true,75,'sealed-deepseek')"),{'w':self.workspace})
+        self.assertTrue(AiVoice.voice_available(self.db,self.workspace))
+        self.db.execute(text("UPDATE ai_settings SET gateway_config='{" + '"recognition_provider":"mimo_plan"' + "}'::jsonb WHERE workspace_id=:w"),{'w':self.workspace})
+        self.assertFalse(AiVoice.voice_available(self.db,self.workspace))
+        self.db.execute(text("UPDATE ai_settings SET mimo_plan_key_ciphertext='sealed-plan' WHERE workspace_id=:w"),{'w':self.workspace})
+        self.assertTrue(AiVoice.voice_available(self.db,self.workspace))
+        path=ROOT/'app/backend/migrations/versions/0019_ai_gateways.py'
+        spec=importlib.util.spec_from_file_location('gateway_migration',path)
+        migration=importlib.util.module_from_spec(spec);spec.loader.exec_module(migration)
+        with Operations.context(MigrationContext.configure(self.db)):
+            migration.downgrade();migration.upgrade()
+        row=self.db.execute(text('SELECT voice_max_seconds,key_ciphertext,deepseek_key_ciphertext,voice_enabled,gateway_config FROM ai_settings WHERE workspace_id=:w'),{'w':self.workspace}).one()
+        self.assertEqual(tuple(row),(75,'sealed-yandex','sealed-deepseek',True,{}))
+
+    def test_gateway_storage_seals_keys_routes_actions_and_preserves_independent_connections(self):
+        from contextlib import contextmanager
+        from types import SimpleNamespace
+        from center_messenger.ai_voice import AiVoice
+        from center_messenger.auth_security import AuthError
+        from center_messenger.connector_vault import ConnectorVault
+        from unittest.mock import patch
+        vault=ConnectorVault(None)
+        vault._key=lambda: b"t"*32
+        outer=self
+        class Accounts:
+            @contextmanager
+            def transaction(self,*args,**kwargs):yield outer.db
+            def _workspace(self,*args,**kwargs):return {'role':'owner'}
+            def _workspace_chat(self,*args,**kwargs):return {'role':'owner'}
+            def throttle(self,*args,**kwargs):pass
+        service=AiVoice(SimpleNamespace(accounts=Accounts(),vault=vault))
+        actor=SimpleNamespace(user_id=self.user)
+        try:
+            self.db.execute(text("INSERT INTO ai_settings(workspace_id,folder_id,key_ciphertext,voice_enabled) VALUES(:w,'b1gtestfolder','sealed-yandex',true)"),{'w':self.workspace})
+            result=service.gateways.save(actor,self.workspace,'mimo_plan',{'api_key':'tp-'+'x'*30})
+            self.assertTrue(result['gateways']['mimo_plan']['configured'])
+            from center_messenger.ai_mimo import MimoClient
+            from test_ai_yandex import FakeOpener
+            service.mimo=MimoClient(FakeOpener({'choices':[{'message':{'content':'Ready'},'finish_reason':'stop'}], 'usage':{'prompt_tokens':4,'completion_tokens':2}}))
+            result=service.gateways.verify(actor,self.workspace,'mimo_plan','text')
+            self.assertTrue(result['ok']);self.assertTrue(result['gateways']['mimo_plan']['checks']['text']['ok'])
+            self.assertNotIn('recognition',result['gateways']['mimo_plan']['checks'])
+            service.gateways.verify(actor,self.workspace,'mimo_plan','recognition')
+            result=service.settings(actor,self.workspace)
+            self.assertEqual(set(result['gateways']['mimo_plan']['checks']),{'text','recognition'})
+            self.assertNotIn('tp-'+'x'*30,json.dumps(result))
+            self.assertEqual(self.db.execute(text('SELECT key_ciphertext FROM ai_settings WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one(),'sealed-yandex')
+            service.gateways.routes(actor,self.workspace,{'recognition_provider':'mimo_plan','recognition_language':'en','synthesis_provider':'mimo_plan','synthesis_voice':'Mia'})
+            self.assertTrue(service.voice_available(self.db,self.workspace))
+            result=service.gateways.save(actor,self.workspace,'mimo_plan',{'clear_key':True})
+            self.assertFalse(result['voice_enabled']);self.assertEqual(result['gateways']['synthesis_provider'],'disabled')
+            self.assertFalse(result['gateways']['mimo_plan']['configured'])
+            self.assertTrue(result['configured'])
+            with self.assertRaises(AuthError):
+                service.gateways.save(actor,self.workspace,'unknown',{'api_key':'fake'})
+        finally:service.jobs.pool.shutdown(wait=True)
+
 if __name__ == "__main__":
     unittest.main()

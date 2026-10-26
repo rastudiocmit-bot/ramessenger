@@ -11,9 +11,12 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       month_spent_rub: 0, vault_ready: true, models: [{ id: 'yandexgpt-5.1', title: 'YandexGPT Pro 5.1', provider: 'yandex', provider_title: 'Yandex Cloud' },
         { id: 'aliceai-llm', title: 'Alice AI LLM', provider: 'yandex', provider_title: 'Yandex Cloud' },
         { id: 'deepseek-flash', title: 'DeepSeek V4.1 Flash', provider: 'deepseek', provider_title: 'DeepSeek' },
-        { id: 'deepseek-v4-pro', title: 'DeepSeek V4 Pro', provider: 'deepseek', provider_title: 'DeepSeek' }],
+        { id: 'deepseek-v4-pro', title: 'DeepSeek V4 Pro', provider: 'deepseek', provider_title: 'DeepSeek' },
+        { id: 'mimo-v2.6-flash', title: 'MiMo V2.6 Flash', provider: 'mimo', provider_title: 'MiMo' },
+        { id: 'mimo-plan-v2.6-pro', title: 'MiMo V2.6 Pro · Token Plan', provider: 'mimo_plan', provider_title: 'MiMo Token Plan' }],
       deepseek: { configured: false, key_hint: '', status: 'not_configured', error: null },
-      tasks: [{ id: 'voice_input', title: 'Голосовой ввод' }], default_model: 'yandexgpt-5.1', default_prompt: 'Нормализуй текст, убери слова-паразиты.' },
+      gateways: {recognition_provider:'yandex',recognition_language:'ru',synthesis_provider:'disabled',synthesis_voice:'Mia',synthesis_voices:['Mia','Chloe'],mimo:{configured:false},mimo_plan:{configured:false}},
+      tasks: [{ id: 'voice_input', title: 'Голосовой ввод' },{ id:'text_processing', title:'Обработка текста' }], default_model: 'yandexgpt-5.1', default_prompt: 'Нормализуй текст, убери слова-паразиты.' },
     agents: [], transcribe: [], failNext: 0, fallbackNext: 0 };
   context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
   const conversations = Array.from({ length: 40 }, (_, n) => ({ id: 'client-' + n,
@@ -77,6 +80,13 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       payload = ai.settings;
     } else if (p.endsWith('/ai/deepseek/verify')) { ai.settings.deepseek.status = 'active'; payload = { ...ai.settings, ok: true }; }
     else if (p.endsWith('/ai/settings/verify')) { ai.settings.status = 'active'; payload = { ...ai.settings, ok: true }; }
+    else if (p.endsWith('/ai/gateways/routes')) { ai.settings.gateways={...ai.settings.gateways,...entry.body};payload=ai.settings; }
+    else if (/\/ai\/gateways\/(mimo|mimo_plan)(\/verify)?$/.test(p)) {
+      const provider=p.includes('mimo_plan')?'mimo_plan':'mimo',old=ai.settings.gateways[provider];
+      if(p.endsWith('/verify'))old.checks={...old.checks,[entry.body.capability]:{ok:true,checked_at:'2026-10-26T12:00:00Z'}};
+      else ai.settings.gateways[provider]={...old,configured:!entry.body.clear_key,key_hint:entry.body.api_key?.slice(-4)||'',base_url:entry.body.base_url||old.base_url,protocol:entry.body.protocol||old.protocol};
+      payload=ai.settings;
+    }
     else if (p.endsWith('/ai/agents/test')) payload = { text: 'Здравствуйте! Занятие завтра переносится на 17:00.', fallback: false, cost_rub: 0.12, tokens: { input: 140, output: 18 } };
     else if (/\/ai\/agents\/[^/]+\/versions$/.test(p)) payload = { versions: [{ version: 1, name: 'Чистовик', model: 'yandexgpt-5.1', prompt: 'Первая версия', temperature: 0.2, created_at: '2026-10-24T20:00:00Z', author: 'Олег Иванов' }] };
     else if (/\/ai\/agents\/[^/]+$/.test(p)) {

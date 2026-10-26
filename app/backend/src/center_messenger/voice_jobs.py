@@ -5,6 +5,7 @@ from time import monotonic
 from uuid import uuid4
 import logging
 
+from center_messenger.ai_gateways import ready
 from center_messenger.ai_yandex import check_audio, MAX_SECONDS, YandexError
 from center_messenger.auth_security import AuthError
 
@@ -31,7 +32,7 @@ class VoiceJobs:
 
     def create(self, actor, workspace, audio, agent_id):
         row = self.access(actor, workspace)
-        if not row or not row["voice_enabled"] or not row["key_ciphertext"] or not row["folder_id"]:
+        if not ready(row):
             raise AuthError(409, "Голосовой ввод не настроен.")
         try:
             check_audio(audio, row.get("voice_max_seconds", MAX_SECONDS))

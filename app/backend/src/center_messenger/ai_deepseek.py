@@ -51,13 +51,13 @@ class DeepSeekClient:
     def __init__(self, opener=None):
         self.opener = opener or urllib.request.urlopen
 
-    def complete(self, text, *, prompt, model, temperature, api_key, max_tokens=1500, **_):
+    def complete(self, text, *, prompt, model, temperature, api_key, max_tokens=1500, rules=True, **_):
         if model not in MODELS:
             raise YandexError("model_unknown")
         body = {
             "model": model,
             "messages": [
-                {"role": "system", "content": f"{prompt.strip()}\n\n{FIXED_RULES}"},
+                {"role": "system", "content": prompt.strip() + ("\n\n" + FIXED_RULES if rules else "")},
                 {"role": "user", "content": text},
             ],
             "thinking": {"type": "disabled"},

@@ -1340,3 +1340,19 @@ body:has(#cabinet[hidden]){overflow:auto}
 .voice-panel[data-phase="error"] .voice-actions{gap:0}
 .voice-panel[data-phase="error"] .voice-actions button{font-size:12px;padding:0 8px;min-height:40px}
 .voice-panel[data-phase="starting"] .voice-dot{background:var(--primary)}
+
+/* Gateway actions use the existing settings cards and shadows. */
+.gateway-routes { margin-bottom: 20px; max-width: 880px; }
+.gateway-capabilities { margin-top: 16px; display: grid; gap: 12px; }
+.gateway-capability { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.gateway-capability span { min-width: 0; }
+.gateway-capability small { display: block; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+.gateway-card select { max-width: 100%; }
+.gateway-card .card-b, .gateway-routes .card-b { min-width: 0; }
+#ai-synthesis-audio { display: block; width: 100%; margin-top: 12px; }
+#ai-synthesis-audio[hidden] { display: none; }
+.ai-provider-choice { flex-wrap: wrap; }
+@media(max-width: 600px) { .gateway-capability { align-items: flex-start; } .gateway-capability .btn { flex-shrink: 0; } }
+.gateway-routes .fld { display: flex; flex-direction: column; gap: 6px; }
+.gateway-routes textarea { display: block; width: 100%; min-height: 92px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; resize: vertical; line-height: 1.45; }
+.gateway-routes form + .fld { margin-top: 18px; }

@@ -203,7 +203,7 @@ class YandexClient:
             raise YandexError("bad_response")
         return " ".join(result.split())
 
-    def complete(self, text, *, prompt, model, temperature, api_key, folder_id, max_tokens=1500):
+    def complete(self, text, *, prompt, model, temperature, api_key, folder_id, max_tokens=1500, rules=True):
         if model not in MODELS:
             raise YandexError("model_unknown")
         body = {
@@ -211,7 +211,7 @@ class YandexClient:
             "completionOptions": {"stream": False, "temperature": float(temperature),
                                   "maxTokens": str(int(max_tokens))},
             "messages": [
-                {"role": "system", "text": f"{prompt.strip()}\n\n{FIXED_RULES}"},
+                {"role": "system", "text": prompt.strip() + ("\n\n" + FIXED_RULES if rules else "")},
                 {"role": "user", "text": text},
             ],
         }
