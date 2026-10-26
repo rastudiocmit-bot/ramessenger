@@ -1125,7 +1125,21 @@ class AlfaMaxBrowser:
             else:
                 self._close(manager, browser, context)
 
-    def send(self, origin, state, branch, customer, text):
+    def send(self, origin, state, branch, customer, text, **options):
+        from center_messenger.native_send_runtime import run_send
+        return run_send(origin, state, branch, customer, text, **options)
+
+    def _send_inline(self, origin, state, branch, customer, text, *, deadline=None,
+                     before_post=None, on_accepted=None, on_rejected=None):
+        # Only the supervised child calls this in production.
+        deadline = deadline if deadline is not None else time.monotonic() + 90
+
+        def timeout_ms():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AlfaBrowserError('send_prepare_timeout')
+            return max(1, int(min(20, remaining) * 1000))
+
         origin = normalize_origin(origin)
         if (
             not re.fullmatch(r"[1-9][0-9]{0,18}", str(branch))
@@ -1149,9 +1163,9 @@ class AlfaMaxBrowser:
         def get_form_response(page, address, *, ajax):
             nonlocal response_status, response_body
             result = page.evaluate(
-                """async ({url, ajax, maxBytes}) => {
+                """async ({url, ajax, maxBytes, timeoutMs}) => {
                   const controller = new AbortController();
-                  const timer = setTimeout(() => controller.abort(), 20000);
+                  const timer = setTimeout(() => controller.abort(), timeoutMs);
                   try {
                     const headers = ajax ? {'X-Requested-With': 'XMLHttpRequest'} : {};
                     const response = await fetch(url, {
@@ -1163,12 +1177,17 @@ class AlfaMaxBrowser:
                       throw new Error('response_limit');
                     }
                     return {status: response.status, url: response.url, text};
+                  } catch (error) {
+                    if (error.name === 'AbortError') return {timed_out: true};
+                    throw error;
                   } finally {
                     clearTimeout(timer);
                   }
                 }""",
-                {"url": address, "ajax": ajax, "maxBytes": MAX_RESPONSE_BYTES},
+                {"url": address, "ajax": ajax, "maxBytes": MAX_RESPONSE_BYTES, "timeoutMs": timeout_ms()},
             )
+            if result.get('timed_out'):
+                raise AlfaBrowserError('send_prepare_timeout')
             response_url = urlsplit(result.get("url", ""))
             if response_url.scheme != "https" or response_url.netloc != urlsplit(origin).netloc:
                 raise AlfaBrowserError("redirect_blocked")
@@ -1196,10 +1215,11 @@ class AlfaMaxBrowser:
             return status, body
 
         try:
+            timeout_ms()
             manager, browser, context, page = self._open(origin, state)
 
             phase = "load_customer_card"
-            card_response = page.goto(card_url, wait_until="domcontentloaded", timeout=20000)
+            card_response = page.goto(card_url, wait_until="domcontentloaded", timeout=timeout_ms())
             self._check_origin(page, origin)
             response_status = card_response.status if card_response is not None else None
             if card_response is None or card_response.status != 200:
@@ -1280,20 +1300,30 @@ class AlfaMaxBrowser:
                 form["url"], origin=origin, branch=branch, customer=customer
             )
             phase = "submit_form"
+            post_timeout = timeout_ms()
+            if before_post:
+                granted_timeout = before_post()
+                if isinstance(granted_timeout, (int, float)):
+                    post_timeout = min(post_timeout, max(1, int(granted_timeout)))
+            post_timeout = min(post_timeout, timeout_ms())
             post_started = True
             result = page.evaluate(
-                """async ({url, fields}) => {
+                """async ({url, fields, timeoutMs}) => {
+                  const controller = new AbortController();
+                  const timer = setTimeout(() => controller.abort(), timeoutMs);
+                  try {
                   const body = new FormData();
                   for (const [name, value] of fields) body.append(name, value);
                   const response = await fetch(url, {
                     method: 'POST', body, credentials: 'include', redirect: 'error',
-                    headers: {'X-Requested-With': 'XMLHttpRequest'}
+                    headers: {'X-Requested-With': 'XMLHttpRequest'}, signal: controller.signal
                   });
                   const text = await response.text();
                   if (text.length > 1000000) throw new Error('response_limit');
                   return {status: response.status, url: response.url, text};
+                  } finally { clearTimeout(timer); }
                 }""",
-                {"url": address, "fields": fields},
+                {"url": address, "fields": fields, "timeoutMs": post_timeout},
             )
             response_url = urlsplit(result.get("url", ""))
             if response_url.scheme != "https" or response_url.netloc != urlsplit(origin).netloc:
@@ -1313,12 +1343,16 @@ class AlfaMaxBrowser:
             ):
                 raise AlfaBrowserError("send_unknown")
             accepted = {"accepted": True, "branch_id": int(branch), "text_length": len(text)}
+            if on_accepted:
+                on_accepted(dict(accepted))
             try:
                 accepted['browser_state'] = context.storage_state()
             except Exception:
                 logging.getLogger(__name__).warning('Native send accepted; browser state export unavailable')
             return accepted
         except AlfaBrowserError as error:
+            if post_started and error.code in {'crm_rejected', 'max_recipient_missing'} and on_rejected:
+                on_rejected(error.code)
             _capture_state(error, context)
             if error.code in {
                 "form_unavailable", "max_form_missing", "max_recipient_missing",
@@ -1341,6 +1375,7 @@ class AlfaMaxBrowser:
                     raw=response_body,
                     exception=type(error).__name__,
                 )
-            raise AlfaBrowserError("send_unknown" if post_started else "form_unavailable") from None
+            raise AlfaBrowserError("send_unknown" if post_started else
+                                   "send_prepare_timeout" if _browser_cause(error) == 'timeout' else "form_unavailable") from None
         finally:
             self._close(manager, browser, context)

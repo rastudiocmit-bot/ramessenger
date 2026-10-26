@@ -102,14 +102,16 @@ class NativeSessions:
             self._write_control(db, workspace, meta)
             return {'workspace': workspace, 'connection': connection, 'token': token, 'row': dict(row)}
 
-    def renew(self, db, lease):
+    def renew(self, db, lease, *, force=False):
         db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': lease['workspace']})
         current = self._row(db, lease['workspace'])
         meta = control(current) if current else {}
         if not same_session(current, lease['row']) or meta.get('lease') != lease['token']:
             raise AlfaBrowserError('settings_changed')
         now = datetime.now(UTC)
-        if stamp(meta.get('until')) > now + timedelta(seconds=90):
+        if stamp(meta.get('until')) <= now:
+            raise AlfaBrowserError('settings_changed')
+        if not force and stamp(meta.get('until')) > now + timedelta(seconds=90):
             return
         changed = db.execute(text("UPDATE alfa_max_settings SET history_cursor=jsonb_set(history_cursor,"
             "'{session_control,until}',CAST(:until AS jsonb)) WHERE workspace_id=:w AND connection_id=:c "

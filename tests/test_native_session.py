@@ -80,7 +80,7 @@ class SessionPolicyTests(unittest.TestCase):
         page.evaluate.side_effect = [{'status': 200, 'url': bulk, 'text': form}, {'status': 200, 'url': bulk, 'text': '{"success":true}'}]
         context.storage_state.side_effect = RuntimeError('synthetic export failure')
         with patch.object(AlfaMaxBrowser, '_open', return_value=(Mock(), Mock(), context, page)):
-            result = AlfaMaxBrowser().send('https://test.s20.online', {'cookies': []}, 1, 42, 'Synthetic reply')
+            result = AlfaMaxBrowser()._send_inline('https://test.s20.online', {'cookies': []}, 1, 42, 'Synthetic reply')
         self.assertTrue(result['accepted'])
         self.assertNotIn('browser_state', result)
 
@@ -414,6 +414,13 @@ class NativeSessionTests(unittest.TestCase):
         result = self.reader.send(SimpleNamespace(user_id=self.user), self.workspace, conversation['id'], SendInput(
             request_id=uuid4(), text='Synthetic operator reply', seen_inbound_seq=conversation['inbound_seq'], seen_checkpoint=checkpoint))
         self.service.browser.send.return_value = {'accepted': True, 'browser_state': {'cookies': [], 'origins': []}}
+        def send(*args, **options):
+            options['heartbeat']()
+            options['before_post']()
+            result = self.service.browser.send.return_value
+            options['on_accepted'](result)
+            return result
+        self.service.browser.send.side_effect = send
         return messaging, result
 
     def test_operator_goes_through_real_queue_without_admin_role(self):
@@ -496,3 +503,177 @@ class NativeSessionTests(unittest.TestCase):
         messaging.run_next('send', 'alfa_max_browser')
         self.service.browser.send.assert_called_once()
         self.assertEqual(self.db.execute(text('SELECT state FROM send_commands WHERE id=:id'), {'id': command['command_id']}).scalar_one(), 'unknown')
+
+    def native_command(self, command):
+        return self.db.execute(text('SELECT * FROM send_commands WHERE id=:id'),
+                               {'id': command['command_id']}).mappings().one()
+
+    def ready_native_job(self, command):
+        # The fixture keeps one outer rollback transaction: use its SQL clock,
+        # just like _claim, rather than making the job due after that snapshot.
+        self.db.execute(text("UPDATE message_jobs SET due_at=now()-interval '1 second',"
+                             "lease_until=now()-interval '1 second' WHERE subject_id=:id"),
+                        {'id': command['command_id']})
+
+    def test_prepare_timeout_is_retryable_and_keeps_the_same_command(self):
+        messaging, command = self.queue_operator_reply()
+        success = self.service.browser.send.side_effect
+        self.service.browser.send.side_effect = AlfaBrowserError('send_prepare_timeout')
+        messaging.run_next('send', 'alfa_max_browser')
+        row = self.native_command(command)
+        self.assertEqual((row['state'], row['last_error_code']), ('queued', 'send_prepare_timeout'))
+        self.assertEqual(row['payload']['native_delivery']['phase'], 'waiting')
+        self.ready_native_job(command)
+        self.service.browser.send.side_effect = success
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(self.native_command(command)['state'], 'accepted')
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM send_commands')).scalar_one(), 1)
+
+    def test_restart_in_preparation_can_resume_but_restart_after_intent_cannot(self):
+        for post_started in (False, True):
+            with self.subTest(post_started=post_started):
+                # Resume the same command after preparation; never replay its POST.
+                messaging, command = self.queue_operator_reply() if not post_started else (messaging, command)
+                success = self.service.browser.send.side_effect
+                def crash(*args, **options):
+                    if post_started:
+                        options['before_post']()
+                    raise SystemExit('synthetic process death')
+                self.service.browser.send.side_effect = crash
+                with self.assertRaises(SystemExit):
+                    messaging.run_next('send', 'alfa_max_browser')
+                row = self.native_command(command)
+                self.assertEqual(row['state'], 'sending' if post_started else 'queued')
+                self.assertEqual(row['payload']['native_delivery']['phase'], 'post_started' if post_started else 'preparing')
+                self.ready_native_job(command)
+                self.service.browser.send.side_effect = success
+                if not post_started:
+                    # Resume into a second simulated crash, now after durable POST intent.
+                    continue
+                calls = self.service.browser.send.call_count
+                messaging.run_next('send', 'alfa_max_browser')
+                self.assertEqual(self.native_command(command)['state'], 'unknown')
+                self.assertEqual(self.native_command(command)['payload']['native_delivery']['phase'], 'unknown')
+                self.assertEqual(self.service.browser.send.call_count, calls)
+
+    def test_revocation_while_preparing_is_checked_again_before_post(self):
+        messaging, command = self.queue_operator_reply()
+        posted = []
+        def send(*args, **options):
+            self.db.execute(text('UPDATE workspace_memberships SET active=false WHERE workspace_id=:w AND user_id=:u'),
+                            {'w': self.workspace, 'u': self.user})
+            options['before_post']()
+            posted.append(True)
+        self.service.browser.send.side_effect = send
+        original = self.setting()['session_ciphertext']
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(posted, [])
+        self.assertEqual(self.native_command(command)['state'], 'cancelled')
+        self.assertEqual(self.native_command(command)['last_error_code'], 'access_changed')
+        self.assertEqual(self.setting()['session_ciphertext'], original)
+        self.assertEqual(self.setting()['state'], 'active')
+
+    def test_session_generation_change_prevents_post_and_preserves_new_session(self):
+        messaging, command = self.queue_operator_reply()
+        posted = []
+        def send(*args, **options):
+            self.db.execute(text('UPDATE alfa_max_settings SET version=version+1 WHERE workspace_id=:w'), {'w': self.workspace})
+            options['before_post']()
+            posted.append(True)
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(posted, [])
+        self.assertEqual(self.native_command(command)['last_error_code'], 'settings_changed')
+        self.assertEqual(self.native_command(command)['state'], 'queued')
+
+    def test_new_authorization_suspicion_during_preparation_defers_post(self):
+        messaging, command = self.queue_operator_reply()
+        posted = []
+        def send(*args, **options):
+            self.pending()
+            options['before_post']()
+            posted.append(True)
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(posted, [])
+        self.assertEqual(self.native_command(command)['state'], 'queued')
+        self.assertEqual(self.native_command(command)['last_error_code'], 'session_check_pending')
+        self.assertEqual(self.setting()['state'], 'active')
+
+    def test_heartbeat_renews_both_leases_and_intent_is_durable_before_submit(self):
+        messaging, command = self.queue_operator_reply()
+        def send(*args, **options):
+            meta = control(self.setting())
+            meta['until'] = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
+            self.service.sessions._write_control(self.db, self.workspace, meta)
+            self.db.execute(text("UPDATE message_jobs SET lease_until=clock_timestamp()+interval '10 seconds' WHERE subject_id=:id"),
+                            {'id': command['command_id']})
+            options['heartbeat']()
+            from center_messenger.alfa_session import stamp
+            self.assertGreater((stamp(control(self.setting())['until']) - datetime.now(UTC)).total_seconds(), 150)
+            until = self.db.execute(text('SELECT lease_until FROM message_jobs WHERE subject_id=:id'),
+                                    {'id': command['command_id']}).scalar_one()
+            self.assertGreater((until - datetime.now(UTC)).total_seconds(), 150)
+            self.assertEqual(self.native_command(command)['state'], 'queued')
+            self.db.execute(text("UPDATE messages SET occurred_at=clock_timestamp()-interval '1 hour' "
+                                'WHERE send_command_id=:id'), {'id': command['command_id']})
+            options['before_post']()
+            row = self.native_command(command)
+            self.assertEqual(row['state'], 'sending')
+            self.assertEqual(row['payload']['native_delivery']['phase'], 'post_started')
+            posted_at = self.db.execute(text('SELECT occurred_at FROM messages WHERE send_command_id=:id'),
+                                       {'id': command['command_id']}).scalar_one()
+            self.assertLess((datetime.now(UTC) - posted_at).total_seconds(), 3)
+            receipt = {'accepted': True}
+            options['on_accepted'](receipt)
+            self.assertEqual(self.native_command(command)['state'], 'accepted')
+            return receipt
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(self.native_command(command)['state'], 'accepted')
+
+    def test_expired_browser_lease_cannot_be_renewed_or_submit(self):
+        operation = self.service.sessions.claim(self.workspace, self.channel)
+        meta = control(self.setting())
+        meta['until'] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        self.service.sessions._write_control(self.db, self.workspace, meta)
+        with self.assertRaises(AlfaBrowserError) as raised:
+            self.service.sessions.renew(self.db, operation, force=True)
+        self.assertEqual(raised.exception.code, 'settings_changed')
+        self.service.sessions.release(operation)
+
+    def test_late_receipt_survives_reclaimed_job_and_does_not_replace_new_cookies(self):
+        messaging, command = self.queue_operator_reply()
+        renewed = self.service.vault.seal_browser_state(self.workspace, self.channel, {'cookies': [{'name': 'new-generation'}]})
+        def send(*args, **options):
+            options['before_post']()
+            self.ready_native_job(command)
+            messaging.run_next('send', 'alfa_max_browser')
+            self.assertEqual(self.native_command(command)['state'], 'unknown')
+            self.db.execute(text('UPDATE alfa_max_settings SET version=version+1,session_ciphertext=:s WHERE workspace_id=:w'),
+                            {'w': self.workspace, 's': renewed})
+            receipt = {'accepted': True, 'browser_state': {'cookies': [{'name': 'stale-generation'}]}}
+            options['on_accepted'](receipt)
+            return receipt
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(self.native_command(command)['state'], 'accepted')
+        self.assertEqual(self.setting()['session_ciphertext'], renewed)
+        self.service.browser.send.assert_called_once()
+
+    def test_receipt_for_another_attempt_cannot_overwrite_command(self):
+        messaging, command = self.queue_operator_reply()
+        job = {'workspace_id': self.workspace, 'subject_id': command['command_id']}
+        self.assertFalse(messaging._native_receipt(job, str(uuid4()), {'accepted': True}))
+        self.assertEqual(self.native_command(command)['state'], 'queued')
+
+    def test_unknown_after_real_submit_intent_is_never_retried(self):
+        messaging, command = self.queue_operator_reply()
+        def send(*args, **options):
+            options['before_post']()
+            raise AlfaBrowserError('send_unknown')
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(self.native_command(command)['state'], 'unknown')
+        self.service.browser.send.assert_called_once()

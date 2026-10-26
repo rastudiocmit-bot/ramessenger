@@ -32,6 +32,8 @@ from center_messenger.alfa_session import NativeSessions, SECRET, CONTROL, merge
 ERRORS = {
     "recovery_disabled": "Автоматическое восстановление выключено. Войдите в AlfaCRM через настройки подключения.",
     "browser_busy": "Браузер AlfaCRM занят. Операция продолжится автоматически.",
+    "send_prepare_timeout": "Подготовка отправки задержалась. Повторим автоматически; сообщение ещё не отправлялось.",
+    "send_prepare_failed": "Подготовка отправки прервана. Повторим автоматически; сообщение ещё не отправлялось.",
     "session_check_pending": "Проверяем авторизацию AlfaCRM. Отправка продолжится после восстановления.",
     "recovery_credentials_required": "Для автоматического входа один раз сохраните почту и пароль AlfaCRM в настройках подключения.",
     "recovery_retry": "Восстанавливаем подключение AlfaCRM автоматически. Повторим после паузы.",
@@ -1186,13 +1188,22 @@ class AlfaMaxConnections:
             "session_snapshot": dict(row),
         }
 
-    def send_native(self, workspace, connection, conversation, message, *, target=None):
+    def send_native(self, workspace, connection, conversation, message, *, target=None,
+                    before_post=None, on_accepted=None, heartbeat=None, stopping=None):
         target = target or self.send_target(workspace, connection, conversation)
         with self.sessions.operation(workspace, connection, target.get('session_snapshot')) as operation:
             if control(operation['row']).get('needs_check'):
                 raise AlfaBrowserError('session_check_pending')
+            def guard(callback=None):
+                if callback:
+                    callback(operation)
+                else:
+                    with self.accounts.transaction(workspace_id=workspace) as db:
+                        self.sessions.renew(db, operation, force=True)
             try:
-                result = self.browser.send(target["origin"], target["state"], target["branch"], target["customer"], message)
+                result = self.browser.send(target["origin"], target["state"], target["branch"], target["customer"], message,
+                    before_post=lambda: guard(before_post), on_accepted=on_accepted,
+                    heartbeat=lambda: guard(heartbeat), stopping=stopping)
             except AlfaBrowserError as error:
                 if error.code in {'reauth_required', 'otp_required'}:
                     partial = getattr(error, 'browser_state', None)

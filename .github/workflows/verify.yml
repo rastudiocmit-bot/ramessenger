@@ -60,6 +60,19 @@ jobs:
           CM_KEY_DIR=/tmp/cm-workflow-placeholder docker compose config --quiet
       - name: Build image
         run: docker build --platform linux/amd64 -t center-messenger:verify .
+      - name: Verify supervised sender in image
+        run: |
+          docker run --rm --network none --entrypoint /opt/venv/bin/python \
+            -e PYTHONPATH=/app/backend/src:/tests \
+            --mount "type=bind,source=$PWD/tests,target=/tests,readonly" \
+            center-messenger:verify -c '
+          import sys, unittest
+          from center_messenger.native_send_runtime import runtime_supported
+          assert runtime_supported(), "Native sender process isolation is unavailable"
+          suite = unittest.defaultTestLoader.loadTestsFromName("test_native_send_runtime.NativeSendRuntimeTests")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(not result.wasSuccessful())
+          '
       - name: Validate migration graph
         run: docker run --rm --entrypoint alembic center-messenger:verify -c /app/alembic.ini history
 

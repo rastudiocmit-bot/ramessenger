@@ -19,8 +19,8 @@ def register_builtin(registry, services, config):
                 steps.append(Step("history", C.RECEIVE, lambda op: worker.run_next(),
                                   active_delay=.01, idle_delay=1.5, budget=300))
             if native_send:
-                steps.append(Step("outgoing", C.SEND, lambda op: services.messaging.run_next("send", "alfa_max_browser"),
-                                  idle_delay=.5, budget=300))
+                steps.append(Step("outgoing", C.SEND, lambda op: services.messaging.run_next("send", "alfa_max_browser", stopping=op.stopping),
+                                  idle_delay=.5, budget=90))
             return steps
         capabilities = ({C.RECEIVE} if native_read else set()) | ({C.SEND} if native_send else set())
         registry.register(Manifest("alfa_max", frozenset(capabilities)), native)
