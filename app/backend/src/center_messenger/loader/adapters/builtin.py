@@ -17,7 +17,7 @@ def register_builtin(registry, services, config):
                 from center_messenger.alfa_max import AlfaMaxWorker
                 worker = AlfaMaxWorker(services.alfa_max)
                 steps.append(Step("history", C.RECEIVE, lambda op: worker.run_next(),
-                                  active_delay=.01, idle_delay=1.5, budget=300))
+                                  active_delay=.01, idle_delay=.25, budget=300))
             if native_send:
                 steps.append(Step("outgoing", C.SEND, lambda op: services.messaging.run_next("send", "alfa_max_browser", stopping=op.stopping),
                                   idle_delay=.5, budget=90))

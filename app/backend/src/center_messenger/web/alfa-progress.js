@@ -170,12 +170,13 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
     return loaded;
   }
   function renderLive(payload, busy) {
-    const streams = payload.streams || [], errors = streams.filter(s => s.live_error_code);
+    const streams = payload.streams || [], errors = streams.filter(s => s.live_error_code), freshness = payload.freshness;
     const cycle = payload.live_cycle || payload.last_live_cycle;
     $("#alfa-loader-live-count").textContent = cycle ? number(cycle.added_records) : "—";
     $("#alfa-loader-live-count-label").textContent = cycle ? "записей добавлено при получении новых сообщений" : "Ожидаем первую проверку";
-    $("#alfa-loader-live-badge").textContent = !isActive(payload) ? "Требуется вход" : errors.length ? "Есть задержка" : busy && ["live", "catchup"].includes(payload.worker?.flow) ? "Получаем" : "На связи";
+    $("#alfa-loader-live-badge").textContent = !isActive(payload) ? "Требуется вход" : errors.length || freshness?.delayed_journals ? "Есть задержка" : busy && ["live", "catchup"].includes(payload.worker?.flow) ? "Получаем" : freshness?.unobserved_journals ? "Ожидаем чтение" : "На связи";
     const lines = [];
+    if (freshness?.delayed_journals) lines.push("Задержка проверки: до " + number(freshness.max_lag_seconds) + " с · журналов: " + number(freshness.delayed_journals));
     if (cycle) {
       lines.push("Проверено " + number(cycle.checked) + " из " + number(cycle.journals || streams.length) + " журналов");
       if (cycle.failed) lines.push("Не удалось прочитать: " + number(cycle.failed));

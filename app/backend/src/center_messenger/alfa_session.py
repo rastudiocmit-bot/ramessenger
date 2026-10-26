@@ -15,6 +15,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from center_messenger.accounts import audit
 from center_messenger.auth_security import AuthError
 from center_messenger.alfa_max_browser import AlfaBrowserError
+from center_messenger.alfa_history import ready_history
+from center_messenger import native_priority as priority
 
 CONTROL = 'session_control'
 SECRET = '_cm_login'
@@ -66,9 +68,9 @@ class NativeSessions:
         return self.service._row(db, workspace)
 
     @contextmanager
-    def operation(self, workspace, connection, snapshot=None, *, administrative=False):
+    def operation(self, workspace, connection, snapshot=None, *, administrative=False, purpose=None):
         try:
-            lease = self.claim(workspace, connection, snapshot)
+            lease = self.claim(workspace, connection, snapshot, purpose=purpose)
         except AlfaBrowserError:
             if administrative:
                 raise AuthError(409, 'Браузер AlfaCRM занят или подключение изменилось. Повторите действие через несколько секунд.') from None
@@ -88,7 +90,22 @@ class NativeSessions:
                         "'{session_control}',CAST(:value AS jsonb)) WHERE workspace_id=:w"),
                    {'w': workspace, 'value': json.dumps(value)})
 
-    def claim(self, workspace, connection, snapshot=None):
+    def _ready(self, db, row, now):
+        config = getattr(self.service.accounts, 'settings', None)
+        ready = ready_history(row.get('history_cursor') or {}, now) if getattr(config, 'crm_sync_worker', True) else {}
+        if getattr(config, 'max_worker', True):
+            due = db.execute(text("SELECT min(j.due_at) FROM message_jobs j JOIN send_commands s "
+                "ON s.workspace_id=j.workspace_id AND s.id=j.subject_id "
+                "WHERE j.workspace_id=:w AND j.connection_id=:c AND j.kind='send' "
+                "AND j.channel_kind='alfa_max_browser' AND s.state='queued' "
+                "AND j.due_at<=clock_timestamp()+interval '0.25 seconds'"),
+                {'w': row['workspace_id'], 'c': row['connection_id']}).scalar_one()
+            if due is not None:
+                ready['send'] = due
+        return ready
+
+    def claim(self, workspace, connection, snapshot=None, *, purpose=None):
+        deferred = False
         with self.service.accounts.transaction(workspace_id=workspace) as db:
             db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': workspace})
             row = self._row(db, workspace)
@@ -97,10 +114,54 @@ class NativeSessions:
             meta, now = control(row), datetime.now(UTC)
             if meta.get('lease') and stamp(meta.get('until')) > now:
                 raise AlfaBrowserError('browser_busy')
+            kind = purpose
+            if purpose in priority.KINDS | {'history'}:
+                ready = self._ready(db, row, now)
+                # A sender reaching this point has already claimed its durable job.
+                if purpose == 'send':
+                    ready.setdefault('send', now)
+                dispatch = dict(meta.get('dispatch') or {})
+                preferred = priority.choose(ready, dispatch, now)
+                requested = ({'live', 'catchup', 'archive'} if purpose == 'history' else {purpose}) & ready.keys()
+                reservation = dispatch.get('reservation') or {}
+                if preferred not in requested:
+                    # Give the preferred worker a bounded exclusive handoff. If it
+                    # died or is delayed elsewhere, do not block all other work.
+                    expired = reservation.get('kind') == preferred and stamp(reservation.get('until')) <= now
+                    if expired and requested:
+                        kind = priority.choose({k: ready[k] for k in requested}, dispatch, now)
+                    else:
+                        if reservation.get('kind') != preferred:
+                            dispatch = priority.reserve(dispatch, preferred, now)
+                        meta['dispatch'] = dispatch
+                        deferred = True
+                else:
+                    kind = preferred
+                if not deferred:
+                    dispatch.pop('reservation', None)
+                    meta['dispatch'] = priority.record_turn(dispatch, kind) if kind == 'send' else dispatch
             token = str(uuid4())
-            meta.update(lease=token, until=(now + timedelta(seconds=180)).isoformat())
+            if not deferred:
+                meta.update(lease=token, until=(now + timedelta(seconds=180)).isoformat())
             self._write_control(db, workspace, meta)
-            return {'workspace': workspace, 'connection': connection, 'token': token, 'row': dict(row)}
+        # Commit the handoff reservation before reporting a benign queue wait.
+        if deferred:
+            raise AlfaBrowserError('browser_priority_wait')
+        return {'workspace': workspace, 'connection': connection, 'token': token, 'row': dict(row), 'kind': kind}
+
+    def can_read(self, db, lease, kind):
+        self.renew(db, lease)
+        if not lease.get('pages') and kind == lease.get('kind'):
+            return True
+        row = self._row(db, lease['workspace'])
+        now = datetime.now(UTC)
+        return priority.choose(self._ready(db, row, now), control(row).get('dispatch') or {}, now) == kind
+
+    @staticmethod
+    def page_finished(cursor, kind):
+        meta = dict(cursor.get(CONTROL) or {})
+        meta['dispatch'] = priority.record_turn(meta.get('dispatch') or {}, kind)
+        cursor[CONTROL] = meta
 
     def renew(self, db, lease, *, force=False):
         db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': lease['workspace']})
@@ -137,6 +198,14 @@ class NativeSessions:
     def _release(self, lease):
         with self.service.accounts.transaction(workspace_id=lease['workspace']) as db:
             db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': lease['workspace']})
+            row = self._row(db, lease['workspace'])
+            if not row or row['connection_id'] != lease['connection'] or control(row).get('lease') != lease['token']:
+                return
+            meta, now = control(row), datetime.now(UTC)
+            dispatch = dict(meta.get('dispatch') or {})
+            ready = self._ready(db, row, now)
+            meta['dispatch'] = priority.reserve(dispatch, priority.choose(ready, dispatch, now), now)
+            self._write_control(db, lease['workspace'], meta)
             db.execute(text("UPDATE alfa_max_settings SET history_cursor=history_cursor "
                             "#- '{session_control,lease}' #- '{session_control,until}' "
                             "WHERE workspace_id=:w AND connection_id=:c "
@@ -146,6 +215,18 @@ class NativeSessions:
             db.execute(text("UPDATE alfa_max_settings SET history_cursor=history_cursor-'session_control' "
                             "WHERE workspace_id=:w AND connection_id=:c AND history_cursor->'session_control'='{}'::jsonb"),
                        {'w': lease['workspace'], 'c': lease['connection']})
+            # A released browser wakes queue waiters; network/auth backoffs stay intact.
+            db.execute(text("UPDATE message_jobs j SET due_at=LEAST(j.due_at,clock_timestamp()) "
+                "FROM send_commands s WHERE j.workspace_id=:w AND j.connection_id=:c "
+                "AND j.kind='send' AND j.channel_kind='alfa_max_browser' "
+                "AND j.lease_owner IS NULL AND s.workspace_id=j.workspace_id AND s.id=j.subject_id "
+                "AND s.state='queued' AND s.last_error_code IN ('browser_busy','browser_priority_wait')"),
+                {'w': lease['workspace'], 'c': lease['connection']})
+            if any(k != 'send' for k in ready):
+                db.execute(text("UPDATE alfa_max_sync_queue SET due_at=LEAST(due_at,clock_timestamp()) "
+                    "WHERE workspace_id=:w AND connection_id=:c AND lease_owner IS NULL "
+                    "AND due_at<=clock_timestamp()+interval '0.25 seconds'"),
+                    {'w': lease['workspace'], 'c': lease['connection']})
 
     def suspect(self, db, workspace, snapshot, source):
         db.execute(text('SELECT id FROM workspaces WHERE id=:w FOR UPDATE'), {'w': workspace})

@@ -47,6 +47,20 @@ test("503 preserves counters, visibly pauses animation, and automatically recove
   assert.equal(ui.$('[data-metric="messages"] strong').dataset.count, "82770");
   assert.ok(!ui.$("#alfa-max-progress").classList.contains("is-offline"));
 });
+test("live freshness shows overload and clears it after a successful read", async t => {
+  let delayed = true;
+  const ui = setup(t, () => report({syncing:false,
+    freshness:{delayed_journals:delayed ? 2 : 0, max_lag_seconds:delayed ? 45 : 0, unobserved_journals:0},
+    live_cycle:{checked:3, journals:8, failed:0, added_records:1}
+  }));
+  await ui.app.start();
+  assert.equal(ui.$('#alfa-loader-live-badge').textContent, 'Есть задержка');
+  assert.match(ui.$('#alfa-loader-live-note').textContent, /45 с.*журналов: 2/);
+  assert.match(ui.$('#alfa-loader-live-note').textContent, /Проверено 3 из 8/);
+  delayed = false; await ui.poll();
+  assert.equal(ui.$('#alfa-loader-live-badge').textContent, 'На связи');
+  assert.doesNotMatch(ui.$('#alfa-loader-live-note').textContent, /Задержка проверки/);
+});
 test("repeated failures use bounded backoff and keep retrying", async t => {
   const ui = setup(t, () => { throw new Error("network"); });
   await ui.app.start();
