@@ -275,7 +275,12 @@ class PrioritySessionTests(unittest.TestCase):
                 self.service.sessions.release(sent)
         finally:
             self.transaction.rollback()
-            with transaction() as db:
-                db.execute(text('DELETE FROM workspaces WHERE id=:w'), {'w': self.workspace})
-                db.execute(text('DELETE FROM auth_users WHERE id=:u'), {'u': self.user})
-            self.transaction = self.db.begin()
+            try:
+                with transaction() as db:
+                    # The class owns an isolated schema and drops it at teardown.
+                    # Remove only committed routing jobs so later fixture tests
+                    # cannot claim this workspace; domain FKs need no cascade.
+                    db.execute(text('DELETE FROM message_jobs WHERE workspace_id=:w'), {'w': self.workspace})
+                    db.execute(text('DELETE FROM alfa_max_sync_queue WHERE workspace_id=:w'), {'w': self.workspace})
+            finally:
+                self.transaction = self.db.begin()
