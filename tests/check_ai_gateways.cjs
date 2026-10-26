@@ -38,6 +38,7 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    await page.locator('#ai-routes-form button[type=submit]').click();
    await page.waitForFunction(()=>document.querySelector('#voice-active-summary').textContent.includes('MiMo Token Plan'));
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+   assert.ok(await page.evaluate(()=>{const providers=document.querySelector('.ai-providers').getBoundingClientRect(),routes=document.querySelector('.gateway-routes').getBoundingClientRect(),options=document.querySelector('.gateway-options-grid').getBoundingClientRect();return Math.abs(providers.left-routes.left)<1&&Math.abs(providers.right-routes.right)<1&&Math.abs(options.left-routes.left)<1&&Math.abs(options.right-routes.right)<1;}),'all three sections must share the same left and right edges');
    if(process.env.CM_TEST_SCREENSHOTS){fs.mkdirSync(process.env.CM_TEST_SCREENSHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`ai-gateways-${width}.png`)});}
    await page.locator('#connections-agents-tab').click();await page.locator('#ai-agent-new').click();
    await page.locator('#ai-agent-form [name=provider][value=mimo_plan]').check();
