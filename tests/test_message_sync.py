@@ -1132,6 +1132,76 @@ class MessageSyncTests(unittest.TestCase):
             directory.listing(None, self.workspace, chat_only=True)
         self.assertEqual(operator.exception.status, 403)
 
+    def test_family_routes_do_not_read_timeline_even_with_missing_queue_projection(self):
+        from sqlalchemy import event
+        from center_messenger import chat_api
+        self.project(self.row())
+        conversation = self.conversation()["id"]
+        self.db.execute(text("DELETE FROM outbox_events WHERE workspace_id=:w AND topic='chat.list.state'"),
+                        {"w": self.workspace})
+        directory = SimpleNamespace(prepare=Mock(return_value={"id": str(self.contact), "cache": {"ready": True}}))
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(directory=directory)))
+        statements = []
+        def observe(connection, cursor, statement, parameters, context, executemany):
+            statements.append(statement.lower())
+        event.listen(self.db, "before_cursor_execute", observe)
+        try:
+            with patch.object(chat_api, "components", return_value=(None, self.reader)), \
+                 patch.object(chat_api, "identity", return_value=SimpleNamespace(user_id=self.user)):
+                value = chat_api.chat_family(self.workspace, conversation, request, cached_only=True, compact=True, known_version=None)
+                self.assertEqual(value["id"], str(self.contact))
+                chat_api.refresh_chat_family(self.workspace, conversation, request, compact=True)
+        finally:
+            event.remove(self.db, "before_cursor_execute", observe)
+        self.assertEqual(directory.prepare.call_count, 2)
+        self.assertTrue(directory.prepare.call_args.kwargs["force"])
+        self.assertFalse(any("from messages" in q or "join messages" in q or "message_changes" in q for q in statements))
+        self.assertTrue(any("from conversations" in q for q in statements))
+
+    def test_family_target_resolves_existing_alias_and_preserves_manual_binding(self):
+        self.project(self.row())
+        canonical = self.conversation()["id"]
+        alias = uuid4()
+        self.db.execute(text("INSERT INTO conversations(workspace_id,id,connection_id,contact_id,external_chat_id) "
+            "VALUES(:w,:id,:c,:contact,'alfa-customer:1:7')"),
+            {"w": self.workspace, "id": alias, "c": self.channel, "contact": self.contact})
+        self.assertEqual(self.reader._family_conversation(self.db, self.workspace, alias)["id"], canonical)
+        self.db.execute(text("UPDATE conversations SET crm_link_manual=true WHERE workspace_id=:w AND id=:id"),
+                        {"w": self.workspace, "id": alias})
+        self.assertEqual(self.reader._family_conversation(self.db, self.workspace, alias)["id"], alias)
+
+    def test_family_target_rejects_foreign_workspace_group_and_unconfigured_channel(self):
+        self.project(self.row())
+        conversation = self.conversation()["id"]
+        with self.assertRaises(AuthError) as error:
+            self.reader._family_conversation(self.db, uuid4(), conversation)
+        self.assertEqual(error.exception.status, 404)
+        for query in ("UPDATE conversations SET kind='group' WHERE workspace_id=:w",
+                      "DELETE FROM alfa_max_settings WHERE workspace_id=:w"):
+            with self.db.begin_nested() as tx:
+                self.db.execute(text(query), {"w": self.workspace})
+                with self.assertRaises(AuthError) as error:
+                    self.reader._family_conversation(self.db, self.workspace, conversation)
+                self.assertEqual(error.exception.status, 404)
+                tx.rollback()
+
+    def test_family_route_checks_membership_and_link_before_preparing_private_card(self):
+        from center_messenger import chat_api
+        self.project(self.row("99", customer=99))
+        conversation = self.conversation()["id"]
+        directory = SimpleNamespace(prepare=Mock())
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(directory=directory)))
+        with patch.object(chat_api, "components", return_value=(None, self.reader)), \
+             patch.object(chat_api, "identity", return_value=SimpleNamespace(user_id=self.user)):
+            with self.assertRaises(AuthError) as error:
+                chat_api.chat_family(self.workspace, conversation, request)
+            self.assertEqual(error.exception.status, 404)
+            with patch.object(self.reader.max, "chat_transaction", side_effect=AuthError(403, "No access")):
+                with self.assertRaises(AuthError) as denied:
+                    chat_api.chat_family(self.workspace, conversation, request)
+                self.assertEqual(denied.exception.status, 403)
+        directory.prepare.assert_not_called()
+
     def test_summary_counts_visible_history_and_first_confirmed_human_response(self):
         from center_messenger.cabinet_summary import summary
         self.project(self.row("10"), branch=1)
