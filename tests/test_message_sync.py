@@ -1211,6 +1211,22 @@ class MessageSyncTests(unittest.TestCase):
         self.project(self.row("1", at=previous_start + timedelta(minutes=30)))
         self.assertEqual(summary(self.reader.max, None, self.workspace, now=now)["previous_incoming"], 1)
 
+    def test_summary_excludes_unconfirmed_and_ambiguous_native_sends(self):
+        from center_messenger.cabinet_summary import summary
+        self.project(self.row("1"),
+                     self.row("2", direction="out", at=self.at+timedelta(seconds=60)),
+                     self.row("3", direction="out", at=self.at+timedelta(seconds=120)),
+                     self.row("4", direction="out", at=self.at+timedelta(seconds=180)))
+        for record, patch_payload in (("2", {"delivery_state": "unknown"}),
+                                      ("3", {"possible_send_command_id": str(uuid4())})):
+            self.db.execute(text("UPDATE messages SET payload=payload||CAST(:p AS jsonb) WHERE workspace_id=:w "
+                "AND payload->>'crm_record_id'=:record"),
+                {"w": self.workspace, "p": json.dumps(patch_payload), "record": record})
+        refresh_unread(self.db, self.workspace, self.conversation()["id"])
+        result = summary(self.reader.max, None, self.workspace, now=self.at+timedelta(hours=1))
+        self.assertEqual(result["average_response_seconds"], 180)
+        self.assertEqual(result["operators"][0]["answered"], 1)
+
     def test_settings_change_during_browser_read_cannot_publish_stale_history(self):
         def changed_settings(origin, session, requests, **kwargs):
             self.db.execute(text("UPDATE alfa_max_settings SET version=version+1 WHERE workspace_id=:w"),

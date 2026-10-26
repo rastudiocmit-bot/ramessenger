@@ -112,6 +112,8 @@ def calculate(db, workspace, timezone, *, now=None, diagnostics=None):
         f"(({m}.direction='in' AND {m}.actor_type='contact') OR "
         f"({m}.direction='out' AND {m}.actor_type='human' AND "
         f"coalesce({m}.payload->>'failed','false')<>'true' AND "
+        f"({m}.send_command_id IS NOT NULL OR {m}.payload->>'possible_send_command_id' IS NULL) AND "
+        f"coalesce({m}.payload->>'delivery_state','accepted') NOT IN ('queued','sending','unknown','failed','cancelled') AND "
         f"({m}.send_command_id IS NULL OR {sc}.state IN ('accepted','delivered','read'))))")
     responses = query("responses", text(events + ", current_events AS MATERIALIZED ("
         "SELECT m.*,coalesce(u.display_name,nullif(m.payload->>'actor_name',''),'Сотрудник CRM') AS name "
