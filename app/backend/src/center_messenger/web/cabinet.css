@@ -117,13 +117,13 @@ input,textarea{font:inherit;color:inherit}
 .title-sub{font-size:12.5px;color:var(--muted);line-height:1.4;margin-top:5px}
 .title-sub b{color:var(--amber-ink);font-weight:650}
 .iconbtn{width:40px;height:40px;flex:none;border-radius:12px;display:grid;place-items:center;
-  color:var(--muted);background:var(--surface);border:1px solid var(--line);box-shadow:var(--card);
-  transition:background .15s,color .15s,border-color .15s}
-.iconbtn:hover{color:var(--primary);border-color:var(--primary)}
-.iconbtn[aria-pressed="true"]{background:var(--primary-tint);color:var(--primary-ink);border-color:transparent}
+  color:var(--muted);background:transparent;border:0;box-shadow:none;
+  transition:color .15s}
+.iconbtn:hover{color:var(--primary)}
+.iconbtn[aria-pressed="true"]{background:transparent;color:var(--primary-ink);border-color:transparent}
 .iconbtn.plain{background:none;border:0}
 .iconbtn svg{width:21px;height:21px;display:block}
-.icon-button{box-shadow:var(--card)}
+.icon-button{background:transparent;border:0;box-shadow:none}
 
 .search{padding:12px var(--gut-r) 0 var(--gut-l)}
 .search label{display:flex;align-items:center;gap:9px;background:var(--surface);border:1px solid var(--line);
@@ -887,7 +887,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-tools{display:flex;gap:0;margin-top:-2px}
 .family-tool.iconbtn{width:32px;height:32px;border-radius:9px}
 .family-tool.iconbtn svg{width:18px;height:18px}
-.family-tool.iconbtn:hover{background:var(--surface-2)}
+.family-tool.iconbtn:hover{background:transparent;color:var(--primary)}
 .family-tool:disabled{opacity:.4;cursor:default}
 .family-tool[hidden]{display:none}
 .is-refreshing #chat-details-refresh svg{animation:family-spin .9s linear infinite}
@@ -909,9 +909,9 @@ body:has(#cabinet[hidden]){overflow:auto}
   font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .family-contact a:hover{color:var(--primary);text-decoration:underline}
 .family-copy{width:26px;height:26px;flex:none;border-radius:7px;display:grid;place-items:center;color:var(--faint);
-  opacity:.55;box-shadow:var(--card);transition:opacity .15s,background .15s}
+  opacity:.55;box-shadow:none;transition:opacity .15s,color .15s}
 .family-contact:hover .family-copy,.family-copy:focus-visible{opacity:1}
-.family-copy:hover{background:var(--surface-2);color:var(--primary)}
+.family-copy:hover{background:transparent;color:var(--primary)}
 .family-copy svg{width:14px;height:14px}
 .family-contacts .family-empty{margin:4px 0 0}
 .family-contacts:has(> .family-skel){padding-left:0;margin-top:0}
@@ -933,11 +933,11 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-kid-head h3{margin:0;font-size:14.5px;font-weight:650;line-height:1.3}
 .family-sub{margin:1px 0 0;font-size:12px;color:var(--muted)}
 .family-crm{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 9px;flex:none;border-radius:8px;
-  border:1px solid var(--line);background:var(--surface);color:var(--primary-ink);font-size:12px;font-weight:600;
-  text-decoration:none;white-space:nowrap;box-shadow:var(--card);transition:background .15s,border-color .15s}
+  border:0;background:transparent;color:var(--primary-ink);font-size:12px;font-weight:600;
+  text-decoration:none;white-space:nowrap;box-shadow:none;transition:color .15s}
 .family-crm svg{width:14px;height:14px;display:block}
 .family-crm.icon-only{width:28px;padding:0;justify-content:center;border-color:transparent;background:none;color:var(--faint)}
-.family-crm:hover{border-color:var(--primary);background:var(--primary-tint);color:var(--primary-ink)}
+.family-crm:hover{background:transparent;color:var(--primary);text-decoration:underline}
 
 .family-notes{display:grid;gap:4px;margin-bottom:10px}
 .family-note{display:flex;align-items:flex-start;gap:8px;padding:6px 10px 6px 9px;border-radius:9px;border-left:3px solid currentColor}
@@ -1026,13 +1026,13 @@ body:has(#cabinet[hidden]){overflow:auto}
 .family-drawer:not([open]){display:none}
 @keyframes family-dock-in{from{opacity:0;transform:translateX(28px)}}
 @keyframes family-dock-out{to{opacity:0;transform:translateX(28px)}}
-#chat-details-pin[aria-pressed="true"]{background:var(--primary-tint);color:var(--primary-ink)}
+#chat-details-pin[aria-pressed="true"]{background:transparent;color:var(--primary-ink)}
 #chat-details-pin[aria-pressed="true"] svg{transform:rotate(-30deg)}
 #chat-details-pin svg{transition:transform .2s}
 .family-link-btn{display:flex;align-items:center;justify-content:center;width:100%;height:38px;margin-top:4px;border-radius:10px;
   background:var(--primary);color:var(--on-primary);font-size:13.5px;font-weight:600;box-shadow:var(--card)}
 .family-link-btn:hover{background:var(--primary-deep)}
-#chat-details[aria-pressed="true"]{background:var(--primary-tint);color:var(--primary-ink)}
+#chat-details[aria-pressed="true"]{background:transparent;color:var(--primary-ink)}
 /* The card's small controls opt out of the global 44px button height; touch screens get
    their larger targets back below. */
 .family-panel :is(.family-kid,.family-copy,.family-tool,.family-link-btn){min-height:0}
@@ -1079,7 +1079,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 #chat-search::-webkit-search-cancel-button,#chat-search::-webkit-search-decoration{-webkit-appearance:none;appearance:none;display:none}
 .app.is-searching #chat-chips{display:none}
 .app.is-searching .tabbar{display:none!important}
-.app.is-searching #chat-search-toggle{border-color:transparent;background:var(--surface-2)}
+.app.is-searching #chat-search-toggle{border-color:transparent;background:transparent;color:var(--primary)}
 @media (max-width:719px){#chat-search-toggle,#chat-search-wrap{position:relative;top:-5px}}
 
 /* iOS zooms into any field under 16px and does not zoom back out; touch screens get
@@ -1324,7 +1324,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 :root[data-theme="dark"] .sys,:root[data-theme="dark"] .chat-bubble.system.sys{box-shadow:inset 0 0 0 .5px rgba(255,255,255,.08)}
 
 #chat-handled{touch-action:manipulation;-webkit-touch-callout:none;user-select:none;-webkit-user-select:none}
-#chat-handled[aria-busy="true"]{background:var(--bubble-out);color:var(--st-client-ink);cursor:progress}
+#chat-handled[aria-busy="true"]{background:transparent;color:var(--st-client-ink);cursor:progress}
 .bulk-handled-summary{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0;padding:12px;border-radius:12px;background:var(--bubble-out);color:var(--st-client-ink)}
 .bulk-handled-summary span{padding:3px 6px;font-size:13px}
 #chat-bulk-dialog .dialog-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;padding:16px 0 0}
@@ -1395,3 +1395,10 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 #ai-synthesis-play { margin-left: 8px; }
 #ai-synthesis-play[hidden] { display: none; }
+
+/* Clickable glyphs retain their hit areas without inheriting button surfaces. */
+.iconbtn:not(:disabled) svg, .icon-button:not(:disabled) svg, .family-copy svg, .family-crm svg { transition: opacity .15s, scale .15s; }
+@media (hover:hover) and (prefers-reduced-motion:no-preference) {
+  .iconbtn:not(:disabled):hover svg, .icon-button:not(:disabled):hover svg, .family-copy:hover svg, .family-crm:hover svg { scale: 1.08; }
+}
+:is(.iconbtn,.icon-button,.family-copy,.family-crm):focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; box-shadow: none; }
