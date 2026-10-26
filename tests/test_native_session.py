@@ -46,6 +46,44 @@ class SessionPolicyTests(unittest.TestCase):
             parse_history_html('<input type="password">', origin='https://test.s20.online', branch=1, direction='receive')
         self.assertEqual(result.exception.code, 'invalid_response')
 
+    def test_css_hidden_login_dialog_does_not_override_customer_card(self):
+        from center_messenger.alfa_max_browser import _customer_card_compose_url
+        html = '<div class="modal"><form action="/auth/login"><input name="email"><input type="password"></form></div>'
+        html += '<a href="/company/1/max/bulk?related_class=Customer&amp;related_ids%5B%5D=42&amp;maxUserId=77">MAX</a>'
+        self.assertIn('maxUserId=77', _customer_card_compose_url(html, origin='https://test.s20.online', branch=1, customer=42))
+
+    def test_pending_otp_page_is_distinct_from_password_login(self):
+        html = '<form action="/auth/login"><input name="LoginForm[code]" autocomplete="one-time-code"></form>'
+        with self.assertRaises(AlfaBrowserError) as raised:
+            parse_history_html(html, origin='https://test.s20.online', branch=1, direction='receive')
+        self.assertEqual(raised.exception.code, 'otp_required')
+
+    def test_resource_http_errors_do_not_all_become_logout(self):
+        from center_messenger.alfa_max_browser import AlfaMaxBrowser
+        for status, expected in [(401, 'reauth_required'), (403, 'crm_access_denied'), (429, 'crm_rate_limited'), (503, 'crm_unavailable')]:
+            page = Mock(url='https://test.s20.online/company/1/max/receive')
+            page.goto.return_value = SimpleNamespace(status=status)
+            with self.assertRaises(AlfaBrowserError) as raised:
+                AlfaMaxBrowser._read_history_page(page, 'https://test.s20.online', 1, 'receive', 0)
+            self.assertEqual(raised.exception.code, expected)
+            self.assertEqual(raised.exception.http_status, status)
+
+    def test_known_acceptance_survives_browser_cookie_export_failure(self):
+        from center_messenger.alfa_max_browser import AlfaMaxBrowser
+        page, context = Mock(), Mock()
+        page.url = 'https://test.s20.online/company/1/customer/view?id=42'
+        bulk = 'https://test.s20.online/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42&maxUserId=77'
+        form = ('<form action="' + bulk.replace('&', '&amp;') + '"><input name="_csrf" value="synthetic">'
+                '<input name="MaxComposeBulkForm[related_ids][]" value="42"><textarea name="MaxComposeBulkForm[text]"></textarea></form>')
+        page.goto.return_value = SimpleNamespace(status=200)
+        page.content.return_value = '<a href="' + bulk.replace('&', '&amp;') + '">MAX</a>'
+        page.evaluate.side_effect = [{'status': 200, 'url': bulk, 'text': form}, {'status': 200, 'url': bulk, 'text': '{"success":true}'}]
+        context.storage_state.side_effect = RuntimeError('synthetic export failure')
+        with patch.object(AlfaMaxBrowser, '_open', return_value=(Mock(), Mock(), context, page)):
+            result = AlfaMaxBrowser().send('https://test.s20.online', {'cookies': []}, 1, 42, 'Synthetic reply')
+        self.assertTrue(result['accepted'])
+        self.assertNotIn('browser_state', result)
+
     def test_browser_state_merge_preserves_private_credentials(self):
         old = {'cookies': [], SECRET: {'enabled': True, 'password': 'synthetic-only'}}
         result = merge_state(old, {'cookies': [{'name': 'fresh'}], 'origins': []})
@@ -181,7 +219,8 @@ class NativeSessionTests(unittest.TestCase):
         self.assertIsNone(self.setting()['session_ciphertext'])
 
     def test_manual_setup_encrypts_password_and_otp_retains_it(self):
-        self.service._crm = Mock(return_value=({'origin': 'https://test.s20.online', 'connection_id': self.crm}, [1]))
+        self.service._crm = Mock(return_value=({'origin': 'https://test.s20.online', 'connection_id': self.crm, 'version': 1}, [1]))
+        self.service.alfa._row = Mock(return_value=self.service._crm.return_value[0])
         self.service.status = Mock(return_value={})
         self.service.browser.login.return_value = ('otp_required', {'cookies': [], 'origins': []})
         actor = SimpleNamespace(user_id=self.user)
@@ -198,11 +237,170 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(control(row)['phase'], 'checking')
 
     def test_external_password_rejection_does_not_expire_messenger_login(self):
-        self.service._crm = Mock(return_value=({'origin': 'https://test.s20.online', 'connection_id': self.crm}, [1]))
+        self.service._crm = Mock(return_value=({'origin': 'https://test.s20.online', 'connection_id': self.crm, 'version': 1}, [1]))
+        old = self.setting()
         self.service.browser.login.side_effect = AlfaBrowserError('credentials_rejected')
         with self.assertRaises(AuthError) as raised:
             self.service.connect(SimpleNamespace(user_id=self.user), self.workspace, 'synthetic@example.test', SecretStr('bad-synthetic'))
         self.assertEqual(raised.exception.status, 422)
+        self.assertEqual(self.setting()['state'], old['state'])
+        self.assertEqual(self.setting()['session_ciphertext'], old['session_ciphertext'])
+        self.assertEqual(self.setting()['version'], old['version'])
+
+    def retry_now(self):
+        self.db.execute(text("UPDATE alfa_max_settings SET history_cursor=jsonb_set(history_cursor,"
+                             "'{session_control,after}','null'::jsonb) WHERE workspace_id=:w"), {'w': self.workspace})
+
+    def test_successful_login_survives_network_failure_of_confirmation_read(self):
+        self.pending()
+        fresh = {'cookies': [{'name': 'fresh', 'value': 'rotated'}], 'origins': []}
+        self.service.browser.login.return_value = ('active', fresh)
+        self.service.browser.check_session.side_effect = [AlfaBrowserError('reauth_required'), AlfaBrowserError('crm_unavailable'), fresh]
+        self.service.sessions.recover(self.workspace, self.channel)
+        row = self.setting()
+        stored = self.service.vault.open_browser_state(self.workspace, self.channel, row['session_ciphertext'])
+        self.assertEqual(stored['cookies'], fresh['cookies'])
+        self.assertTrue(control(row)['needs_check'])
+        self.retry_now()
+        self.service.sessions.recover(self.workspace, self.channel)
+        self.service.browser.login.assert_called_once()
+        self.assertEqual(self.setting()['state'], 'active')
+        self.assertEqual(self.service.browser.check_session.call_args.args[1]['cookies'], fresh['cookies'])
+
+    def test_partial_login_result_is_checked_before_repeating_password(self):
+        self.pending()
+        fresh = {'cookies': [{'name': 'fresh', 'value': 'partial'}], 'origins': []}
+        error = AlfaBrowserError('login_failed')
+        error.browser_state = fresh
+        self.service.browser.login.side_effect = error
+        self.service.browser.check_session.side_effect = [AlfaBrowserError('reauth_required'), fresh]
+        self.service.sessions.recover(self.workspace, self.channel)
+        self.retry_now()
+        self.service.sessions.recover(self.workspace, self.channel)
+        self.service.browser.login.assert_called_once()
+        self.assertEqual(self.service.browser.check_session.call_args.args[1]['cookies'], fresh['cookies'])
+        self.assertEqual(self.setting()['state'], 'active')
+
+    def test_pending_code_detected_by_check_does_not_reissue_login(self):
+        self.pending()
+        error = AlfaBrowserError('otp_required')
+        error.browser_state = {'cookies': [{'name': 'pending', 'value': 'code'}]}
+        self.service.browser.check_session.side_effect = error
+        self.service.sessions.recover(self.workspace, self.channel)
+        self.assertEqual(self.setting()['state'], 'otp_required')
+        self.service.browser.login.assert_not_called()
+        self.service.sessions.recover(self.workspace, self.channel)
+        self.service.browser.check_session.assert_called_once()
+
+    def test_otp_network_error_preserves_new_cookies_and_checks_first(self):
+        self.db.execute(text("UPDATE alfa_max_settings SET state='otp_required' WHERE workspace_id=:w"), {'w': self.workspace})
+        error = AlfaBrowserError('crm_unavailable')
+        error.browser_state = {'cookies': [{'name': 'otp', 'value': 'accepted'}]}
+        self.service.browser.verify_otp.side_effect = error
+        with self.assertRaises(AuthError):
+            self.service.verify_otp(SimpleNamespace(user_id=self.user), self.workspace, '123456')
+        self.assertTrue(control(self.setting())['needs_check'])
+        self.service.sessions.recover(self.workspace, self.channel)
+        self.assertEqual(self.service.browser.check_session.call_args.args[1]['cookies'], error.browser_state['cookies'])
+        self.service.browser.verify_otp.assert_called_once()
+        self.service.browser.login.assert_not_called()
+
+    def test_new_crm_configuration_rejects_old_session_results(self):
+        old = self.setting()
+        self.db.execute(text('UPDATE alfa_settings SET version=version+1 WHERE workspace_id=:w'), {'w': self.workspace})
+        self.assertFalse(self.service.sessions.suspect(self.db, self.workspace, old, 'old_provider'))
+        self.assertEqual(self.setting()['state'], 'active')
+
+    def test_branch_access_denial_falls_back_without_relogin(self):
+        self.pending()
+        self.service.browser.check_session.side_effect = [AlfaBrowserError('crm_access_denied'), {'cookies': []}]
+        self.service.sessions.recover(self.workspace, self.channel)
+        self.assertEqual([call.args[2] for call in self.service.browser.check_session.call_args_list], [1, 2])
+        self.service.browser.login.assert_not_called()
+        self.assertEqual(self.setting()['state'], 'active')
+
+    def test_release_failure_does_not_change_accepted_submission(self):
+        from sqlalchemy.exc import SQLAlchemyError
+        messaging, command = self.queue_operator_reply()
+        with patch.object(self.service.sessions, '_release', side_effect=SQLAlchemyError('synthetic unavailable')):
+            messaging.run_next('send', 'alfa_max_browser')
+        self.service.browser.send.assert_called_once()
+        self.assertEqual(self.db.execute(text('SELECT state FROM send_commands WHERE id=:id'), {'id': command['command_id']}).scalar_one(), 'accepted')
+
+    def test_backoff_is_one_five_then_fifteen_minutes(self):
+        self.pending()
+        self.service.browser.check_session.side_effect = AlfaBrowserError('crm_unavailable')
+        delays = []
+        for _ in range(4):
+            self.retry_now()
+            delays.append(self.service.sessions.recover(self.workspace, self.channel))
+        self.assertEqual(delays, [60, 300, 900, 900])
+        self.service.browser.login.assert_not_called()
+
+    def test_cookie_save_does_not_clear_history_gap(self):
+        self.db.execute(text("UPDATE alfa_max_settings SET last_error_code='history_gap' WHERE workspace_id=:w"), {'w': self.workspace})
+        with self.service.sessions.operation(self.workspace, self.channel) as operation:
+            self.service.sessions.finish(operation, self.native, state='active')
+        self.assertEqual(self.setting()['last_error_code'], 'history_gap')
+
+    def test_disabled_automatic_login_is_preserved_and_does_not_submit_password(self):
+        self.service._crm = Mock(return_value=({'origin': 'https://test.s20.online', 'connection_id': self.crm, 'version': 1}, [1]))
+        self.service.alfa._row = Mock(return_value=self.service._crm.return_value[0])
+        self.service.status = Mock(return_value={})
+        self.service.connect(SimpleNamespace(user_id=self.user), self.workspace, 'synthetic@example.test', SecretStr('synthetic-only'), False)
+        self.service.browser.login.reset_mock()
+        public = self.service.public(self.setting())
+        self.assertTrue(public['recovery']['configured'])
+        self.assertFalse(public['recovery']['enabled'])
+        self.pending()
+        self.service.browser.check_session.side_effect = AlfaBrowserError('reauth_required')
+        self.service.sessions.recover(self.workspace, self.channel)
+        self.assertEqual(control(self.setting())['phase'], 'automatic_disabled')
+        self.service.browser.login.assert_not_called()
+
+    def test_manual_login_keeps_new_cookie_if_confirmation_network_fails(self):
+        crm = {'origin': 'https://test.s20.online', 'connection_id': self.crm, 'version': 1}
+        self.service._crm = Mock(return_value=(crm, [1]))
+        self.service.alfa._row = Mock(return_value=crm)
+        self.service.status = Mock(return_value={})
+        fresh = {'cookies': [{'name': 'candidate', 'value': 'new'}], 'origins': []}
+        self.service.browser.login.return_value = ('active', fresh)
+        self.service.browser.check_session.side_effect = AlfaBrowserError('crm_unavailable')
+        self.service.connect(SimpleNamespace(user_id=self.user), self.workspace, 'synthetic@example.test', SecretStr('synthetic-only'))
+        row = self.setting()
+        self.assertTrue(control(row)['needs_check'])
+        self.assertEqual(self.service.vault.open_browser_state(self.workspace, self.channel, row['session_ciphertext'])['cookies'], fresh['cookies'])
+
+    def test_transition_history_is_bounded_safe_and_contains_generations(self):
+        with self.service.sessions.operation(self.workspace, self.channel) as operation:
+            for _ in range(12):
+                self.service.sessions.finish(operation, self.native, state='active', new_generation=True)
+        recent = self.service.public(self.setting())['recovery']['recent']
+        self.assertEqual(len(recent), 10)
+        self.assertTrue(all(item['generation_after'] == item['generation'] + 1 for item in recent))
+        self.assertNotIn('synthetic-only', json.dumps(recent))
+
+    def test_invitation_accepted_by_another_user_leaves_shared_session_and_owner_login_intact(self):
+        from center_messenger.accounts import Accounts
+        from center_messenger.auth_security import InvitationInput, AcceptInvitationInput
+        self.db.execute(text("INSERT INTO workspace_memberships(workspace_id,user_id,role) VALUES(:w,:u,'owner')"), {'w': self.workspace, 'u': self.user})
+        owner_session = uuid4()
+        self.db.execute(text("INSERT INTO auth_sessions(id,user_id,token_hash,auth_epoch,device_label,expires_at) VALUES(:id,:u,:hash,0,'Owner device',now()+interval '12 hours')"),
+                        {'id': owner_session, 'u': self.user, 'hash': uuid4().hex * 2})
+        ops = Accounts.__new__(Accounts)
+        ops.transaction = self.accounts.transaction
+        ops.throttle = Mock()
+        ops.settings = SimpleNamespace(public_url='https://messenger.example.test', session_hours=12)
+        ops.passwords = Mock()
+        ops.passwords.hash.return_value = 'synthetic-not-a-real-password-hash'
+        old = self.setting()
+        invite = ops.invite(SimpleNamespace(user_id=self.user), self.workspace, InvitationInput(email='new-operator@example.com', role='operator'))
+        raw = invite['url'].split('#invite=')[1]
+        ops.accept_invitation(AcceptInvitationInput(token=raw, display_name='Synthetic operator', password='synthetic-long-password'), None, '127.0.0.1', 'Other device')
+        self.assertEqual(self.setting()['session_ciphertext'], old['session_ciphertext'])
+        self.assertEqual(self.setting()['version'], old['version'])
+        self.assertIsNone(self.db.execute(text('SELECT revoked_at FROM auth_sessions WHERE id=:id'), {'id': owner_session}).scalar_one())
+        self.assertEqual(self.db.execute(text("SELECT role FROM workspace_memberships m JOIN auth_users u ON u.id=m.user_id WHERE u.email='new-operator@example.com'")).scalar_one(), 'operator')
 
     def queue_operator_reply(self):
         self.project(self.row())

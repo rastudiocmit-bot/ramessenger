@@ -9,7 +9,7 @@
   <script src="/assets/icons.js?v=1.2.1" defer=""></script><script src="/assets/directory.js?v=0.9.1" defer=""></script>
   <script src="/assets/chat.js?v=0.15.4" defer=""></script><script src="/assets/voice.js?v=1.6.0" defer=""></script><script src="/assets/ai.js?v=1.4.0" defer=""></script>
   <script src="/assets/alfa-progress.js?v=0.12.2" defer=""></script>
-  <script src="/assets/cabinet.js?v=2.6" defer=""></script><script src="/assets/app.js?v=0.14.2" defer=""></script>
+  <script src="/assets/cabinet.js?v=2.6" defer=""></script><script src="/assets/app.js?v=0.14.3" defer=""></script>
 </head>
 <body>
   <div id="loading" class="loading" role="status"><span class="spinner"></span>Открываем кабинет…</div>
@@ -105,6 +105,7 @@
             <p id="alfa-max-error" class="notice error" role="alert" hidden=""></p>
             <p id="alfa-max-info" class="form-note" role="status" aria-live="polite"></p>
 
+            <details class="form-note"><summary>Последние события подключения</summary><div id="alfa-max-session-events"></div></details>
             <form id="alfa-max-connect-form" autocomplete="off">
               <label class="fld">Почта пользователя AlfaCRM<input name="email" type="email" required="" maxlength="254" autocomplete="off"></label>
               <label class="fld">Пароль AlfaCRM<input name="password" type="password" required="" maxlength="256" autocomplete="new-password"></label>
