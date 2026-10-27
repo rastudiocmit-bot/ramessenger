@@ -126,15 +126,24 @@ class ActiveReviewWorker:
             job = dict(status(db, workspace, settings["connection_id"]))
             if job.get("lease_until") and datetime.fromisoformat(job["lease_until"]) > now:
                 return False
-            if job.get("version") == settings["version"] and job.get("next_at") and datetime.fromisoformat(job["next_at"]) > now:
+            available = list(db.execute(text("SELECT external_id FROM alfa_branches WHERE workspace_id=:w "
+                "AND connection_id=:c AND available ORDER BY external_id"), {"w": workspace, "c": settings["connection_id"]}).scalars())
+            if not available:
+                return False
+            same_version = job.get("version") == settings["version"]
+            if same_version and job.get("paused"):
+                return False
+            added = sorted(set(available) - set(job.get("known_branches", job.get("branches", []))))
+            not_due = same_version and job.get("next_at") and datetime.fromisoformat(job["next_at"]) > now
+            new_only = not_due and job.get("state") == "complete" and bool(added)
+            if not_due and not new_only:
                 return False
             if not job.get("run") or job.get("version") != settings["version"] or job.get("state") == "complete":
-                branches = list(db.execute(text("SELECT external_id FROM alfa_branches WHERE workspace_id=:w "
-                    "AND connection_id=:c AND available ORDER BY external_id"), {"w": workspace, "c": settings["connection_id"]}).scalars())
-                if not branches:
-                    return False
+                branches = added if new_only else available
+                regular_next = (job.get("regular_next_at") or job.get("next_at")) if new_only else None
                 job.update(run=str(uuid4()), version=settings["version"], branches=branches, bi=0, page=0,
-                           processed=0, unresolved=0, received=0, phase="active", last_id=0, started_at=now.isoformat())
+                           processed=0, unresolved=0, received=0, total=None, phase="active", last_id=0,
+                           started_at=now.isoformat(), paused=False, branch_errors={}, regular_next_at=regular_next)
             job.update(state="running", owner=self.owner, lease_until=(now + timedelta(seconds=90)).isoformat(), updated_at=now.isoformat())
             branch = job["branches"][job["bi"]]
             missing = None
@@ -147,6 +156,8 @@ class ActiveReviewWorker:
                      "c": str(settings["connection_id"]), "run": job["run"]}).scalar_one_or_none()
             store(db, workspace, settings["connection_id"], job)
         try:
+            if branch not in available:
+                raise AlfaError("forbidden", 403)
             with self.connections._host_gate(settings["origin"]) as gate:
                 credentials = self.connections.vault.open(workspace, settings["connection_id"], settings["secret_ciphertext"])
                 client = self.connections.client_factory(settings["origin"], settings["api_email"], credentials, gate)
@@ -172,7 +183,8 @@ class ActiveReviewWorker:
                     current = self.connections._row(db, workspace)
                     owned = status(db, workspace, settings["connection_id"])
                     latest = DirectoryReader._published(db, workspace)
-                    if (not current or current["version"] != settings["version"] or not latest or latest["run"] != snapshot["run"]
+                    if (not current or not current["secret_ciphertext"] or current["connection_id"] != settings["connection_id"]
+                        or current["version"] != settings["version"] or not latest or latest["run"] != snapshot["run"]
                         or owned.get("owner") != self.owner or owned.get("run") != job["run"] or not owned.get("lease_until") or datetime.fromisoformat(owned["lease_until"]) <= datetime.now(UTC)):
                         return False
                     if job["phase"] == "active" and rows:
@@ -199,6 +211,9 @@ class ActiveReviewWorker:
                             {"w":workspace,"r":snapshot["run"],"b":branch,"id":missing})
                         job["unresolved"] = job.get("unresolved",0)+1
                     if job["phase"] == "active":
+                        if job.get("total") is not None and total != job["total"]:
+                            raise AlfaError("invalid_response")
+                        job["total"] = total
                         job["processed"] += len(rows)
                         job["page"] += 1
                         job["received"] = job.get("received", 0) + len(rows)
@@ -211,14 +226,16 @@ class ActiveReviewWorker:
                     elif missing:
                         job["last_id"] = missing
                     else:
-                        job["bi"] += 1; job.update(page=0, received=0, phase="active", last_id=0)
+                        job["bi"] += 1; job.update(page=0, received=0, total=None, phase="active", last_id=0)
                     now = datetime.now(UTC)
                     job.update(owner=None, lease_until=None, next_at=now.isoformat(), updated_at=now.isoformat(), attempts=0, error=None)
                     if job["bi"] == len(job["branches"]):
                         job["unresolved"] = db.execute(text("SELECT count(*) FROM outbox_events WHERE workspace_id=:w "
                             "AND topic=:t AND event_key LIKE :prefix AND payload->>'state'='not_found'"),
                             {"w":workspace,"t":IDENTITY,"prefix":str(settings["connection_id"])+":%"}).scalar_one()
-                        job.update(state="complete", last_success_at=now.isoformat(), next_at=(now + INTERVAL).isoformat())
+                        job.update(state="complete", last_success_at=now.isoformat(),
+                            next_at=job.get("regular_next_at") or (now + INTERVAL).isoformat(),
+                            known_branches=sorted(set(job.get("known_branches", [])) | set(job["branches"])))
                     store(db, workspace, settings["connection_id"], job)
                     db.execute(text("UPDATE alfa_settings SET secret_ciphertext=:secret WHERE workspace_id=:w AND version=:v"),
                         {"w": workspace, "v": settings["version"], "secret": self.connections.vault.seal(workspace, settings["connection_id"], credentials)})
@@ -234,8 +251,24 @@ class ActiveReviewWorker:
                 attempt = owned.get("attempts", 0) + (0 if code == "busy" else 1)
                 owned.update(state="error", owner=None, lease_until=None, error=code, attempts=attempt,
                     next_at=(datetime.now(UTC) + timedelta(seconds=5 if code == "busy" else min(1800, 30 * 2 ** min(attempt, 5)))).isoformat())
-                if attempt >= 3:
-                    owned["run"] = None
+                if code in {"unauthorized", "forbidden"}:
+                    if code == "unauthorized":
+                        owned.update(paused=True, next_at=None)
+                    else:
+                        # One unavailable branch cannot prevent the other branches
+                        # from reaching their six-hour review. No session mutation.
+                        owned.setdefault("branch_errors", {})[str(branch)] = {"error": code, "at": datetime.now(UTC).isoformat()}
+                        owned.update(bi=owned["bi"]+1, page=0, received=0, total=None, phase="active", last_id=0,
+                                     attempts=0, next_at=datetime.now(UTC).isoformat())
+                        if owned["bi"] == len(owned["branches"]):
+                            owned.update(state="complete", next_at=owned.get("regular_next_at") or (datetime.now(UTC)+INTERVAL).isoformat(),
+                                known_branches=sorted(set(owned.get("known_branches", [])) | set(owned["branches"])))
+                elif attempt >= 3 and code in {"invalid_response", "import_limit"}:
+                    # Source pagination changed: restart this branch only. Network
+                    # errors retain the current page, even after many retries.
+                    owned.update(run=str(uuid4()), page=0, total=None,
+                                 processed=max(0,owned.get("processed",0)-owned.get("received",0)),
+                                 received=0, phase="active", last_id=0)
                 store(db, workspace, settings["connection_id"], owned)
         return False
 
@@ -244,7 +277,9 @@ class ActiveReviewWorker:
         pending = getattr(self, "_pending_scopes", [])
         if not pending:
             with self.accounts.transaction() as db:
-                pending = list(db.execute(text("SELECT workspace_id FROM alfa_max_sync_queue ORDER BY workspace_id")).scalars())
+                pending = list(db.execute(text("SELECT s.workspace_id FROM alfa_settings s JOIN alfa_sync_control c "
+                    "ON c.workspace_id=s.workspace_id AND c.connection_id=s.connection_id "
+                    "WHERE s.secret_ciphertext IS NOT NULL AND c.published_id IS NOT NULL ORDER BY s.workspace_id")).scalars())
             self._pending_scopes = pending
         if not pending:
             return False
@@ -254,7 +289,9 @@ class ActiveReviewWorker:
         while not self.stopping.is_set():
             try:
                 with self.accounts.transaction() as db:
-                    scopes = list(db.execute(text("SELECT workspace_id FROM alfa_max_sync_queue")).scalars())
+                    scopes = list(db.execute(text("SELECT s.workspace_id FROM alfa_settings s JOIN alfa_sync_control c "
+                        "ON c.workspace_id=s.workspace_id AND c.connection_id=s.connection_id "
+                        "WHERE s.secret_ciphertext IS NOT NULL AND c.published_id IS NOT NULL")).scalars())
                 for scope in scopes:
                     if not self.stopping.is_set():
                         self.step(scope)

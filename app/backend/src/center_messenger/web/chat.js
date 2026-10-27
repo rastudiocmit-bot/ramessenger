@@ -1369,9 +1369,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const brief = issue === "credentials_required" ? "проверьте ключ CRM" : issue === "access_denied" ? "ограничен доступ CRM" : issue === "not_found" ? "клиент не найден в CRM" : info.retry_at && info.error ? `повтор ${date(info.retry_at)}` : info.error ? "есть ошибка обновления" : info.refreshing ? "обновляем" : info.overdue ? "ждёт обновления" : info.auto_refresh ? "каждые 30 мин" : "при открытии";
       familySync(`${info.updated_at ? `Обновлено ${date(info.updated_at)}` : "Загружаем карточку"} · ${brief}`,
         [updated, lessons, history, groups, status, info.error].filter(Boolean).join(" · "));
-      detailsDialog.classList.toggle("is-refreshing", Boolean(info.refreshing));
+      familyRefreshState();
     }
-    if (!family.cache) detailsDialog.classList.remove("is-refreshing");
+    if (!family.cache) familyRefreshState();
   }
   function renderFamilyContent(students) {
     $("#chat-details-name").textContent = family.name;
@@ -1525,16 +1525,24 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (valid(epoch, gen) && seq === detailsSeq) watchFamily(conversation, contact, epoch, gen, seq);
     }, delay);
   }
+  function familyRefreshState() {
+    const refreshing = familyBusy || Boolean(family?.cache?.refreshing);
+    detailsDialog.classList.toggle("is-refreshing", refreshing);
+    const refresh = $("#chat-details-refresh");
+    refresh.setAttribute("aria-busy", String(refreshing));
+    refresh.disabled = familyBusy || !isAdmin();
+    refresh.title = refreshing ? "Обновляем сведения на сервере. Сохранённые данные доступны." : "Обновить сведения из CRM";
+  }
   async function refreshSelected(force) {
     if (!force || !isAdmin() || familyBusy || !family) return;
     const epoch = state.epoch, gen = generation, seq = detailsSeq, conversation = selected, contact = family.source_contact_id || family.id;
-    familyBusy = true; $("#chat-details-refresh").disabled = true;
+    familyBusy = true; familyRefreshState();
     try {
       const updated = await api(`${chatPath(conversation)}/family/refresh${state.chatProtocol >= 2 ? "?compact=true" : ""}`, { method: "POST" });
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation) return;
       family = updated; rememberFamily(contact, updated); renderFamily(); watchFamily(conversation, contact, epoch, gen, seq);
     } catch (error) { if (valid(epoch, gen) && seq === detailsSeq) toast(error.message, true); }
-    finally { if (valid(epoch, gen) && seq === detailsSeq) { familyBusy = false; $("#chat-details-refresh").disabled = !isAdmin(); } }
+    finally { if (valid(epoch, gen) && seq === detailsSeq) { familyBusy = false; familyRefreshState(); } }
   }
   function familySkeleton() {
     $("#chat-details-avatar").textContent = ""; $("#chat-details-avatar").className = "ava family-ava me";
@@ -1576,13 +1584,18 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (!selected || !meta) return;
     if (!contactId && !meta.identity_resolution && !options.auto && !pinnedDocked()) { openLink(selected); return; }
     const epoch = state.epoch, gen = generation, conversation = selected;
-    const refresh = $("#chat-details-refresh"); refresh.hidden = !isAdmin() || !contactId; refresh.disabled = !isAdmin();
+    const refresh = $("#chat-details-refresh"); refresh.hidden = !contactId; refresh.disabled = !isAdmin();
     familyPending(meta.name); const seq = detailsSeq;
     clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing"); presentDetails();
     if (!contactId) { familyUnlinked(); return; }
     const saved = familyCache.get(contactId);
     if (saved && saved.value.selection?.signature === meta.card_selection?.signature) { family = saved.value; renderFamily(); }
     try {
+      // Always display the last complete disk snapshot before asking the server
+      // to schedule due work. Neither GET waits for AlfaCRM or clears good data.
+      const cached = await preparedFamilyRequest(conversation, true, contactId);
+      if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
+      family = cached; rememberFamily(contactId, cached); renderFamily();
       // An open panel is a request for this client's card, including a pinned
       // panel following a read chat. Background preparation remains server-owned.
       const result = await preparedFamilyRequest(conversation, false, contactId);
@@ -1592,7 +1605,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     } catch (error) {
       if (valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) {
         detailsDialog.classList.remove("is-loading");
-        if (family) { familySync("Сохранённая карточка · обновление недоступно", error.message); return; }
+        if (family) { familySync("Сохранённая карточка · обновление недоступно", error.message); watchFamily(conversation, contactId, epoch, gen, seq); return; }
         $("#chat-details-name").textContent = error.message;
         $("#chat-details-contact").replaceChildren(); $("#chat-details-student").replaceChildren(node("p", "Сведения не загрузились. Попробуйте открыть карточку ещё раз.", "family-empty"));
       }

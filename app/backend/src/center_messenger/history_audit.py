@@ -135,10 +135,13 @@ def main(argv=None):
                     "AND connection_id=:c AND available ORDER BY external_id"
                 ), {"w": workspace, "c": settings["crm_connection_id"]}).scalars().all()
                 coverage = history_coverage(db, workspace, settings["connection_id"], settings["history_cursor"], branches)
+                from center_messenger import catalog_review, active_review
                 reports.append({"workspace_id": str(workspace), "state": settings["state"],
                                 "last_sync_at": settings["last_sync_at"],
                                 "error_code": settings["last_error_code"],
-                                "chat_queue_projection": settings["chat_queue_projection"], **coverage})
+                                "chat_queue_projection": settings["chat_queue_projection"],
+                                "catalog_review": catalog_review.status(db, workspace, settings["crm_connection_id"]),
+                                "active_review": active_review.status(db, workspace, settings["crm_connection_id"]), **coverage})
                 if args.verify_source:
                     if args.branch not in branches:
                         raise ValueError("Branch unavailable")

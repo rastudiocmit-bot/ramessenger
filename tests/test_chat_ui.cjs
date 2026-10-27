@@ -888,7 +888,8 @@ test('pinned read client opens its full card without a second click, with no hid
   assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length,0);
   ui.$('#chat-details').click();await flush();ui.$('#chat-details-pin').click();
   ui.$(`.chat-row[data-id="${identifier(2)}"] .chat-select`).click();await flush();
-  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family')).length,2);
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family') && url.searchParams.get('cached_only')==='true').length,2);
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family') && !url.searchParams.has('cached_only')).length,2);
   assert.doesNotMatch(ui.$('#chat-details-dialog').textContent,/Child 1/);
   assert.doesNotMatch(ui.$('#chat-details-dialog').textContent,/Открыть карточку клиента/);
   assert.match(ui.$('#chat-details-student').textContent,/Child 2/);
@@ -920,11 +921,15 @@ test('opening family for staff uses prepared GET data without per-source CRM mut
     if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
     if(url.pathname.endsWith('/family'))return {...preparedFamily(1),cache:{...preparedFamily(1).cache,refreshing:true}};
   });
+  ui.state.workspace.role='operator';
   ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
   ui.$('#chat-details-dialog').close=function(){this.open=false;};
   await ui.app.enter();ui.$('#chat-details').click();await flush();
   assert.match(ui.$('#chat-details-student').textContent,/Child 1/);
   assert.match(ui.$('#chat-details-sync').textContent,/ · обновляем$/);
+  assert.equal(ui.$('#chat-details-refresh').hidden,false);
+  assert.equal(ui.$('#chat-details-refresh').disabled,true);
+  assert.equal(ui.$('#chat-details-refresh').getAttribute('aria-busy'),'true');
 });
 
 test('card footer stays brief while the tooltip retains separate freshness dates and errors', async t=>{
@@ -971,6 +976,52 @@ test('paused CRM credentials keep cached facts visible without animation and pol
   ui.timers.delete(timer[0]);await timer[1].callback();await flush();
   assert.match(ui.$('#chat-details-sync').textContent,/2026-10-27/);
   assert.doesNotMatch(ui.$('#chat-details-sync').textContent,/проверьте ключ CRM/);
+});
+
+test('disk card renders before a slow enqueue and keeps its content while the refresh arrow spins', async t=>{
+  let release;
+  let family=preparedFamily(1);
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family')){
+      if(url.searchParams.get('cached_only')==='true')return family;
+      return new Promise(resolve=>{release=()=>{family={...family,cache:{...family.cache,refreshing:true,pending:true}};resolve(family);};});
+    }
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.ok(release);assert.match(ui.$('.family-stats').textContent,/100/);
+  const stats=ui.$('.family-stats');
+  assert.equal(ui.calls.filter(url=>url.pathname.endsWith('/family'))[0].searchParams.get('cached_only'),'true');
+  release();await flush();
+  assert.equal(ui.$('.family-stats'),stats);
+  assert.equal(ui.$('#chat-details-dialog').classList.contains('is-refreshing'),true);
+  assert.equal(ui.$('#chat-details-refresh').getAttribute('aria-busy'),'true');
+  family={...family,cache:{...family.cache,pending:false,refreshing:false}};
+  await runTimer(ui,3000);await flush();
+  assert.equal(ui.$('#chat-details-dialog').classList.contains('is-refreshing'),false);
+  assert.equal(ui.$('#chat-details-refresh').getAttribute('aria-busy'),'false');
+  assert.equal(ui.$('.family-stats'),stats);
+});
+
+test('manual refresh spins immediately and never clears the disk snapshot while the request waits', async t=>{
+  let release;
+  const family=preparedFamily(1);
+  const ui=setup(t,(url,options)=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return family;
+    if(url.pathname.endsWith('/family/refresh'))return new Promise(resolve=>{release=()=>resolve(family);});
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  const stats=ui.$('.family-stats');ui.$('#chat-details-refresh').click();await flush();
+  assert.ok(release);assert.equal(ui.$('.family-stats'),stats);
+  assert.equal(ui.$('#chat-details-refresh').getAttribute('aria-busy'),'true');
+  release();await flush();
+  assert.equal(ui.$('#chat-details-refresh').getAttribute('aria-busy'),'false');
+  assert.equal(ui.$('.family-stats'),stats);
 });
 
 test('ready card footer shows one update time and its refresh interval', async t=>{
@@ -1125,7 +1176,7 @@ test('repeated card opening shares one pending read and cannot render a differen
   dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();ui.$('#chat-details').click();await flush();assert.equal(reads,1);
   ui.$('#chat-details-pin').click();ui.$(`.chat-row[data-id="${identifier(2)}"] .chat-select`).click();await flush();
   assert.match(ui.$('#chat-details-student').textContent,/Child 2/);release();await flush();
-  assert.equal(reads,2);assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Child 1/);
+  assert.equal(reads,3);assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Child 1/);
 });
 
 test('date formatter reuse follows the workspace timezone when an unchanged message crosses midnight', async t=>{
