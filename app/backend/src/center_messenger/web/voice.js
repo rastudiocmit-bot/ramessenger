@@ -116,7 +116,8 @@ window.CenterVoice = ({ $, state, api }) => {
     const data = { attempt_id: mine.id, outcome, code, stage: status, audio_state: ["running", "suspended", "interrupted", "closed"].includes(mine.context?.state) ? mine.context.state : "unknown",
       elapsed_ms: Math.min(300000, Math.round(performance.now() - mine.started)),
       first_frame_ms: mine.firstFrame == null ? null : Math.min(120000, Math.round(mine.firstFrame - mine.started)),
-      captured_ms: Math.min(180000, Math.round((mine.frames || 0) / (mine.rate || RATE) * 1000)) };
+      captured_ms: Math.min(180000, Math.round((mine.frames || 0) / (mine.rate || RATE) * 1000)),
+      processing_ms: mine.processingStarted == null ? null : Math.min(300000, Math.round(performance.now() - mine.processingStarted)) };
     api(`/workspaces/${mine.workspace}/voice/diagnostic`, { method: "POST", data, timeoutMs: 5000 }).catch(() => {});
   }
   function reset() {
@@ -279,6 +280,7 @@ window.CenterVoice = ({ $, state, api }) => {
       report(mine, "cancelled"); reset();
       return;
     }
+    mine.processingStarted = performance.now();
     mine.clip = encode(capture.chunks, capture.rate, mine.limit); transcribe(mine);
   }
   function releaseJob(mine) {
@@ -297,6 +299,7 @@ window.CenterVoice = ({ $, state, api }) => {
     if (!current(mine) || !mine.clip || status === "working") return;
     mine.controller = new AbortController();
     phase("working", "Распознаём запись…");
+    let preview = null;
     try {
       let result = await api(`/workspaces/${mine.workspace}/voice/transcribe`, { method: "POST",
         data: { audio: base64(mine.clip), attempt_id: mine.id, background: true }, timeoutMs: 30000, signal: mine.controller.signal });
@@ -308,17 +311,38 @@ window.CenterVoice = ({ $, state, api }) => {
           await pollDelay(mine.controller.signal);
           if (!current(mine)) return;
           const progress = await api(`/workspaces/${mine.workspace}/voice/jobs/${mine.job}`, { timeoutMs: 10000, signal: mine.controller.signal });
+          if (progress.status === "pending") phase("working", "Ожидаем обработку записи…");
+          if (progress.status === "processing") phase("working", "Распознаём запись…");
+          if (progress.status === "recognized" && progress.result?.text && !preview) {
+            const before = input.value;
+            insert(progress.result.text);
+            preview = { raw: progress.result.text, before, after: input.value };
+            phase("working", "Текст распознан. Улучшаем…");
+          }
           if (progress.status === "done") { result = progress.result; releaseJob(mine); break; }
           if (performance.now() > deadline) throw failure("timeout", "Распознавание заняло слишком много времени. Повторите попытку.");
         }
       }
       if (!current(mine) || mine.controller.signal.aborted) return;
       mine.clip = null; report(mine, "complete");
-      if (result.text) insert(result.text);
+      if (preview) {
+        // A typed edit or a sent raw draft always wins over a late model rewrite.
+        if (result.text && result.text !== preview.raw && input.value === preview.after) {
+          input.value = preview.before;
+          insert(result.text);
+        }
+      } else if (result.text) insert(result.text);
       // Recognition only edits the draft. Empty speech and provider notices do
       // not add a row, a popup or a message to the conversation.
       reset();
-    } catch (error) { releaseJob(mine); if (current(mine) && !mine.controller.signal.aborted) fail(mine, error); }
+    } catch (error) {
+      releaseJob(mine);
+      if (preview && current(mine) && !mine.controller.signal.aborted) {
+        // Recognition succeeded; a later normalization failure must not make
+        // the operator retry and append the same spoken answer twice.
+        mine.clip = null; report(mine, "complete"); reset();
+      } else if (current(mine) && !mine.controller.signal.aborted) fail(mine, error);
+    }
   }
   document.addEventListener("pointerdown", () => { swallowUntil = 0; }, true);
   scroller.addEventListener("touchmove", event => { if (hold?.armed && event.cancelable) event.preventDefault(); }, { passive: false });

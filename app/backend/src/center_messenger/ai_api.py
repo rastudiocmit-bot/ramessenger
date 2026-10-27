@@ -88,6 +88,7 @@ class VoiceDiagnosticInput(InputModel):
     elapsed_ms: int = Field(ge=0, le=300000, strict=True)
     first_frame_ms: int | None = Field(default=None, ge=0, le=120000, strict=True)
     captured_ms: int = Field(ge=0, le=180000, strict=True)
+    processing_ms: int | None = Field(default=None, ge=0, le=300000, strict=True)
 
 
 def voice(request: Request):
@@ -163,7 +164,7 @@ def transcribe(workspace_id: UUID, model: TranscribeInput, request: Request):
     started, status = monotonic(), 200
     try:
         if model.background:
-            return voice(request).jobs.create(actor, workspace_id, audio, model.agent_id)
+            return voice(request).jobs.create(actor, workspace_id, audio, model.agent_id, attempt_id=model.attempt_id)
         return voice(request).transcribe(actor, workspace_id, audio, model.agent_id)
     except AuthError as error:
         status = error.status

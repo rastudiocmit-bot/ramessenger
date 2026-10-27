@@ -37,6 +37,55 @@ class VoiceJobTests(unittest.TestCase):
         voice.jobs.get(ACTOR, WS, key, cancel=True)
         with self.assertRaises(AuthError): voice.jobs.get(ACTOR, WS, key)
 
+    def test_recognized_text_is_available_while_the_agent_is_still_processing(self):
+        normalizing, release = Event(), Event()
+
+        class SlowNormalizer(FakeClient):
+            def complete(self, *args, **kwargs):
+                normalizing.set()
+                release.wait(3)
+                return super().complete(*args, **kwargs)
+
+        voice, _ = self.make(client=SlowNormalizer())
+        try:
+            key = UUID(voice.jobs.create(ACTOR, WS, silence(2), None)['job_id'])
+            self.assertTrue(normalizing.wait(3))
+            partial = voice.jobs.get(ACTOR, WS, key)
+            self.assertEqual(partial, {'status': 'recognized', 'result': {'text': 'ну это мы завтра придём'}})
+            release.set()
+            voice.jobs.jobs[key]['future'].result(timeout=3)
+            finished = voice.jobs.get(ACTOR, WS, key)
+            self.assertEqual(finished['status'], 'done')
+            self.assertEqual(finished['result']['text'], 'Мы придём завтра.')
+        finally:
+            release.set()
+
+    def test_four_operators_can_start_recognition_without_waiting_for_two_slow_jobs(self):
+        release, all_started = Event(), Event()
+        from threading import Lock
+        count, lock = [0], Lock()
+
+        class SlowRecognition(FakeClient):
+            def recognize(self, *args, **kwargs):
+                with lock:
+                    count[0] += 1
+                    if count[0] == 4:
+                        all_started.set()
+                release.wait(3)
+                return super().recognize(*args, **kwargs)
+
+        voice, _ = self.make(client=SlowRecognition(), agent=False)
+        try:
+            actors = [SimpleNamespace(user_id=uuid4()) for _ in range(4)]
+            jobs = [UUID(voice.jobs.create(actor, WS, silence(1), None)['job_id']) for actor in actors]
+            self.assertTrue(all_started.wait(3))
+            release.set()
+            for actor, key in zip(actors, jobs):
+                voice.jobs.jobs[key]['future'].result(timeout=3)
+                self.assertEqual(voice.jobs.get(actor, WS, key)['status'], 'done')
+        finally:
+            release.set()
+
     def test_custom_duration_is_enforced_before_paid_calls_and_queueing(self):
         voice, db = self.make()
         db.settings['voice_max_seconds'] = 45

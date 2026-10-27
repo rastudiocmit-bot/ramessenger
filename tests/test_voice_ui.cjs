@@ -149,7 +149,7 @@ test('node setup failure stops the stream and allows a fresh microphone attempt'
 test('diagnostics contain only bounded metadata, not audio or message text',async t=>{
   const s=setup(t);await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();const events=s.calls.filter(c=>c.url.endsWith('/diagnostic'));
   assert.equal(events.length,1);const data=events[0].args.data;assert.equal(data.outcome,'complete');assert.ok(data.captured_ms>1000);
-  assert.deepEqual(Object.keys(data).sort(),['attempt_id','outcome','code','stage','audio_state','elapsed_ms','first_frame_ms','captured_ms'].sort());assert.ok(!JSON.stringify(data).includes('Распознанный'));
+  assert.deepEqual(Object.keys(data).sort(),['attempt_id','outcome','code','stage','audio_state','elapsed_ms','first_frame_ms','captured_ms','processing_ms'].sort());assert.ok(data.processing_ms>=0);assert.ok(!JSON.stringify(data).includes('Распознанный'));
 });
 test('background preserves an already recognised ordinary draft',async t=>{
   const s=setup(t);let submits=0;s.$('#chat-compose').addEventListener('submit',event=>{event.preventDefault();submits++;});
@@ -201,6 +201,46 @@ test('background recognition polls to completion and releases the result without
  assert.equal(s.$('#chat-input').value,'');await s.advance(1600);
  assert.equal(s.$('#chat-input').value,'Длинная запись');assert.equal(submits,0);
  assert.ok(s.calls.some(c=>c.url.endsWith('/jobs/job')&&c.args.method==='DELETE'));
+});
+test('recognized words appear before the slower agent completes, then become the final draft',async t=>{
+ let polls=0,submits=0;
+ const s=setup(t,{transcribe:()=>({job_id:'job'}),job:args=>args.method==='DELETE'?null:
+   ++polls===1?{status:'recognized',result:{text:'ну мы придём'}}:{status:'done',result:{text:'Мы придём.'}}});
+ s.$('#chat-compose').addEventListener('submit',()=>submits++);
+ await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();
+ await s.advance(751);
+ assert.equal(s.$('#chat-input').value,'ну мы придём');
+ assert.match(s.$('#chat-voice-label').textContent,/Улучшаем/);
+ assert.equal(s.$('#chat-voice-panel').dataset.phase,'working');
+ await s.advance(751);
+ assert.equal(s.$('#chat-input').value,'Мы придём.');
+ assert.equal(s.$('#chat-voice-panel').hidden,true);
+ assert.equal(submits,0);
+});
+test('a late agent result never overwrites a voice draft edited or already sent by the operator',async t=>{
+ for(const edited of ['Исправлено вручную','']){
+   let polls=0;
+   const s=setup(t,{transcribe:()=>({job_id:'job'}),job:args=>args.method==='DELETE'?null:
+     ++polls===1?{status:'recognized',result:{text:'Сырые слова'}}:{status:'done',result:{text:'Обработанные слова'}}});
+   await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();await s.advance(751);
+   assert.equal(s.$('#chat-input').value,'Сырые слова');
+   s.$('#chat-input').value=edited;s.$('#chat-input').dispatchEvent(new s.w.Event('input',{bubbles:true}));
+   await s.advance(751);
+   assert.equal(s.$('#chat-input').value,edited);
+ }
+});
+test('a failed optional normalization keeps recognized words without asking to resend audio',async t=>{
+ let polls=0;
+ const s=setup(t,{transcribe:()=>({job_id:'job'}),job:args=>{
+   if(args.method==='DELETE')return null;
+   if(++polls===1)return {status:'recognized',result:{text:'Готовый черновик'}};
+   throw new Error('Agent unavailable');
+ }});
+ await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();await s.advance(751);
+ await s.advance(751);
+ assert.equal(s.$('#chat-input').value,'Готовый черновик');
+ assert.equal(s.$('#chat-voice-panel').hidden,true);
+ assert.equal(s.$('#chat-voice-retry').hidden,true);
 });
 test('cancelling an outstanding job discards a late transcript',async t=>{
  const pending=deferred();

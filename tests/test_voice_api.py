@@ -36,7 +36,8 @@ class VoiceApiTest(unittest.TestCase):
         self.assertEqual(ai_api.VoiceDiagnosticInput(**data).code, "no_frames")
         for invalid in [dict(text="private message"), dict(audio="private audio"),
                         dict(code="arbitrary log line"), dict(captured_ms=180001),
-                        dict(elapsed_ms=-1), dict(elapsed_ms=True), dict(first_frame_ms=1.5)]:
+                        dict(elapsed_ms=-1), dict(elapsed_ms=True), dict(first_frame_ms=1.5),
+                        dict(processing_ms=-1), dict(processing_ms="slow")]:
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 ai_api.VoiceDiagnosticInput(**(data | invalid))
 

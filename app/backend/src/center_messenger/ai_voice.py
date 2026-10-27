@@ -508,12 +508,12 @@ class AiVoice:
         # Whitelisted by VoiceDiagnosticInput; no device labels, audio or text.
         VOICE_LOG.info(
             "Voice capture workspace=%s attempt=%s outcome=%s stage=%s code=%s audio_state=%s "
-            "elapsed_ms=%s first_frame_ms=%s captured_ms=%s",
+            "elapsed_ms=%s first_frame_ms=%s captured_ms=%s processing_ms=%s",
             workspace, data["attempt_id"], data["outcome"], data["stage"], data["code"], data["audio_state"],
-            data["elapsed_ms"], data["first_frame_ms"], data["captured_ms"],
+            data["elapsed_ms"], data["first_frame_ms"], data["captured_ms"], data.get("processing_ms"),
         )
 
-    def transcribe(self, actor, workspace, audio, agent_id=None):
+    def transcribe(self, actor, workspace, audio, agent_id=None, *, on_recognized=None):
         try:
             seconds = check_audio(audio)
         except YandexError as failure:
@@ -561,6 +561,11 @@ class AiVoice:
             self._usage(actor, workspace, kind="voice", seconds=seconds, cost=getattr(failure, "billed_cost", 0.0), outcome="error",
                         error=failure.code)
             raise _fail(failure.code, recognizer) from None
+        # The model that polishes the transcript is a second, potentially slow
+        # provider call. Show the actual recognition as soon as it is available;
+        # the final result is still billed and checked by the normal path below.
+        if on_recognized:
+            on_recognized({"text": raw, "seconds": round(seconds, 1)})
         result = {"raw_text": raw, "text": raw, "seconds": round(seconds, 1), "agent": None,
                   "fallback": False, "warning": None}
         tokens, error = (0, 0), None
