@@ -2,12 +2,13 @@
 
 import time
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
 from center_messenger.accounts import Accounts, audit
-from center_messenger.alfa_client import ERRORS, AlfaClient, AlfaError, AlfaSettingsInput
+from center_messenger.alfa_client import ERRORS, AlfaClient, AlfaError, AlfaSettingsInput, retry_seconds
 from center_messenger.auth_security import AuthError, digest
 from center_messenger.connector_vault import ConnectorVault
 
@@ -153,7 +154,10 @@ class AlfaConnections:
                     "changed": changed,
                 },
             )
-            if changed:
+            if same_user:
+                from center_messenger.card_jobs import resume_settings
+                resume_settings(db, workspace, connection, old["version"] + 1)
+            if changed and not same_user:
                 db.execute(
                     text("DELETE FROM alfa_family_details WHERE workspace_id=:w"),
                     {"w": workspace},
@@ -220,10 +224,21 @@ class AlfaConnections:
                             {"h": host_hash, "o": owner},
                         )
                         return
+                    if float(wait) >= deadline-time.monotonic():
+                        raise AlfaError("rate_limited", 429, str(float(wait)))
                 time.sleep(min(float(wait), 0.35))
 
         try:
             yield gate
+        except AlfaError as error:
+            if error.code == "rate_limited":
+                at = datetime.now(UTC)
+                delay = min(retry_seconds(error.retry_after) or 30, (datetime.max.replace(tzinfo=UTC)-at).total_seconds()-1)
+                with self.accounts.transaction() as db:
+                    db.execute(text("UPDATE alfa_request_leases SET next_request_at=greatest(next_request_at,"
+                        "CAST(:until AS timestamptz)) WHERE host_hash=:h AND lease_owner=:o"),
+                        {"h": host_hash, "o": owner, "until": (at+timedelta(seconds=delay)).isoformat()})
+            raise
         finally:
             with self.accounts.transaction() as db:
                 db.execute(

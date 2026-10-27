@@ -9,6 +9,7 @@ from center_messenger.alfa_client import AlfaError
 from center_messenger.alfa_family import pages
 from center_messenger.crm_directory import positive_id, source_date, source_name
 from center_messenger.auth_security import AuthError
+from center_messenger import card_jobs
 
 TOPIC = "crm.customer.groups"
 
@@ -111,12 +112,18 @@ def fetch(client, branch, customer):
 def process(worker, workspace, job):
     from center_messenger.crm_api import DirectoryReader
     from center_messenger.family_cache import _TariffCache
+    paged = None
     try:
         with worker.accounts.transaction(workspace_id=workspace) as db:
             owned = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id AND state='pending' "
                 "AND payload->>'lease_owner'=:owner FOR UPDATE"),
                 {"w": workspace, "id": job["id"], "owner": worker.owner}).scalar_one_or_none()
             if owned is None:
+                return
+            if card_jobs.blocked(db, workspace, job):
+                db.execute(text("UPDATE outbox_events SET payload=payload-'lease_owner'-'lease_until' "
+                    "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:o"),
+                    {"w": workspace, "id": job["id"], "o": worker.owner})
                 return
             job = {**job, "manual": owned.get("manual", False), "force_at": owned.get("force_at")}
             settings = worker.connections._row(db, workspace)
@@ -128,11 +135,13 @@ def process(worker, workspace, job):
                 worker.finish(db, workspace, job)
                 return
             settings, snapshot = dict(settings), dict(snapshot)
+            checkpoint = worker.checkpoint(job, owned, snapshot, snapshot["today"])
         with worker.connections._host_gate(settings["origin"]) as gate:
             credentials = worker.connections.vault.open(workspace, settings["connection_id"], settings["secret_ciphertext"])
             client = worker.connections.client_factory(settings["origin"], settings["api_email"], credentials, gate)
             if not job["force_at"]:
                 client = _TariffCache(client, worker.tariffs, (str(workspace), job["connection"], job["version"]))
+            client = paged = worker.checkpoint_client(client, workspace, job, checkpoint, settings, credentials)
             groups, memberships = fetch(client, int(job["branch"]), int(job["customer"]))
             with worker.accounts.transaction(workspace_id=workspace) as db:
                 db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
@@ -165,18 +174,23 @@ def process(worker, workspace, job):
                     db.execute(text("INSERT INTO alfa_memberships(workspace_id,run_id,branch_id,group_id,external_id,customer_id,b_date,e_date) "
                         "VALUES(:w,:r,:b,:g,:id,:customer,:begin,:end)"),
                         params | {"g": member["group_id"], "id": member["id"], "begin": member["begin"], "end": member["end"]})
-                patch = {"refreshed_at": datetime.now(UTC).isoformat(), "checked_run": str(snapshot["run"]), "groups": len(groups)}
+                patch = {"refreshed_at": checkpoint["started_at"], "checked_run": str(snapshot["run"]), "groups": len(groups)}
                 db.execute(text("UPDATE outbox_events SET payload=payload||CAST(:p AS jsonb) WHERE workspace_id=:w AND id=:id"),
                     {"w": workspace, "id": job["id"], "p": json.dumps(patch)})
                 db.execute(text("UPDATE alfa_settings SET secret_ciphertext=:secret WHERE workspace_id=:w AND version=:v"),
                     {"w": workspace, "v": settings["version"],
                      "secret": worker.connections.vault.seal(workspace, settings["connection_id"], credentials)})
+                card_jobs.clear_verified_denial(db, workspace, job)
                 worker.finish(db, workspace, job)
+    except card_jobs.PageYield:
+        worker.yield_job(workspace, job)
+    except card_jobs.LostCardLease:
+        worker.yield_job(workspace, job)
     except AuthError as error:
-        worker.retry(workspace, job, busy=error.status == 409)
-    except AlfaError:
-        worker.retry(workspace, job)
-    except Exception:
+        worker.retry(workspace, job, error=error, busy=error.status == 409, paged=paged)
+    except AlfaError as error:
+        worker.retry(workspace, job, error=error, paged=paged)
+    except Exception as error:
         import logging
         logging.getLogger(__name__).warning("CRM group links will resume")
-        worker.retry(workspace, job)
+        worker.retry(workspace, job, error=error, paged=paged)

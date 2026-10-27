@@ -13,10 +13,13 @@ from center_messenger.crm_directory import (
 
 
 def pages(client, path, filters, *, maximum=1000):
-    found, seen = [], set()
+    found, seen, expected = [], set(), None
     for page in range(10):
         data = client.call(path, {**filters, "page": page, "pageSize": 500})
         items, total = page_rows(data, page)
+        if expected is not None and total != expected:
+            raise AlfaError("invalid_response")
+        expected = total
         for item in items:
             identifier = positive_id(item["id"])
             if identifier in seen:
@@ -119,7 +122,7 @@ def fetch_family_finance(client, branch_id, customer_id, *, source_customer):
             customer = rows[0]
             break
     if customer is None:
-        raise AlfaError("invalid_response")
+        raise AlfaError("not_found")
     money = source_balance(customer.get("balance"))
     paid = source_lessons(customer.get("paid_lesson_count"))
     raw_subscriptions = pages(

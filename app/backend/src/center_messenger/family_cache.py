@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -15,7 +15,7 @@ from sqlalchemy import text
 from center_messenger.alfa_client import AlfaError
 from center_messenger.alfa_family import fetch_family_finance, fetch_family_lessons, merge_family_lessons
 from center_messenger.auth_security import AuthError
-from center_messenger import group_links, card_preference
+from center_messenger import group_links, card_preference, card_jobs
 
 TOPIC = "crm.card.refresh"
 LESSONS = "crm.card.lessons"
@@ -98,12 +98,28 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
     contacts = list(contacts or [contact])
     sources = [card for student in cards for card in student["cards"]]
     times = [datetime.fromisoformat(card["refreshed_at"]) for card in sources if card.get("refreshed_at")]
-    jobs = list(db.execute(text("SELECT payload||jsonb_build_object('topic',topic) FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) "
+    jobs = list(db.execute(text("SELECT (payload-'checkpoint')||jsonb_build_object('topic',topic) FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) "
         "AND state='pending' AND payload->>'connection'=:conn AND payload->>'version'=:v AND payload->>'contact'=ANY(CAST(:contacts AS text[]))"),
         {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
          "conn": str(connection), "v": str(version), "contacts": list(map(str, contacts))}).scalars())
     keys = {(card["branch_id"], card["id"]) for card in sources}
     jobs = [job for job in jobs if (job["branch"], job["customer"]) in keys]
+    active_blocks = card_jobs.blocks(db, workspace, connection, version) if jobs else []
+    jobs = [card_jobs.effective_job(job, active_blocks) for job in jobs]
+    runnable = [job for job in jobs if not job.get("paused")]
+    now = datetime.now(UTC)
+    refreshing = any((job.get("lease_until") and datetime.fromisoformat(job["lease_until"])>now) or
+                     (job.get("available_at") and datetime.fromisoformat(job["available_at"])<=now) for job in runnable)
+    retries = [job["available_at"] for job in runnable if job.get("available_at") and job.get("error")]
+    failures = [{"code": job["error"], "http_status": job.get("http_status"), "cause": job.get("cause"),
+                 "operation": job["topic"], "branch_id": job["branch"], "customer_id": job["customer"],
+                 "stage": job.get("stage"), "page": job.get("page"), "paused": bool(job.get("paused")),
+                 "retry_at": job.get("available_at"), "text": (
+                     "Не удалось обновить баланс и абонементы. " if job["topic"] == TOPIC else
+                     "Не удалось обновить группы. " if job["topic"] == GROUPS else
+                     "Не удалось обновить занятия. Баланс и абонементы обновляются отдельно. ")
+                     + card_jobs.LABELS.get(job["error"], card_jobs.LABELS["crm_unavailable"])}
+                for job in jobs if job.get("error")]
     ready = len(times) == len(sources) and bool(sources)
     mapping_pending = any(card.get("needs_mapping_refresh") for card in sources)
     updated = min(times) if ready else None
@@ -115,7 +131,8 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
     automatic = card_preference.is_pending(db, workspace, snapshot, contacts) if snapshot else db.execute(text(
         "SELECT EXISTS(SELECT 1 FROM conversations WHERE workspace_id=:w AND contact_id=:c AND needs_reply AND kind='direct')"),
         {"w": workspace, "c": contact}).scalar_one()
-    return {"auto_refresh": bool(automatic), "ready": ready, "refreshing": bool(jobs), "updated_at": updated.isoformat() if updated else None,
+    return {"auto_refresh": bool(automatic), "ready": ready, "refreshing": bool(refreshing), "pending": bool(jobs), "updated_at": updated.isoformat() if updated else None,
+            "paused": any(job.get("paused") for job in jobs), "failures": failures,
             "next_refresh_at": (updated + INTERVAL).isoformat() if updated else None,
             "interval_minutes": 30, "sources": len(sources), "cached_sources": len(times),
             "mapping_pending": mapping_pending,
@@ -124,24 +141,19 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
             "lessons_history_interval_hours": 24,
             "groups_updated_at": groups_at.isoformat() if groups_at else None,
             "groups_interval_hours": 6,
-            "groups_refreshing": any(job["topic"] == GROUPS for job in jobs),
-            "lessons_refreshing": any(job["topic"] == LESSONS for job in jobs),
-            "lessons_history_refreshing": any(job["topic"] == HISTORY for job in jobs),
+            "groups_refreshing": any(job["topic"] == GROUPS for job in runnable),
+            "lessons_refreshing": any(job["topic"] == LESSONS for job in runnable),
+            "lessons_history_refreshing": any(job["topic"] == HISTORY for job in runnable),
             "overdue": not ready or mapping_pending or updated + INTERVAL <= datetime.now(UTC)
                        or lessons_at is None or lessons_at + INTERVAL <= datetime.now(UTC),
-            "retry_at": min((job["available_at"] for job in jobs), default=None),
-            "error": "Не удалось обновить баланс и абонементы. Сохранены последние полученные сведения."
-                     if any(job.get("error") and job["topic"] == TOPIC for job in jobs) else
-                     "Не удалось обновить занятия. Баланс и абонементы обновляются отдельно."
-                     if any(job.get("error") and job["topic"] != GROUPS for job in jobs) else
-                     "Не удалось обновить группы. Сохранены последние подтверждённые связи."
-                     if any(job.get("error") for job in jobs) else None}
+            "retry_at": min(retries, default=None),
+            "error": failures[0]["text"] if failures else None}
 
 
 def current(db, workspace, connection):
     """Only a leased, current-source job can be displayed as processing now."""
     row = db.execute(text("""
-      SELECT e.topic,e.payload,c.name AS student_name,coalesce(nullif(c.legal_name,''),d.display_name,c.name) AS name
+      SELECT e.topic,e.payload-'checkpoint' AS payload,c.name AS student_name,coalesce(nullif(c.legal_name,''),d.display_name,c.name) AS name
       FROM outbox_events e JOIN alfa_settings s ON s.workspace_id=e.workspace_id
         AND s.connection_id=:conn AND s.secret_ciphertext IS NOT NULL
       JOIN alfa_sync_control sc ON sc.workspace_id=s.workspace_id AND sc.connection_id=s.connection_id
@@ -162,6 +174,7 @@ def current(db, workspace, connection):
     return {"name": row["name"], "student_name": row["student_name"],
             "customer_id": job["customer"], "branch_id": job["branch"],
             "started_at": job.get("started_at"), "lease_until": job["lease_until"],
+            "stage": job.get("stage"), "page": job.get("page"),
             "manual": bool(job.get("manual")), "operation": {
                 TOPIC: "reading_finance", LESSONS: "reading_recent_lessons", HISTORY: "reading_lesson_history", GROUPS: "reading_customer_groups"
             }[row["topic"]]}
@@ -191,7 +204,7 @@ def progress(db, workspace, connection, snapshot):
           AND c.contact_id IN (SELECT contact_id FROM pending_families)
         GROUP BY c.contact_id
       ), jobs AS (
-        SELECT e.payload FROM outbox_events e JOIN alfa_settings s ON s.workspace_id=e.workspace_id
+        SELECT e.payload-'checkpoint' AS payload FROM outbox_events e JOIN alfa_settings s ON s.workspace_id=e.workspace_id
           AND s.connection_id=:conn AND s.secret_ciphertext IS NOT NULL
         WHERE e.workspace_id=:w AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending'
           AND e.payload->>'connection'=CAST(:conn AS text) AND e.payload->>'version'=s.version::text
@@ -248,21 +261,72 @@ class FamilyCacheWorker:
                 enqueue(db, workspace, snapshot)
 
     def claim(self, workspace):
+        quota = (TOPIC, LESSONS, TOPIC, HISTORY, GROUPS)
+        turns = getattr(self, "_turns", {})
+        preferred = quota[turns.get(workspace, 0) % len(quota)]
         with self.accounts.transaction(workspace_id=workspace) as db:
-            row = db.execute(text("SELECT id,topic,payload FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) "
-                "AND state='pending' AND (payload->>'available_at')::timestamptz<=now() "
-                "AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now() "
-                "ORDER BY (payload->>'manual')::boolean DESC,CASE topic WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :history THEN 2 ELSE 3 END,"
-                "(payload->>'due_at')::timestamptz,id LIMIT 1 FOR UPDATE SKIP LOCKED"),
-                {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS}).mappings().one_or_none()
+            row = db.execute(text("SELECT e.id,e.topic,e.payload FROM outbox_events e WHERE e.workspace_id=:w "
+                "AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending' AND ("
+                "(e.payload->>'available_at')::timestamptz<=now() OR (e.payload->>'error' IN "
+                "('access_denied','not_found','invalid_response','crm_unavailable') AND "
+                "(e.payload->>'force_at')::timestamptz>(e.payload->>'failed_at')::timestamptz)) "
+                "AND coalesce((e.payload->>'lease_until')::timestamptz,'epoch')<=now() AND NOT " + card_jobs.block_sql() +
+                " ORDER BY (coalesce((e.payload->>'served_at')::timestamptz,e.created_at)<now()-interval '15 minutes') DESC,"
+                "coalesce((e.payload->>'manual')::boolean,false) DESC,(e.topic=:preferred) DESC,"
+                "CASE e.topic WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :history THEN 2 ELSE 3 END,"
+                "coalesce((e.payload->>'served_at')::timestamptz,e.created_at),e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED"),
+                {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY,
+                 "groups": GROUPS, "preferred": preferred}).mappings().one_or_none()
             if not row:
                 return None
+            turns[workspace] = turns.get(workspace, 0) + 1
+            self._turns = turns
             job = dict(row["payload"])
             job.update(lease_owner=self.owner, lease_until=(datetime.now(UTC) + LEASE).isoformat(),
-                       started_at=datetime.now(UTC).isoformat())
+                       started_at=datetime.now(UTC).isoformat(), served_at=datetime.now(UTC).isoformat())
             db.execute(text("UPDATE outbox_events SET payload=CAST(:p AS jsonb) WHERE workspace_id=:w AND id=:id"),
                        {"w": workspace, "id": row["id"], "p": json.dumps(job)})
             return {**job, "id": row["id"], "topic": row["topic"]}
+
+    def checkpoint(self, job, owned, snapshot, today):
+        scope = [job["connection"], job["version"], str(snapshot["run"]), job["branch"],
+                 job["customer"], job["contact"], job["student"], job["topic"], job.get("force_at")]
+        saved = owned.get("checkpoint") or {}
+        if saved.get("scope") != scope:
+            saved = {"scope": scope, "today": today.isoformat(), "started_at": datetime.now(UTC).isoformat(),
+                     "responses": {}, "pages": 0}
+        return saved
+
+    def checkpoint_client(self, client, workspace, job, checkpoint, settings, credentials):
+        def persist(value):
+            with self.accounts.transaction(workspace_id=workspace) as db:
+                db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
+                current = self.connections._row(db, workspace)
+                from center_messenger.crm_api import DirectoryReader
+                snapshot = DirectoryReader._published(db, workspace)
+                if (not current or not current["secret_ciphertext"] or current["version"] != job["version"]
+                    or str(current["connection_id"]) != job["connection"] or not snapshot
+                    or str(snapshot["run"]) != checkpoint["scope"][2] or not self._source(db, workspace, job)):
+                    raise card_jobs.LostCardLease()
+                written = db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object("
+                    "'checkpoint',CAST(:p AS jsonb),'stage',CAST(:stage AS text),'page',CAST(:page AS integer)) WHERE workspace_id=:w AND id=:id "
+                    "AND state='pending' AND payload->>'lease_owner'=:owner "
+                    "AND (payload->>'lease_until')::timestamptz>now() RETURNING id"),
+                    {"w": workspace, "id": job["id"], "owner": self.owner, "p": json.dumps(value),
+                     "stage": value.get("stage", "prepare"), "page": value.get("page")}).scalar_one_or_none()
+                if not written:
+                    raise card_jobs.LostCardLease()
+                db.execute(text("UPDATE alfa_settings SET secret_ciphertext=:s WHERE workspace_id=:w AND version=:v"),
+                    {"w": workspace, "v": job["version"],
+                     "s": self.connections.vault.seal(workspace, settings["connection_id"], credentials)})
+        return card_jobs.CheckpointClient(client, checkpoint, persist)
+
+    def yield_job(self, workspace, job):
+        with self.accounts.transaction(workspace_id=workspace) as db:
+            db.execute(text("UPDATE outbox_events SET payload=(payload-'lease_owner'-'lease_until'-'error'-'paused')"
+                "||jsonb_build_object('available_at',now()) WHERE workspace_id=:w AND id=:id AND state='pending' "
+                "AND payload->>'lease_owner'=:owner AND (payload->>'lease_until')::timestamptz>now()"),
+                {"w": workspace, "id": job["id"], "owner": self.owner})
 
     def _source(self, db, workspace, job):
         return db.execute(text("SELECT c.contact_id,c.student_id,c.status,c.branch_id,c.external_id AS id "
@@ -279,12 +343,18 @@ class FamilyCacheWorker:
             return group_links.process(self, workspace, job)
         # Short transactions before/after IO. Workspace/settings changes fence
         # publication, and a stale worker can never publish through a stolen lease.
+        paged = None
         try:
             with self.accounts.transaction(workspace_id=workspace) as db:
                 owned = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id "
                     "AND state='pending' AND payload->>'lease_owner'=:owner FOR UPDATE"),
                     {"w": workspace, "id": job["id"], "owner": self.owner}).scalar_one_or_none()
                 if owned is None:
+                    return
+                if card_jobs.blocked(db, workspace, job):
+                    db.execute(text("UPDATE outbox_events SET payload=payload-'lease_owner'-'lease_until' "
+                        "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:o"),
+                        {"w": workspace, "id": job["id"], "o": self.owner})
                     return
                 # Explicit opening can promote a queued automatic request,
                 # including after the last pending message has been answered.
@@ -318,11 +388,14 @@ class FamilyCacheWorker:
                     return
                 today = db.execute(text("SELECT CAST(now() AT TIME ZONE timezone AS date) FROM workspaces WHERE id=:w"),
                                    {"w": workspace}).scalar_one()
-            started_at = datetime.now(UTC)
+                checkpoint = self.checkpoint(job, owned, snapshot, today)
+                today = date.fromisoformat(checkpoint["today"])
+            started_at = datetime.fromisoformat(checkpoint["started_at"])
             with self.connections._host_gate(settings["origin"]) as gate:
                 credentials = self.connections.vault.open(workspace, settings["connection_id"], settings["secret_ciphertext"])
                 client = self.connections.client_factory(settings["origin"], settings["api_email"], credentials, gate)
                 client = _TariffCache(client, self.tariffs, (str(workspace), job["connection"], job["version"]))
+                client = paged = self.checkpoint_client(client, workspace, job, checkpoint, settings, credentials)
                 source["branch_id"] = int(job["branch"])
                 if job["topic"] == TOPIC:
                     data = fetch_family_finance(client, int(job["branch"]), int(job["customer"]), source_customer=source)
@@ -333,28 +406,31 @@ class FamilyCacheWorker:
                     # Same lock order as existing settings/message writers.
                     db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
                     current = self.connections._row(db, workspace)
+                    published = DirectoryReader._published(db, workspace)
                     own = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id AND "
                         "state='pending' AND payload->>'lease_owner'=:owner AND (payload->>'lease_until')::timestamptz>now() "
                         "FOR UPDATE"), {"w": workspace, "id": job["id"], "owner": self.owner}).scalar_one_or_none()
                     if own is None:
                         return
-                    if (not current or current["version"] != settings["version"] or
-                        str(current["connection_id"]) != job["connection"] or not self._source(db, workspace, job)):
+                    if (not current or not current["secret_ciphertext"] or current["version"] != settings["version"] or
+                        str(current["connection_id"]) != job["connection"] or not published or published["run"] != snapshot["run"]
+                        or not self._source(db, workspace, job)):
                         self.finish(db, workspace, job)
                         return
                     params = {"w": workspace, "conn": job["connection"], "b": int(job["branch"]),
-                              "id": int(job["customer"]), "v": job["version"]}
+                              "id": int(job["customer"]), "v": job["version"], "observed": started_at}
                     if job["topic"] == TOPIC:
                         db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,"
-                            "settings_version,balance,paid_lesson_count,subscriptions) VALUES "
-                            "(:w,:conn,:b,:id,:v,:balance,:paid,CAST(:subs AS jsonb)) "
+                            "settings_version,balance,paid_lesson_count,subscriptions,refreshed_at) VALUES "
+                            "(:w,:conn,:b,:id,:v,:balance,:paid,CAST(:subs AS jsonb),:observed) "
                             "ON CONFLICT (workspace_id,connection_id,branch_id,customer_id) DO UPDATE SET "
                             "balance=EXCLUDED.balance,paid_lesson_count=EXCLUDED.paid_lesson_count,"
-                            "subscriptions=EXCLUDED.subscriptions,refreshed_at=now(),"
+                            "subscriptions=EXCLUDED.subscriptions,refreshed_at=EXCLUDED.refreshed_at,"
                             "lessons=CASE WHEN alfa_family_details.settings_version=:v THEN alfa_family_details.lessons ELSE '[]'::jsonb END,"
                             "lessons_refreshed_at=CASE WHEN alfa_family_details.settings_version=:v THEN alfa_family_details.lessons_refreshed_at END,"
                             "lessons_full_refreshed_at=CASE WHEN alfa_family_details.settings_version=:v THEN alfa_family_details.lessons_full_refreshed_at END,"
-                            "settings_version=EXCLUDED.settings_version"),
+                            "settings_version=EXCLUDED.settings_version WHERE alfa_family_details.settings_version<>:v "
+                            "OR alfa_family_details.refreshed_at<=:observed"),
                             params | {"balance": data["balance"], "paid": data["paid_lesson_count"], "subs": json.dumps(data["subscriptions"])})
                         from center_messenger.crm_api import DirectoryReader
                         snapshot = DirectoryReader._published(db, workspace)
@@ -368,39 +444,56 @@ class FamilyCacheWorker:
                         if cached is not None and (cached["lessons_refreshed_at"] is None or cached["lessons_refreshed_at"] <= started_at):
                             incoming = [dict(item, observed_at=started_at.isoformat()) for item in data]
                             lessons = merge_family_lessons(cached["lessons"], incoming, today=today, full=job["topic"] == HISTORY)
-                            db.execute(text("UPDATE alfa_family_details SET lessons=CAST(:data AS jsonb),lessons_refreshed_at=now(),"
-                                "lessons_full_refreshed_at=CASE WHEN :full THEN now() ELSE lessons_full_refreshed_at END "
+                            db.execute(text("UPDATE alfa_family_details SET lessons=CAST(:data AS jsonb),lessons_refreshed_at=:observed,"
+                                "lessons_full_refreshed_at=CASE WHEN :full THEN :observed ELSE lessons_full_refreshed_at END "
                                 "WHERE workspace_id=:w AND connection_id=:conn AND branch_id=:b AND customer_id=:id AND settings_version=:v"),
                                 params | {"data": json.dumps(lessons), "full": job["topic"] == HISTORY})
                     db.execute(text("UPDATE alfa_settings SET secret_ciphertext=:secret WHERE workspace_id=:w AND version=:v"),
                         {"w": workspace, "v": settings["version"], "secret": self.connections.vault.seal(workspace, settings["connection_id"], credentials)})
+                    card_jobs.clear_verified_denial(db, workspace, job)
                     self.finish(db, workspace, job)
+        except card_jobs.PageYield:
+            self.yield_job(workspace, job)
+        except card_jobs.LostCardLease:
+            self.yield_job(workspace, job)
         except AuthError as error:
-            self.retry(workspace, job, busy=error.status == 409)
-        except AlfaError:
-            self.retry(workspace, job)
-        except Exception:
+            self.retry(workspace, job, error=error, busy=error.status == 409, paged=paged)
+        except AlfaError as error:
+            self.retry(workspace, job, error=error, paged=paged)
+        except Exception as error:
             # Never log source/customer details or credentials.
-            logging.getLogger(__name__).warning("CRM card refresh will resume")
-            self.retry(workspace, job)
+            logging.getLogger(__name__).warning("CRM card refresh will resume exception=%s", type(error).__name__)
+            self.retry(workspace, job, error=error, paged=paged)
 
     def finish(self, db, workspace, job):
         # A force refresh requested during IO must survive this worker's finish.
         db.execute(text("UPDATE outbox_events SET state=CASE WHEN (payload->>'force_at') IS DISTINCT FROM CAST(:force AS text) "
-            "THEN 'pending' ELSE 'published' END,payload=payload-'lease_owner'-'lease_until'-'error' "
-            "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:owner"),
+            "THEN 'pending' ELSE 'published' END,payload=(payload-'lease_owner'-'lease_until'-'error'-'checkpoint' "
+            "-'paused'-'cause'-'http_status'-'failed_at'-'stage'-'page')||jsonb_build_object('available_at',now(),'attempts',0) "
+            "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:owner "
+            "AND (payload->>'lease_until')::timestamptz>now()"),
             {"w": workspace, "id": job["id"], "owner": self.owner, "force": job.get("force_at")})
 
-    def retry(self, workspace, job, *, busy=False):
-        attempts = int(job.get("attempts", 0)) + (0 if busy else 1)
-        delay = 5 if busy else min(1800, 30 * 2 ** min(attempts - 1, 6))
-        patch = {"attempts": attempts, "available_at": (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()}
-        if not busy:
-            patch["error"] = "crm_unavailable"
+    def retry(self, workspace, job, *, busy=False, error=None, paged=None):
+        patch, scope = card_jobs.failure(error, job.get("attempts", 0), busy=busy)
+        code = patch["error"]
+        if busy:
+            patch.pop("error")
+            patch["cause"] = "busy"
+        patch.update(stage=paged.stage if paged else "prepare", page=paged.page if paged else None)
         with self.accounts.transaction(workspace_id=workspace) as db:
-            db.execute(text("UPDATE outbox_events SET payload=(payload-'lease_owner'-'lease_until')||CAST(:p AS jsonb) "
-                "WHERE workspace_id=:w AND id=:id AND state='pending' AND payload->>'lease_owner'=:owner"),
-                {"w": workspace, "id": job["id"], "owner": self.owner, "p": json.dumps(patch)})
+            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
+            settings = self.connections._row(db, workspace)
+            if not settings or settings["version"] != job["version"] or str(settings["connection_id"]) != job["connection"]:
+                self.finish(db, workspace, job)
+                return
+            written = db.execute(text("UPDATE outbox_events SET payload=(payload-'lease_owner'-'lease_until'-'error' "
+                + ("-'checkpoint' " if code in {"not_found", "invalid_response"} else "") + ")||CAST(:p AS jsonb) "
+                "WHERE workspace_id=:w AND id=:id AND state='pending' AND payload->>'lease_owner'=:owner "
+                "AND (payload->>'lease_until')::timestamptz>now() RETURNING id"),
+                {"w": workspace, "id": job["id"], "owner": self.owner, "p": json.dumps(patch)}).scalar_one_or_none()
+            if written:
+                card_jobs.save_block(db, workspace, job, patch, scope)
 
     def run_next(self):
         """One workspace/job; called by the shared scheduler, without a loop."""

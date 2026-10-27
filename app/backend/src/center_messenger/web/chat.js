@@ -1365,7 +1365,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const history = "lessons_history_updated_at" in info ? info.lessons_history_updated_at ? `Год занятий проверен ${date(info.lessons_history_updated_at)}` : "Год занятий: ожидает проверки" : "";
       const groups = "groups_updated_at" in info ? info.groups_updated_at ? `Группы: ${date(info.groups_updated_at)}` : info.groups_refreshing ? "Группы: проверяем на сервере" : "Группы: из справочника CRM" : "";
       const status = info.refreshing ? "Обновляем на сервере" : info.overdue ? "Ожидает обновления" : info.auto_refresh ? "Обновляем каждые 30 минут" : "Обновляем при открытии карточки";
-      const brief = info.error ? "есть ошибка обновления" : info.refreshing ? "обновляем" : info.overdue ? "ждёт обновления" : info.auto_refresh ? "каждые 30 мин" : "при открытии";
+      const issue = info.failures?.[0]?.code;
+      const brief = issue === "credentials_required" ? "проверьте ключ CRM" : issue === "access_denied" ? "ограничен доступ CRM" : issue === "not_found" ? "клиент не найден в CRM" : info.retry_at && info.error ? `повтор ${date(info.retry_at)}` : info.error ? "есть ошибка обновления" : info.refreshing ? "обновляем" : info.overdue ? "ждёт обновления" : info.auto_refresh ? "каждые 30 мин" : "при открытии";
       familySync(`${info.updated_at ? `Обновлено ${date(info.updated_at)}` : "Загружаем карточку"} · ${brief}`,
         [updated, lessons, history, groups, status, info.error].filter(Boolean).join(" · "));
       detailsDialog.classList.toggle("is-refreshing", Boolean(info.refreshing));
@@ -1510,7 +1511,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   function watchFamily(conversation, contact, epoch, gen, seq) {
     clearTimeout(familyTimer);
-    if (!family?.cache || (!family.cache.refreshing && !family.cache.auto_refresh)) return;
+    if (!family?.cache || (!family.cache.pending && !family.cache.refreshing && !family.cache.auto_refresh)) return;
     // Poll prepared facts only; the server owns CRM work and the 30-minute clock.
     const delay = family.cache.refreshing ? (family.cache.error ? 30000 : 3000) : 60000;
     familyTimer = setTimeout(async () => {
