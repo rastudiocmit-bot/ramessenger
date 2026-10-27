@@ -5,12 +5,12 @@
   <title>Личный кабинет · РазвивайсяMessenger</title>
   <script src="/assets/appearance.js?v=2.0"></script>
   <link rel="stylesheet" href="/assets/app.css?v=0.8.36">
-  <link rel="stylesheet" href="/assets/cabinet.css?v=2.28.2">
+  <link rel="stylesheet" href="/assets/cabinet.css?v=2.29.1">
   <script src="/assets/icons.js?v=1.3" defer=""></script><script src="/assets/directory.js?v=0.9.1" defer=""></script>
   <script src="/assets/chat.js?v=0.15.9" defer=""></script><script src="/assets/voice.js?v=1.7.0" defer=""></script><script src="/assets/ai.js?v=1.4.0" defer=""></script>
   <script src="/assets/alfa-progress.js?v=0.12.3" defer=""></script>
-  <script src="/assets/cabinet.js?v=2.8" defer=""></script><script src="/assets/notices.js?v=1.2" defer=""></script>
-<script src="/assets/tasks.js?v=1.2" defer=""></script><script src="/assets/app.js?v=0.15.0" defer=""></script>
+  <script src="/assets/cabinet.js?v=2.8" defer=""></script><script src="/assets/notices.js?v=1.3" defer=""></script>
+<script src="/assets/tasks.js?v=1.4" defer=""></script><script src="/assets/app.js?v=0.15.0" defer=""></script>
 </head>
 <body>
   <div id="loading" class="loading" role="status"><span class="spinner"></span>Открываем кабинет…</div>
@@ -223,33 +223,34 @@
     <p class="form-note">Для контакта без связи с CRM используется сигнал лида. История сообщений и токены не сохраняются в хранилище браузера.</p>
   </dialog>
   <dialog id="task-settings-dialog" class="live-sheet task-settings-sheet" aria-labelledby="task-settings-title">
-    <div class="dialog-heading"><h2 id="task-settings-title">Настройки задач</h2><button class="icon-button" data-close="task-settings-dialog" aria-label="Закрыть" type="button">×</button></div>
+    <div class="task-settings-head"><h2 id="task-settings-title">Настройки задач</h2><button class="iconbtn plain" data-close="task-settings-dialog" aria-label="Закрыть" type="button" data-icon="close"></button></div>
     <form class="task-settings-form">
-      <h3 class="appearance-section-title">Долгое нажатие в переписке</h3>
-      <label class="check-label"><input type="radio" name="press" value="split">На сообщении — меню, на фоне — голос</label>
-      <label class="check-label"><input type="radio" name="press" value="voice">Везде голос; меню — двойным нажатием на сообщение</label>
-      <label class="check-label"><input type="radio" name="press" value="menu">Везде меню; голос — только кнопкой микрофона</label>
-      <h3 class="appearance-section-title">Голосовая задача</h3>
-      <label class="check-label"><input type="radio" name="voice_task" value="instant">Сразу создавать, с отменой</label>
-      <label class="check-label"><input type="radio" name="voice_task" value="confirm">Сначала показать окно</label>
-      <p class="form-note">Во время записи уведите палец влево, на «Задача», или начните фразу со слова «Задача» — текст станет задачей и не уйдёт клиенту.</p>
-      <h3 class="appearance-section-title">Напоминания и подсказки</h3>
-      <label class="check-label"><input type="checkbox" name="reminders">Напоминания о задачах в срок</label>
-      <label class="check-label"><input type="checkbox" name="hints">Подсказки AI об обещаниях</label>
-      <label class="check-label"><input type="checkbox" name="digest">Сводка в начале и в конце рабочего дня</label>
-      <p class="form-note">Напоминания не зависят от «Всплывающих уведомлений»: если выключить служебные уведомления, задачи всё равно напомнят о себе.</p>
-      <div data-studio="">
-        <h3 class="appearance-section-title">Рабочий день студии</h3>
-        <div class="task-hours"><label class="fld">Начало<input type="time" name="day_start" required=""></label><label class="fld">Конец<input type="time" name="day_end" required=""></label></div>
+      <section class="task-set"><h3>Долгое нажатие в переписке</h3><fieldset class="task-card-set"><legend class="sr">Долгое нажатие</legend>
+        <label class="task-opt"><input type="radio" name="press" value="split"><span><strong>На сообщении — меню, на фоне — голос</strong><small>Рекомендуем. «Сделать задачей» всегда под пальцем.</small></span></label>
+        <label class="task-opt"><input type="radio" name="press" value="voice"><span><strong>Везде голос</strong><small>Меню сообщения — по двойному нажатию.</small></span></label>
+        <label class="task-opt"><input type="radio" name="press" value="menu"><span><strong>Везде меню</strong><small>Голос — только кнопкой микрофона.</small></span></label></fieldset></section>
+      <section class="task-set"><h3>Голосовая задача</h3><fieldset class="task-card-set"><legend class="sr">Голосовая задача</legend>
+        <label class="task-opt"><input type="radio" name="voice_task" value="instant"><span><strong>Сразу создавать</strong><small>Палец влево при записи — задача готова; в капсуле можно отменить.</small></span></label>
+        <label class="task-opt"><input type="radio" name="voice_task" value="confirm"><span><strong>Сначала показать окно</strong><small>Проверить текст, срок и сообщения перед созданием.</small></span></label></fieldset></section>
+      <section class="task-set" data-studio=""><h3>Рабочий день студии</h3><div class="task-card-set pad">
+        <div class="task-hours"><label class="task-field"><span>Начало</span><input type="time" name="day_start" required=""></label><label class="task-field"><span>Конец</span><input type="time" name="day_end" required=""></label></div>
         <div class="task-days" role="group" aria-label="Рабочие дни"><label><input type="checkbox" name="work_days" value="1"><span>Пн</span></label><label><input type="checkbox" name="work_days" value="2"><span>Вт</span></label><label><input type="checkbox" name="work_days" value="3"><span>Ср</span></label><label><input type="checkbox" name="work_days" value="4"><span>Чт</span></label><label><input type="checkbox" name="work_days" value="5"><span>Пт</span></label><label><input type="checkbox" name="work_days" value="6"><span>Сб</span></label><label><input type="checkbox" name="work_days" value="7"><span>Вс</span></label></div>
-        <label class="fld">Срок по умолчанию<select name="default_due"><option value="end_of_day">До конца дня</option><option value="two_hours">Через 2 часа</option><option value="tomorrow_morning">Завтра утром</option></select></label>
-        <label class="fld">Кто видит задачи<select name="visibility"><option value="all">Все задачи студии</option><option value="own">Только свои (администратор видит все)</option></select></label>
-        <label class="check-label"><input type="checkbox" name="alfa_copy">Копировать задачи в AlfaCRM</label>
-        <p class="form-note">Копирование в AlfaCRM заработает на третьем этапе; настройку можно выбрать заранее.</p>
-      </div>
+        <p class="form-note">От этого считаются «до конца дня» и «завтра утром». Напоминания вне рабочего дня ждут утра.</p></div></section>
+      <section class="task-set" data-studio=""><h3>Срок по умолчанию</h3><div class="task-card-set pad">
+        <div class="task-seg" role="radiogroup" aria-label="Срок по умолчанию"><label><input type="radio" name="default_due" value="end_of_day"><span>До конца дня</span></label><label><input type="radio" name="default_due" value="two_hours"><span>Через 2 часа</span></label><label><input type="radio" name="default_due" value="tomorrow_morning"><span>Завтра утром</span></label></div>
+        <p class="form-note">Если в переписке назван срок («до пятницы»), он важнее.</p></div></section>
+      <section class="task-set" data-studio=""><h3>Кто видит задачи</h3><fieldset class="task-card-set"><legend class="sr">Кто видит задачи</legend>
+        <label class="task-opt"><input type="radio" name="visibility" value="all"><span><strong>Все задачи студии</strong><small>Любой оператор подхватит задачу коллеги. Свои — во вкладке «Мои».</small></span></label>
+        <label class="task-opt"><input type="radio" name="visibility" value="own"><span><strong>Только свои</strong><small>Администратор всё равно видит все. Задачи открытого диалога видны всем.</small></span></label></fieldset></section>
+      <section class="task-set" data-studio=""><h3>AlfaCRM</h3><div class="task-card-set">
+        <label class="task-opt is-switch"><span><strong>Копировать задачи в AlfaCRM</strong><small>Пока недоступно: подключение к AlfaCRM работает только на чтение.</small></span><span class="sw"><input type="checkbox" name="alfa_copy" aria-label="Копировать задачи в AlfaCRM"><span></span></span></label></div></section>
+      <section class="task-set"><h3>Напоминания и подсказки</h3><div class="task-card-set">
+        <label class="task-opt is-switch"><span><strong>Напоминания о задачах</strong><small>Капсула в срок; не зависит от служебных уведомлений.</small></span><span class="sw"><input type="checkbox" name="reminders" aria-label="Напоминания о задачах"><span></span></span></label>
+        <label class="task-opt is-switch"><span><strong>Подсказки AI об обещаниях</strong><small>«Уточню», «проверю» → предложить задачу.</small></span><span class="sw"><input type="checkbox" name="hints" aria-label="Подсказки AI об обещаниях"><span></span></span></label>
+        <label class="task-opt is-switch"><span><strong>Сводка в начале и конце дня</strong><small>«Сегодня 3 задачи», «осталось 2 — перенести?»</small></span><span class="sw"><input type="checkbox" name="digest" aria-label="Сводка в начале и конце дня"><span></span></span></label></div></section>
       <p class="form-note task-studio-note" hidden="">Рабочий день, срок по умолчанию, видимость и AlfaCRM меняет администратор.</p>
       <p class="notice error task-settings-error" role="alert" hidden=""></p>
-      <button class="btn primary full" type="submit">Сохранить</button>
+      <button class="btn primary full task-settings-save" type="submit">Сохранить</button>
     </form>
   </dialog>
   <dialog id="member-sections-dialog" class="live-sheet"><div class="dialog-heading member-head"><span id="member-sections-avatar" class="avatar" aria-hidden="true"></span><div class="member-head-text"><h2 id="member-sections-name">Права сотрудника</h2><small id="member-sections-role"></small></div><button class="icon-button" data-close="member-sections-dialog" aria-label="Закрыть" type="button">×</button></div><p class="muted">Какие разделы кабинета открывать этому сотруднику.</p><p class="notice error" id="member-sections-error" role="alert" hidden=""></p><form id="member-sections-form"><div id="member-sections-checks" class="member-sections member-sections-dialog"></div><p class="form-note">Сотрудник увидит только выданные ему разделы. Профиль и личные настройки доступны отдельно.</p><div class="dialog-actions"><button class="secondary btn sec" type="button" data-close="member-sections-dialog">Отмена</button><button class="primary btn" type="submit">Сохранить</button></div></form></dialog>

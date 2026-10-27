@@ -97,7 +97,7 @@ async function longPress(page, selector) {
       await page.locator('#tabbar [data-pane="tasks"]').tap();
       await page.locator('#pane-tasks .task-settings').tap();
       await page.waitForSelector('#task-settings-dialog[open]');
-      assert.equal(await page.locator('#task-settings-dialog [data-studio] select[name="visibility"]').isDisabled(), true, 'operators cannot change studio settings');
+      assert.equal(await page.locator('#task-settings-dialog input[name="visibility"]').first().isDisabled(), true, 'operators cannot change studio settings');
       await page.locator('#task-settings-dialog input[name="press"][value="menu"]').check();
       await settle(page); await save(page, 'tasks-settings');
       await page.locator('#task-settings-dialog [type="submit"]').tap();
@@ -162,12 +162,16 @@ async function longPress(page, selector) {
       await page.waitForSelector('#task-strip:not([hidden])');
       const created = data.mutations.find(m => m.method === 'POST' && m.path.endsWith('/tasks'));
       assert.equal(created.body.origin, 'ai_hint'); assert.deepEqual(created.body.message_ids, ['m4']);
-      // Done from the strip → «Ответить клиенту» puts the model's draft into the field.
+      // Done from the strip → «Задача выполнена» with the model's reply; the operator sends it.
       await page.locator('#task-strip .task-strip-done').click();
-      await page.locator('.notice-capsule .notice-act', { hasText: 'Ответить клиенту' }).click();
-      await page.waitForFunction(() => document.querySelector('#chat-input').value.startsWith('Анна, записали'));
+      await page.waitForSelector('#task-done-dialog[open]');
+      await page.waitForFunction(() => document.querySelector('#task-done-dialog .task-done-text').value.startsWith('Анна, записали'));
       assert.ok(!data.mutations.some(m => m.path.endsWith('/messages') && m.body?.text?.startsWith('Анна, записали')), 'the reply is never sent by itself');
       await settle(page); await save(page, 'tasks-ai-reply');
+      await page.locator('#task-done-dialog .task-done-send').click();
+      await page.waitForFunction(() => !document.querySelector('#task-done-dialog').open);
+      await page.waitForTimeout(500);
+      assert.ok(data.mutations.some(m => m.path.endsWith('/messages') && m.body?.text?.startsWith('Анна, записали')), 'sent after «Отправить»');
       assert.deepEqual(data.unexpected, []); assert.deepEqual(data.errors, []);
       await context.close();
     }

@@ -52,10 +52,29 @@ window.CenterNotices = ({ $ }) => {
 
   function icon(target, type, glyph) { target.className = `notice-ic ${type}`; target.innerHTML = svg(icons[glyph] || icons[type] || icons.info); }
 
+  // Centre the capsule over the section on screen (the conversation on a computer), not
+  // over the whole window, so it never lands on the dialog list.
+  function place() {
+    const app = document.getElementById("app");
+    // Over a conversation the capsule sits under its header; over a list or a page it
+    // waits at the bottom, where it covers nothing the operator is reading.
+    const chats = app?.dataset.tab === "chats" && (innerWidth >= 720 || app.dataset.view === "chat");
+    root.classList.toggle("in-page", !chats);
+    const area = chats ? document.querySelector(".pane-chat") : document.querySelector("[data-page]:not([hidden])");
+    const box = area?.getBoundingClientRect();
+    if (innerWidth >= 720 && box && box.width > 0 && box.right > 0 && box.left < innerWidth) {
+      root.style.left = `${Math.round(box.left + box.width / 2)}px`;
+      root.style.width = `${Math.round(Math.min(460, box.width - 32))}px`;
+    } else { root.style.left = ""; root.style.width = ""; }
+  }
+  addEventListener("resize", place);
+  const appRoot = document.getElementById("app");
+  if (appRoot) new MutationObserver(() => place()).observe(appRoot, { attributes: true, attributeFilter: ["data-tab", "data-view"] });
   function render() {
+    place();
     capsule.hidden = !shown || panelOpen;
     if (shown) {
-      icon(capsule.querySelector(".notice-ic"), shown.type, shown.glyph);
+      icon(capsule.querySelector(".notice-ic"), shown.strong ? "error" : shown.type, shown.glyph);
       capsule.dataset.type = shown.type;
       capsule.setAttribute("role", shown.type === "error" ? "alert" : "status");
       capsule.querySelector(".notice-title").textContent = shown.title + (shown.count > 1 ? ` · ${shown.count} раза` : "");
@@ -85,7 +104,7 @@ window.CenterNotices = ({ $ }) => {
     if (!items.length) { const empty = document.createElement("p"); empty.className = "notice-empty"; empty.textContent = "Уведомлений нет."; list.append(empty); return; }
     for (const item of items) {
       const row = document.createElement("div"); row.className = `notice-row${item.read ? " read" : ""}${item.type === "error" && !item.read ? " hot" : ""}`;
-      const ic = document.createElement("span"); icon(ic, item.type, item.glyph);
+      const ic = document.createElement("span"); icon(ic, item.strong ? "error" : item.type, item.glyph);
       const body = document.createElement("div"); body.className = "notice-body";
       const title = document.createElement("strong"); title.className = "notice-title"; title.textContent = item.title + (item.count > 1 ? ` · ${item.count} раза` : "");
       const meta = document.createElement("span"); meta.className = "notice-text"; meta.textContent = [item.text, clock(item.at)].filter(Boolean).join(" · ");
@@ -127,12 +146,12 @@ window.CenterNotices = ({ $ }) => {
   /** Show a notice. Returns false when notices are switched off (the caller keeps its fallback).
    *  `always` notices (task reminders) have their own switch and ignore this one; `actions`
    *  shows a row of buttons; `sticky` notices go away once one of their actions ran. */
-  function notify({ type = "error", title, text = "", action = null, actions = null, key = null, always = false, sticky = false, count = true, glyph = null, ttl = 0 } = {}) {
+  function notify({ type = "error", title, text = "", action = null, actions = null, key = null, always = false, sticky = false, count = true, glyph = null, ttl = 0, strong = false } = {}) {
     if ((!enabled && !always) || !title) return false;
     const id = key || `${type}|${title}|${text}`;
     let item = items.find(entry => entry.key === id);
-    if (item) { items = items.filter(entry => entry !== item); if (count) item.count += 1; item.at = Date.now(); item.read = false; item.text = text; item.title = title; item.action = action; item.actions = actions; item.glyph = glyph; item.ttl = ttl; }
-    else item = { id: `n${++seq}`, key: id, type, title, text, action, actions, sticky, always, glyph, ttl, count: 1, at: Date.now(), read: false };
+    if (item) { items = items.filter(entry => entry !== item); if (count) item.count += 1; item.at = Date.now(); item.read = false; item.text = text; item.title = title; item.action = action; item.actions = actions; item.glyph = glyph; item.ttl = ttl; item.strong = strong; }
+    else item = { id: `n${++seq}`, key: id, type, title, text, action, actions, sticky, always, glyph, ttl, strong, count: 1, at: Date.now(), read: false };
     items.unshift(item); items = items.slice(0, LIMIT);
     if (!panelOpen) { shown = item; settle(item); }
     render(); return true;

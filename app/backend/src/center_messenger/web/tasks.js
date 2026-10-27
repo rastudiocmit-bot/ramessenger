@@ -8,9 +8,9 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   const PRESS_MS = 480, STILL_PX = 10, POLL_MS = 60000;
   const KINDS = { makeup: "Отработка", subscription: "Абонемент", group: "Группа", call: "Перезвонить", other: "Другое" };
   let ctx = null, ctxAt = 0, ctxEpoch = -1, summary = null, summaryBusy = null;
-  let scope = "mine", closedOpen = false, lists = { open: [], closed: [] }, listBusy = false;
+  let scope = "mine", closedOpen = false, lists = { open: [], closed: [] }, listBusy = false, counts = {};
   let convId = null, convTasks = [], convSeq = 0, pickMode = false, picked = new Set();
-  let press = null, menuFor = null, lastTap = { id: null, at: 0 };
+  let press = null, menuFor = null, menuLift = null, lastTap = { id: null, at: 0 };
   let sheet = null, sheetTask = null, sheetDraft = null, sheetDue = null;
 
   // ── access, time ─────────────────────────────────────────────────────────
@@ -133,7 +133,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   canvas?.insertBefore(strip, $("#chat-header")?.nextSibling || null);
   const openTasks = () => convTasks.filter(t => t.status === "open").sort((a, b) => a.due_at.localeCompare(b.due_at));
   function paintStrip() {
-    const list = openTasks(), visible = Boolean(convId && list.length && state.pane === "messages" && !$("#chat-stream")?.hidden);
+    const box = canvas?.getBoundingClientRect(), onScreen = Boolean(box && box.width && box.right > 4 && box.left < innerWidth - 4);
+    const list = openTasks(), visible = Boolean(convId && list.length && state.pane === "messages" && !$("#chat-stream")?.hidden && onScreen);
     strip.hidden = !visible; canvas?.classList.toggle("has-task-strip", visible);
     document.documentElement.classList.toggle("task-strip-on", visible);
     if (!visible) return;
@@ -170,6 +171,9 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   }
   new MutationObserver(watchConversation).observe(history, { childList: true, attributes: true, attributeFilter: ["data-conversation"] });
   new MutationObserver(watchConversation).observe($("#chat-stream"), { attributes: true, attributeFilter: ["hidden"] });
+  // On a phone the dialog slides in and out; the strip follows what is on screen.
+  if ($("#app")) new MutationObserver(() => { paintStrip(); setTimeout(paintStrip, 320); }).observe($("#app"), { attributes: true, attributeFilter: ["data-view", "data-tab"] });
+  addEventListener("resize", () => paintStrip());
   const list = $("#chat-list");
   if (list) new MutationObserver(() => { if (summary) paintRows(); }).observe(list, { childList: true, subtree: true });
   for (const holder of [$("#navrail"), $("#tabbar")]) if (holder) new MutationObserver(paintBadge).observe(holder, { childList: true });
@@ -186,7 +190,12 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   }
   function openMenu(bubble, point) {
     if (!bubble || !convId) return;
-    closeMenu(); menuFor = bubble; bubble.classList.add("task-lift");
+    closeMenu(); menuFor = bubble;
+    const at = bubble.getBoundingClientRect(), lifted = bubble.cloneNode(true);
+    lifted.className = bubble.className + " task-lifted"; lifted.removeAttribute("data-id"); lifted.setAttribute("aria-hidden", "true");
+    lifted.querySelector(".task-tag")?.remove();
+    Object.assign(lifted.style, { left: `${at.left}px`, top: `${at.top}px`, width: `${at.width}px` });
+    document.body.append(lifted); menuLift = lifted; bubble.classList.add("task-lift");
     const items = [];
     if (!readOnly()) items.push(menuItem("Сделать задачей", "task", target => createFrom([target.dataset.id], "menu"), true));
     items.push(menuItem("Копировать", "copy", target => copyText(target)));
@@ -202,7 +211,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     requestAnimationFrame(() => menu.querySelector("button")?.focus({ preventScroll: true }));
   }
   function closeMenu() {
-    menuFor?.classList.remove("task-lift"); menuFor = null;
+    menuFor?.classList.remove("task-lift"); menuFor = null; menuLift?.remove(); menuLift = null;
     backdrop.hidden = true; menu.hidden = true;
   }
   backdrop.addEventListener("pointerdown", event => { event.preventDefault(); closeMenu(); });
@@ -333,6 +342,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
           <input class="task-due-input" type="datetime-local" aria-label="Дата и время срока" hidden></div>
         <div class="task-field" role="group" aria-labelledby="task-kind-label"><span id="task-kind-label">Тип</span><div class="task-chips task-kinds"></div></div>
         <label class="task-field task-assignee"><span>Исполнитель</span><select name="assignee"></select></label>
+        <p class="task-assignee-me"><span>Исполнитель:</span> <b></b></p>
         <label class="task-field"><span>Подробности</span><textarea name="details" rows="2" maxlength="2000" placeholder="Необязательно"></textarea></label>
         <p class="notice error task-error" role="alert" hidden></p>
         <div class="task-actions"><button class="btn sec task-open-chat" type="button" hidden>Открыть переписку</button>
@@ -423,6 +433,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     assignee.value = editing ? task.assignee_id : draft?.assignee_id || ctx?.me;
     if (!assignee.value) assignee.value = ctx?.me;
     sheet.querySelector(".task-assignee").hidden = people.length < 2;
+    const mine = sheet.querySelector(".task-assignee-me"), person = editing ? task.assignee_name : (people[0]?.name || "");
+    mine.hidden = people.length >= 2; mine.querySelector("b").textContent = editing && task.assignee_id !== ctx?.me ? person : "я";
     const locked = readOnly();
     for (const field of form.querySelectorAll("textarea,select,input")) field.disabled = locked;
     sheet.querySelector(".task-save").hidden = locked;
@@ -481,25 +493,74 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       await changed(); return result;
     } catch (error) { if (error.name !== "AbortError") toast(error.message, true); return null; }
   }
-  async function complete(task) {
+  // «Выполнено» from the strip, a reminder or the task sheet opens «Задача выполнена» with a
+  // reply draft; a tick in the list stays quick and offers the reply in the capsule.
+  async function complete(task, { ask = true } = {}) {
     const done = await action(task, "complete", null); if (!done) return;
-    const here = state.pane === "messages" && task.conversation_id === convId;
-    notices?.notify({ type: "success", title: "Задача выполнена", text: done.title, key: `task:complete:${task.id}`, always: true, count: false,
+    if (ask && task.conversation_id && !readOnly()) { openDone(done); return; }
+    doneCapsule(done);
+  }
+  function doneCapsule(task) {
+    notices?.notify({ type: "success", title: "Задача выполнена", text: task.title, key: `task:complete:${task.id}`, always: true, count: false,
       actions: [
-        ...(task.conversation_id ? [{ label: "Ответить клиенту", run: () => replyTo(task, here) }] : []),
+        ...(task.conversation_id ? [{ label: "Ответить клиенту", run: () => openDone(task) }] : []),
         { label: "Вернуть", run: () => action(task, "reopen", "Задача снова открыта") },
       ] });
   }
-  // «Ответить клиенту»: open the dialog, then put the model's draft into an empty field.
-  async function replyTo(task, here) {
-    if (!here) await openChat(task);
-    const input = $("#chat-input"); input?.focus();
+  let doneSheet = null, doneTask = null, doneSeq = 0;
+  function buildDone() {
+    const dialog = document.createElement("dialog"); dialog.className = "live-sheet task-sheet task-done-sheet"; dialog.id = "task-done-dialog";
+    dialog.setAttribute("aria-labelledby", "task-done-title");
+    dialog.innerHTML = `<div class="task-done-head"><span class="task-done-ic"></span><div><h2 id="task-done-title">Задача выполнена</h2><small class="task-done-what"></small></div>
+      <button class="iconbtn plain" type="button" data-done-close aria-label="Закрыть"></button></div>
+      <label class="task-field"><span class="task-done-label">Ответ клиенту</span><textarea rows="4" maxlength="4000" class="task-done-text"></textarea></label>
+      <p class="form-note task-done-note">Можно поправить перед отправкой. Отправит оператор, не AI.</p>
+      <p class="notice error task-done-error" role="alert" hidden></p>
+      <div class="task-done-actions"><button type="button" class="btn sec task-done-skip">Без ответа</button><button type="button" class="btn primary task-done-send">Отправить</button></div>
+      <button type="button" class="task-done-undo">Вернуть задачу в работу</button>`;
+    dialog.querySelector(".task-done-ic").append(icon("check"));
+    dialog.querySelector("[data-done-close]").append(icon("close"));
+    const close = () => { doneSeq += 1; dialog.close(); };
+    dialog.querySelector("[data-done-close]").addEventListener("click", close);
+    dialog.addEventListener("click", event => { if (event.target === dialog) close(); });
+    dialog.querySelector(".task-done-skip").addEventListener("click", () => { const task = doneTask; close(); if (task) doneCapsule(task); });
+    dialog.querySelector(".task-done-undo").addEventListener("click", async () => { const task = doneTask; close(); if (task) await action(task, "reopen", "Задача снова открыта"); });
+    dialog.querySelector(".task-done-text").addEventListener("input", () => paintDoneSend());
+    dialog.querySelector(".task-done-send").addEventListener("click", sendDone);
+    document.body.append(dialog); return dialog;
+  }
+  function paintDoneSend() { doneSheet.querySelector(".task-done-send").disabled = !doneSheet.querySelector(".task-done-text").value.trim(); }
+  async function openDone(task) {
+    doneSheet ||= buildDone(); doneTask = task; const seq = ++doneSeq;
+    const area = doneSheet.querySelector(".task-done-text"), label = doneSheet.querySelector(".task-done-label");
+    doneSheet.querySelector(".task-done-what").textContent = [task.title, task.client_label].filter(Boolean).join(" · ");
+    doneSheet.querySelector(".task-done-error").hidden = true;
+    area.value = ""; area.placeholder = "Готовим черновик ответа…"; area.classList.add("busy"); label.textContent = "Ответ клиенту";
+    paintDoneSend();
+    if (!doneSheet.open) doneSheet.showModal();
     try {
       const result = await api(`${base()}/tasks/${task.id}/reply`, { method: "POST", timeoutMs: 12000 });
-      if (!result.text || !input || input.disabled || input.value.trim() || convId !== task.conversation_id) return;
-      input.value = result.text; input.dispatchEvent(new Event("input", { bubbles: true })); input.focus();
-      notices?.notify({ type: "info", glyph: "task", title: "Черновик ответа в поле ввода", text: "Проверьте и отправьте сами.", key: `task:reply:${task.id}`, always: true, count: false });
-    } catch (_) { /* The operator writes the answer themselves. */ }
+      if (seq !== doneSeq) return;
+      if (result.text && !area.value.trim()) { area.value = result.text; label.textContent = "Ответ клиенту · черновик AI"; }
+    } catch (_) { /* The operator writes the answer. */ }
+    if (seq !== doneSeq) return;
+    area.classList.remove("busy"); area.placeholder = "Напишите ответ клиенту"; paintDoneSend();
+  }
+  // «Отправить» goes through the dialog's own composer, exactly like a typed answer.
+  async function sendDone() {
+    const task = doneTask, text = doneSheet.querySelector(".task-done-text").value.trim(), error = doneSheet.querySelector(".task-done-error");
+    if (!task || !text) return;
+    if (!(state.pane === "messages" && convId === task.conversation_id)) {
+      await openChat(task);
+      for (let step = 0; step < 30 && convId !== task.conversation_id; step += 1) await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    const input = $("#chat-input"), send = $("#chat-send");
+    if (convId !== task.conversation_id || !input || input.disabled) { error.textContent = "Не удалось открыть переписку с клиентом. Ответ можно отправить из диалога."; error.hidden = false; return; }
+    if (input.value.trim() && input.value.trim() !== text) { error.textContent = "В поле ввода этого диалога уже есть черновик. Отправьте или очистите его."; error.hidden = false; return; }
+    input.value = text; input.dispatchEvent(new Event("input", { bubbles: true }));
+    doneSeq += 1; doneSheet.close();
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    if (!send.disabled) send.click(); else input.focus();
   }
   function snoozeTarget(kind) {
     const presets = ctx?.presets || {};
@@ -521,12 +582,22 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
         key: "task:due:many", always: true, count: false, glyph: "bell", actions: [{ label: "Открыть задачи", run: () => renderPane("tasks") }] });
     } else for (const task of due) {
       store.set(remindedKey(task), "1");
-      notices?.notify({ type: "warning", title: `Пора: ${task.title}`, text: [task.client_label, `срок ${clock(task.due_at)}`].filter(Boolean).join(" · "),
+      const late = Math.round((now - new Date(task.due_at).getTime()) / 60000);
+      notices?.notify({ type: "warning", strong: true, title: `Пора: ${task.title}`,
+        text: [task.client_label, `срок ${clock(task.due_at)}` + (late >= 5 ? `, просрочено на ${late < 60 ? late + " мин" : Math.round(late / 60) + " ч"}` : "")].filter(Boolean).join(" · "),
         key: `task:due:${task.id}`, always: true, sticky: true, count: false, glyph: "bell", actions: [
           { label: "Выполнено", run: () => complete(task) },
           { label: "Через 1 ч", run: () => action(task, "snooze", "Задача отложена на час", { due_at: snoozeTarget("hour") }) },
           { label: "Открыть", keep: true, run: () => task.conversation_id ? openChat(task) : openSheet({ task }) },
         ] });
+    }
+    // A quiet heads-up 15 minutes before a task with a set time.
+    for (const task of summary.upcoming || []) {
+      const left = Math.round((new Date(task.due_at).getTime() - now) / 60000), key = `cm:task-soon:${task.id}@${task.due_at}`;
+      if (left <= 0 || left > 15 || store.get(key) || store.get(remindedKey(task))) continue;
+      store.set(key, "1");
+      notices?.notify({ type: "info", glyph: "bell", title: `Скоро: ${task.title}`, text: [task.client_label, `срок ${clock(task.due_at)}, осталось ${left} мин`].filter(Boolean).join(" · "),
+        key: `task:soon:${task.id}`, always: true, count: false, actions: [{ label: "Открыть", run: () => task.conversation_id ? openChat(task) : openSheet({ task }) }] });
     }
     digest(now);
   }
@@ -562,7 +633,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       if (result.task) {
         const task = result.task;
         notices?.notify({ type: "success", glyph: "task", title: spokenPrefix ? "Похоже на задачу — клиенту не отправили" : "Задача создана",
-          text: `${task.title} · ${dueText(task)}`, key: `task:voice:${task.id}`, always: true, sticky: true, count: false, ttl: 8000,
+          text: [task.title, dueText(task), task.kind ? KINDS[task.kind] : "", task.sources?.length ? `${task.sources.length} ${plural(task.sources.length, "сообщение", "сообщения", "сообщений")} клиента` : ""].filter(Boolean).join(" · "),
+          key: `task:voice:${task.id}`, always: true, sticky: true, count: false, ttl: 8000,
           actions: [{ label: "Изменить", keep: true, run: () => openSheet({ task }) }, { label: "Отменить", run: () => action(task, "cancel", "Задача отменена") }] });
         await changed();
       } else {
@@ -584,6 +656,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   function hideHint() { hint = null; hintSeq += 1; hintBar.hidden = true; canvas?.classList.remove("has-task-hint"); }
   async function askHint(text, conversation) {
     if (!conversation || !text || !PROMISE.test(text) || readOnly() || ctx?.personal?.hints === false || store.get(hintOffKey(conversation))) return;
+    // With an open task in this dialog the capsule already asks «Задача выполнена?» — one question at a time.
+    if (conversation === convId && openTasks().length) return;
     const seq = ++hintSeq;
     await new Promise(resolve => setTimeout(resolve, 900));
     try {
@@ -626,7 +700,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     if (!fresh.length || !first || !replySent || Date.now() - replySent > 30000 || asked.has(first.id) || readOnly()) return;
     replySent = 0; asked.add(first.id);
     notices?.notify({ type: "info", glyph: "task", title: "Ответили клиенту. Задача выполнена?", text: first.title, key: `task:ask:${first.id}`,
-      always: true, sticky: true, count: false, ttl: 10000, actions: [{ label: "Да, выполнена", run: () => complete(first) }, { label: "Нет", run: () => {} }] });
+      always: true, sticky: true, count: false, ttl: 10000, actions: [{ label: "Да, выполнена", run: () => complete(first, { ask: false }) }, { label: "Нет", run: () => {} }] });
   }
   new MutationObserver(() => { if (convId) watchReplies(); }).observe(history, { childList: true });
 
@@ -638,7 +712,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     check.setAttribute("aria-label", task.status === "open" ? `Отметить выполненной: ${task.title}` : `Открыть снова: ${task.title}`);
     if (task.status === "done") check.append(icon("check"));
     check.disabled = readOnly();
-    check.addEventListener("click", event => { event.stopPropagation(); if (task.status === "open") complete(task); else action(task, "reopen", "Задача снова открыта"); });
+    check.addEventListener("click", event => { event.stopPropagation(); if (task.status === "open") complete(task, { ask: false }); else action(task, "reopen", "Задача снова открыта"); });
     const main = node("button", undefined, "task-row-main"); main.type = "button";
     main.append(node("strong", task.title), node("small", [task.client_label, task.status === "open" ? dueText(task) : task.status === "done" ? "выполнена" : "отменена",
       scope === "all" && task.assignee_name && task.assignee_id !== ctx?.me ? task.assignee_name : ""].filter(Boolean).join(" · ")));
@@ -651,12 +725,16 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     listBusy = true; const epoch = state.epoch;
     try {
       await context();
-      const [open, closed] = await Promise.all([
+      const both = ctx?.admin || ctx?.studio?.visibility !== "own";
+      const [open, other, closed] = await Promise.all([
         api(`${base()}/tasks?scope=${scope}&status=open`, { timeoutMs: 15000 }),
+        both ? api(`${base()}/tasks?scope=${scope === "mine" ? "all" : "mine"}&status=open`, { timeoutMs: 15000 }) : Promise.resolve({ tasks: [] }),
         closedOpen ? api(`${base()}/tasks?scope=${scope}&status=closed`, { timeoutMs: 15000 }) : Promise.resolve({ tasks: lists.closed }),
       ]);
       if (epoch !== state.epoch) return;
-      lists = { open: open.tasks || [], closed: closed.tasks || [] }; paintPane();
+      lists = { open: open.tasks || [], closed: closed.tasks || [] };
+      counts = scope === "mine" ? { mine: lists.open.length, all: (other.tasks || []).length } : { all: lists.open.length, mine: (other.tasks || []).length };
+      paintPane();
     } catch (error) { if (error.name !== "AbortError") { const box = pane.querySelector(".task-pane-error"); box.textContent = error.message; box.hidden = false; } }
     finally { listBusy = false; }
   }
@@ -665,7 +743,11 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     pane.querySelector(".task-pane-error").hidden = true;
     const all = !ctx?.admin && ctx?.studio?.visibility === "own" ? false : true;
     const tabs = pane.querySelector(".task-scope"); tabs.hidden = !all;
-    for (const tab of tabs.querySelectorAll("button")) tab.setAttribute("aria-selected", String(tab.dataset.scope === scope));
+    for (const tab of tabs.querySelectorAll("button")) {
+      tab.setAttribute("aria-selected", String(tab.dataset.scope === scope));
+      const count = counts[tab.dataset.scope];
+      tab.textContent = (tab.dataset.scope === "mine" ? "Мои" : "Все") + (count === undefined ? "" : ` · ${count}`);
+    }
     pane.querySelector(".task-new").hidden = readOnly();
     const groups = { overdue: [], today: [], tomorrow: [], later: [] }, now = Date.now();
     for (const task of lists.open) groups[bucket(task, now)].push(task);
@@ -685,6 +767,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     }
     const toggle = node("button", undefined, "task-closed-toggle"); toggle.type = "button"; toggle.setAttribute("aria-expanded", String(closedOpen));
     toggle.append(icon(closedOpen ? "down" : "chevron"), node("span", closedOpen ? `Выполнено и отменено за неделю · ${lists.closed.length}` : "Выполнено и отменено за неделю"));
+    if (closedOpen && !lists.closed.length) toggle.lastChild.textContent = "За неделю ничего не закрыто";
     toggle.addEventListener("click", () => { closedOpen = !closedOpen; loadLists(); });
     body.append(toggle);
     if (closedOpen && lists.closed.length) { const card = node("div", undefined, "task-card closed"); card.append(...lists.closed.map(task => taskRow(task))); body.append(card); }
@@ -707,6 +790,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     for (const box of form.querySelectorAll('input[name="work_days"]')) box.checked = s.work_days.includes(Number(box.value));
     form.elements.default_due.value = s.default_due; form.elements.visibility.value = s.visibility; form.elements.alfa_copy.checked = s.alfa_copy;
     for (const field of form.querySelectorAll("[data-studio] :is(input,select)")) field.disabled = !ctx.admin;
+    form.elements.alfa_copy.disabled = true; // the AlfaCRM connection is read-only for now
     show(dialog.querySelector(".task-studio-note"), !ctx.admin);
     dialog.querySelector(".task-settings-error").hidden = true;
     dialog.showModal();
