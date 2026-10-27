@@ -142,8 +142,8 @@ class Gateways:
             synthesis = data['synthesis_provider']
             if provider not in ('yandex', *PROVIDERS) or synthesis not in ('disabled', 'yandex', *PROVIDERS):
                 raise AuthError(422, 'Неизвестный шлюз для действия.')
-            if language not in (('ru',) if provider == 'yandex' else ('auto', 'en', 'zh')):
-                raise AuthError(422, 'MiMo ASR поддерживает китайский и английский; для русского выберите Yandex.')
+            if language not in (('ru',) if provider == 'yandex' else ('ru', 'auto', 'en', 'zh')):
+                raise AuthError(422, 'Выберите допустимый язык распознавания.')
             if data['synthesis_voice'] not in (TTS_VOICES if synthesis == 'yandex' else ai_mimo.VOICES):
                 raise AuthError(422, 'Неизвестный голос.')
             for selected in (provider, synthesis):

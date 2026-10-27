@@ -64,13 +64,15 @@ class MimoTests(unittest.TestCase):
             self.assertEqual(wav.readframes(wav.getnframes()),audio)
         self.assertEqual(body['asr_options'],{'language':'en'})
 
-    def test_russian_asr_and_unknown_hosts_are_rejected_before_sending_a_key(self):
+    def test_russian_asr_uses_documented_auto_tag_and_unknown_hosts_are_rejected(self):
         wire=FakeOpener(reply());client=m.MimoClient(wire)
         for value in ('https://evil.example/v1',m.PLAN_URL+'/../v1',m.PAYG_URL+'?x=1'):
             with self.assertRaises(YandexError):complete(client,base_url=value)
+        client.recognize(silence(1),api_key='fake',language='ru')
+        self.assertEqual(json.loads(wire.requests[0][0].data)['asr_options'],{'language':'auto'})
         with self.assertRaises(YandexError) as error:
-            client.recognize(silence(1),api_key='fake',language='ru')
-        self.assertEqual(error.exception.code,'speech_language');self.assertEqual(wire.requests,[])
+            client.recognize(silence(1),api_key='fake',language='invalid')
+        self.assertEqual(error.exception.code,'speech_language');self.assertEqual(len(wire.requests),1)
         self.assertIsNone(m.NoRedirect().redirect_request(None,None,None,None,None,None))
 
     def test_tts_requires_valid_wav_and_uses_assistant_text(self):
@@ -170,7 +172,7 @@ class MimoTests(unittest.TestCase):
         self.assertEqual(wire.requests[0][0].full_url,m.PLAN_URL+'/chat/completions')
         self.assertEqual(db.usage[-1]['c'],0)
 
-    def test_gateway_routes_require_admin_and_do_not_accept_russian_mimo(self):
+    def test_gateway_routes_require_admin_and_mimo_key_for_russian(self):
         ai,db=service()
         with self.assertRaises(Exception) as denied:
             ai.gateways.routes(ACTOR,WS,{'recognition_provider':'mimo','recognition_language':'ru','synthesis_provider':'disabled','synthesis_voice':'Mia'})
@@ -179,6 +181,11 @@ class MimoTests(unittest.TestCase):
         with self.assertRaises(Exception) as denied:
             ai.gateways.routes(ACTOR,WS,{'recognition_provider':'mimo','recognition_language':'ru','synthesis_provider':'disabled','synthesis_voice':'Mia'})
         self.assertEqual(denied.exception.status,422)
+        db.settings['mimo_key_ciphertext']='sealed-mimo'
+        ai.gateways._write=lambda db,actor,workspace,value: db.settings.update(gateway_config=value)
+        ai._public=lambda db,workspace: g.public(db.settings)
+        result=ai.gateways.routes(ACTOR,WS,{'recognition_provider':'mimo','recognition_language':'ru','synthesis_provider':'disabled','synthesis_voice':'Mia'})
+        self.assertEqual(result['recognition_language'],'ru')
 
 
 class YandexSynthesisTests(unittest.TestCase):

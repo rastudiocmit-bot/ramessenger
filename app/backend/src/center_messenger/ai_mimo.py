@@ -133,8 +133,11 @@ class MimoClient:
 
     def recognize(self, audio, *, api_key, base_url=PAYG_URL, plan=False, language="auto"):
         check_audio(audio)
-        if language not in ("auto","en","zh"):
+        if language not in ("ru","auto","en","zh"):
             raise YandexError("speech_language")
+        # MiMo does not document a Russian ASR language tag. Let its auto mode
+        # handle Russian recordings without sending an unsupported `ru` value.
+        api_language = "auto" if language == "ru" else language
         output=io.BytesIO()
         with wave.open(output,"wb") as wav:
             wav.setnchannels(1);wav.setsampwidth(2);wav.setframerate(SAMPLE_RATE);wav.writeframes(audio)
@@ -143,7 +146,7 @@ class MimoClient:
             raise YandexError("audio_long")
         body={"model":"mimo-v2.5-asr","messages":[{"role":"user","content":[{"type":"input_audio",
               "input_audio":{"data":"data:audio/wav;base64,"+encoded}}]}],
-              "asr_options":{"language":language},"stream":False}
+              "asr_options":{"language":api_language},"stream":False}
         result=self._chat_result(self._post(body,api_key=api_key,base_url=base_url,plan=plan))
         if result["truncated"]:
             raise YandexError("bad_response")

@@ -318,7 +318,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     }, $("#ai-routes-error"));
   });
   routesForm?.elements.recognition_provider.addEventListener("change", () => {
-    routesForm.elements.recognition_language.value = routesForm.elements.recognition_provider.value === "yandex" ? "ru" : "auto";
+    routesForm.elements.recognition_language.value = "ru";
   });
   routesForm?.elements.synthesis_provider.addEventListener("change", () => {
     renderSynthesisVoices(routesForm.elements.synthesis_provider.value);

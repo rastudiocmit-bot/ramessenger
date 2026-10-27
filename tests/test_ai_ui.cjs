@@ -68,7 +68,7 @@ test('MiMo accounts expose separate cards and tests for each capability',async t
 test('recognition routing carries provider and language and remains separate from agent model',async t=>{
  const s=await setup(t),form=s.$('#ai-routes-form');
  form.elements.recognition_provider.value='mimo_plan';form.elements.recognition_provider.dispatchEvent(new s.w.Event('change'));
- assert.equal(form.elements.recognition_language.value,'auto');
+ assert.equal(form.elements.recognition_language.value,'ru');
  form.elements.recognition_language.value='en';form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
  const call=s.calls.find(c=>c.url.endsWith('/gateways/routes'));
  assert.equal(call.data.recognition_provider,'mimo_plan');assert.equal(call.data.recognition_language,'en');
