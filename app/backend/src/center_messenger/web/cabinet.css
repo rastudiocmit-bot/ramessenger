@@ -1697,3 +1697,18 @@ body:has(#cabinet[hidden]){overflow:auto}
 @keyframes task-float-in{from{opacity:0;transform:translateY(10px)}}
 .task-field textarea[name="title"]{overflow-y:auto}
 @media (prefers-reduced-motion:reduce){.task-pick-badge,.live-sheet.floating{animation:none}}
+/* Messages scrolled up never peek out in the gaps around the floating header (and the task
+   strip): the stream fades out right under them instead of being cut by the window edge. */
+.canvas>.stream{--fade-top:calc(var(--sat) + 58px);
+  padding-bottom:14px;
+  -webkit-mask-image:linear-gradient(to bottom,transparent 0,transparent var(--fade-top),#000 calc(var(--fade-top) + 22px),#000 calc(100% - 12px),transparent);
+  mask-image:linear-gradient(to bottom,transparent 0,transparent var(--fade-top),#000 calc(var(--fade-top) + 22px),#000 calc(100% - 12px),transparent)}
+.canvas.has-task-strip>.stream{--fade-top:calc(var(--sat) + 122px)}
+@container app (min-width:720px){
+  .canvas>.stream{--fade-top:58px}
+  .canvas.has-task-strip>.stream{--fade-top:122px}
+}
+/* Lists on a computer end softly at the card's rounded bottom instead of a hard cut. */
+@container app (min-width:720px){
+  .list,.scroll{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
+}
