@@ -42,9 +42,22 @@ async function longPress(page, selector) {
       await page.waitForSelector('#task-dialog[open]');
       assert.match(await page.locator('#task-dialog textarea[name="title"]').inputValue(), /подготовку к школе/);
       assert.equal(await page.locator('#task-dialog .task-quote').count(), 1);
+      // Opening never puts the caret in the text: the keyboard would cover the sheet.
+      assert.equal(await page.evaluate(() => document.activeElement?.name || ''), '', 'no field is focused on opening');
+      // Everything fits on the phone without scrolling the sheet.
+      const fits = await page.evaluate(() => { const d = document.querySelector('#task-dialog'); return { scroll: d.scrollHeight - d.clientHeight, top: d.getBoundingClientRect().top }; });
+      assert.ok(fits.scroll <= 1 && fits.top >= 0, `the sheet fits without scrolling ${JSON.stringify(fits)}`);
       await settle(page); await save(page, 'tasks-sheet');
-      await page.locator('#task-dialog .task-chip', { hasText: 'Через 1 ч' }).tap();
-      await page.locator('#task-dialog .task-chip', { hasText: 'Отработка' }).tap();
+      await page.locator('#task-dialog .task-chip', { hasText: 'Через 1 час' }).tap();
+      await page.locator('#task-dialog select[name="kind"]').selectOption('makeup');
+      assert.equal(await page.locator('#task-dialog .task-kind-pick .task-pick-value').innerText(), 'Отработка');
+      // Typing on a phone: only the text and «Готово» stay above the keyboard.
+      await page.locator('#task-dialog textarea[name="title"]').tap();
+      await page.waitForSelector('#task-dialog .task-edit-bar', { state: 'visible' });
+      assert.equal(await page.locator('#task-dialog .task-save').isVisible(), false);
+      await save(page, 'tasks-sheet-typing');
+      await page.locator('#task-dialog .task-edit-done').tap();
+      assert.equal(await page.locator('#task-dialog .task-save').isVisible(), true);
       await page.locator('#task-dialog .task-save').tap();
       await page.waitForSelector('#task-dialog', { state: 'hidden' });
       const created = data.mutations.find(m => m.method === 'POST' && m.path.endsWith('/tasks'));
@@ -124,6 +137,9 @@ async function longPress(page, selector) {
       await settle(page); await save(page, 'tasks-pick-desktop');
       await page.locator('.task-pick-make').click();
       await page.waitForSelector('#task-dialog[open]');
+      assert.equal(await page.locator('#task-dialog .task-quote').count(), 1, 'the picked messages start folded into one line');
+      assert.match(await page.locator('#task-dialog .task-quote-more').innerText(), /\+1/);
+      await page.locator('#task-dialog .task-quote-short').click();
       assert.equal(await page.locator('#task-dialog .task-quote').count(), 2);
       assert.equal(await page.locator('#task-dialog .task-assignee').isVisible(), true, 'administrators choose the assignee');
       await page.locator('#task-dialog select[name="assignee"]').selectOption('operator-1');
@@ -159,7 +175,9 @@ async function longPress(page, selector) {
       assert.ok(Math.abs(geo.dl) <= 1 && Math.abs(geo.dr) <= 1, `sheet width follows the composer ${JSON.stringify(geo)}`);
       assert.ok(geo.gap >= 0 && geo.top >= 0 && geo.bottom <= geo.H, `sheet sits above the composer inside the window ${JSON.stringify(geo)}`);
       assert.match(geo.shade, /rgba\(0, 0, 0, 0\)|transparent/); assert.ok(!geo.blur || geo.blur === 'none'); assert.equal(geo.radius, '22px');
-      assert.equal(await page.locator('#task-dialog .task-chip[aria-pressed="true"]', { hasText: 'Группа' }).count(), 1);
+      assert.equal(await page.locator('#task-dialog select[name="kind"]').inputValue(), 'group');
+      assert.equal(await page.locator('#task-dialog .task-kind-pick .task-pick-label').innerText(), 'Тип · AI');
+      assert.match(await page.locator('#task-dialog .task-details-toggle').innerText(), /Подробности · 2 пункта/);
       await settle(page); await save(page, 'tasks-ai-draft');
       await page.locator('#task-dialog [data-task-close]').click();
       // A promise in the answer → «Создать задачу?» above the composer.

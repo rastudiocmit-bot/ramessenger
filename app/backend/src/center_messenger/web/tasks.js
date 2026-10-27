@@ -358,8 +358,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       if (seq !== suggestSeq || !sheet.open || sheetTask || sheetDraft?.conversation_id !== draft.conversation_id) return;
       if (!result.ai) { badge.hidden = true; return; }
       if (form.elements.title.value === initial.title && result.title) { form.elements.title.value = result.title; fitTitle(); }
-      if (form.elements.details.value === initial.details && !initial.details && result.details) { form.elements.details.value = result.details; fitTitle(); }
-      if (sheet.dataset.kind === initial.kind && !initial.kind && result.kind) { sheet.dataset.kind = result.kind; paintKinds(result.kind); }
+      if (form.elements.details.value === initial.details && !initial.details && result.details) { form.elements.details.value = result.details; paintDetails(sheet.querySelector(".task-details").classList.contains("open")); fitTitle(); }
+      if (sheet.dataset.kind === initial.kind && !initial.kind && result.kind) { sheet.dataset.kind = result.kind; sheet.dataset.kindAi = "1"; paintKinds(result.kind); }
       if (sheetDue === initial.due && result.due_at) { sheetDue = result.due_at; paintDue(); }
       badge.textContent = "Черновик AI"; badge.classList.remove("busy");
     } catch (_) { if (seq === suggestSeq) badge.hidden = true; }
@@ -367,17 +367,24 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   function buildSheet() {
     const dialog = document.createElement("dialog"); dialog.className = "live-sheet task-sheet"; dialog.id = "task-dialog";
     dialog.setAttribute("aria-labelledby", "task-sheet-title");
-    dialog.innerHTML = `<div class="sheet-head"><div><h2 id="task-sheet-title">Новая задача <span class="task-ai-badge" hidden></span></h2><small class="task-sheet-client"></small></div>
-      <button class="iconbtn plain" type="button" data-task-close aria-label="Закрыть"></button></div>
+    dialog.innerHTML = `<div class="sheet-head task-head"><h2 id="task-sheet-title">Новая задача</h2><span class="task-ai-badge" hidden></span>
+      <button class="iconbtn plain task-close" type="button" data-task-close aria-label="Закрыть"></button></div>
+      <small class="task-sheet-client"></small>
       <form class="sheet-body task-form" novalidate>
-        <label class="task-field"><span>Что сделать</span><textarea name="title" rows="2" maxlength="200" required></textarea></label>
+        <label class="task-field task-title-field"><span>Что сделать?</span><span class="task-title-box"><textarea name="title" rows="1" maxlength="200" required></textarea><span class="task-title-pen" aria-hidden="true"></span></span></label>
         <div class="task-quotes"></div>
-        <div class="task-field" role="group" aria-labelledby="task-due-label"><span id="task-due-label">Срок</span><div class="task-chips task-due"></div>
+        <div class="task-edit-bar"><span>Правка текста задачи</span><button class="task-edit-done" type="button">Готово</button></div>
+        <div class="task-field task-due-field" role="group" aria-labelledby="task-due-label"><span id="task-due-label">Срок</span><div class="task-chips task-due"></div>
           <input class="task-due-input" type="datetime-local" aria-label="Дата и время срока" hidden></div>
-        <div class="task-field" role="group" aria-labelledby="task-kind-label"><span id="task-kind-label">Тип</span><div class="task-chips task-kinds"></div></div>
-        <label class="task-field task-assignee"><span>Исполнитель</span><select name="assignee"></select></label>
-        <p class="task-assignee-me"><span>Исполнитель:</span> <b></b></p>
-        <label class="task-field"><span>Подробности</span><textarea name="details" rows="2" maxlength="2000" placeholder="Необязательно"></textarea></label>
+        <div class="task-pair">
+          <label class="task-pick task-kind-pick"><span class="task-pick-label">Тип</span><span class="task-pick-value"></span><select name="kind" aria-label="Тип задачи"></select><span class="task-pick-chev" aria-hidden="true"></span></label>
+          <label class="task-pick task-assignee"><span class="task-pick-label">Исполнитель</span><span class="task-pick-value"></span><select name="assignee" aria-label="Исполнитель"></select><span class="task-pick-chev" aria-hidden="true"></span></label>
+        </div>
+        <div class="task-details">
+          <div class="task-details-head"><span class="task-details-label">Подробности</span><button class="task-details-toggle" type="button" aria-expanded="false"></button></div>
+          <p class="task-details-preview" hidden></p>
+          <textarea name="details" rows="2" maxlength="2000" placeholder="Необязательно" aria-label="Подробности"></textarea>
+        </div>
         <p class="notice error task-error" role="alert" hidden></p>
         <div class="task-actions"><button class="btn sec task-open-chat" type="button" hidden>Открыть переписку</button>
           <button class="btn sec task-cancel-task" type="button" hidden>Отменить задачу</button>
@@ -385,10 +392,27 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
           <button class="btn primary task-save" type="submit">Создать задачу</button></div>
       </form>`;
     dialog.querySelector("[data-task-close]").append(icon("close"));
+    dialog.querySelector(".task-title-pen").append(icon("edit"));
+    for (const chev of dialog.querySelectorAll(".task-pick-chev")) chev.append(icon("down"));
+    const title = dialog.querySelector('textarea[name="title"]');
+    // A phone keeps only the text and «Готово» above the keyboard while the task is being typed.
+    const typing = () => matchMedia("(pointer: coarse)").matches && innerWidth < 720;
+    // Applied once the tap is over: the sheet shrinking under the finger would land the tap elsewhere.
+    title.addEventListener("focus", () => { if (typing()) setTimeout(() => { if (document.activeElement === title) dialog.classList.add("title-editing"); }, 320); });
+    title.addEventListener("blur", () => dialog.classList.remove("title-editing"));
+    dialog.querySelector(".task-edit-done").addEventListener("pointerdown", event => event.preventDefault());
+    dialog.querySelector(".task-edit-done").addEventListener("click", () => title.blur());
+    dialog.querySelector('select[name="kind"]').addEventListener("change", event => { sheet.dataset.kind = event.target.value; sheet.dataset.kindAi = ""; paintKinds(sheet.dataset.kind); });
+    dialog.querySelector('select[name="assignee"]').addEventListener("change", paintAssignee);
+    dialog.querySelector(".task-details-toggle").addEventListener("click", () => {
+      const open = !dialog.querySelector(".task-details").classList.contains("open");
+      try { localStorage.setItem("cm:task-details-open", open ? "1" : ""); } catch (_) {}
+      paintDetails(open); if (open) { fitTitle(); dialog.querySelector('textarea[name="details"]').focus(); }
+    });
     dialog.querySelector("[data-task-close]").addEventListener("click", () => dialog.close());
     dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
     dialog.querySelector("form").addEventListener("submit", event => { event.preventDefault(); saveSheet(); });
-    dialog.querySelector('textarea[name="title"]').addEventListener("input", fitTitle);
+    title.addEventListener("input", fitTitle);
     dialog.querySelector('textarea[name="details"]')?.addEventListener("input", fitTitle);
     dialog.querySelector(".task-due-input").addEventListener("change", event => { sheetDue = zonedIso(event.target.value); paintDue(); });
     dialog.querySelector(".task-done").addEventListener("click", () => { const task = sheetTask; dialog.close(); if (task) complete(task); });
@@ -404,10 +428,10 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     button.addEventListener("click", handler); return button;
   }
   function presetLabel(key, value) {
-    if (key === "hour") return "Через 1 ч";
-    if (key === "two_hours") return `Через 2 ч · ${clock(value)}`;
-    if (key === "end_of_day") return dayKey(value) === dayKey(Date.now()) ? `До конца дня · ${clock(value)}` : `${weekday(value)} до ${clock(value)}`;
-    return dayKey(value) === addDays(dayKey(Date.now()), 1) ? `Завтра ${clock(value)}` : `${weekday(value)} ${clock(value)}`;
+    if (key === "hour") return "Через 1 час";
+    if (key === "two_hours") return `Через 2 часа · ${clock(value)}`;
+    if (key === "end_of_day") return dayKey(value) === dayKey(Date.now()) ? `Сегодня до ${clock(value)}` : `${weekday(value)} до ${clock(value)}`;
+    return dayKey(value) === addDays(dayKey(Date.now()), 1) ? `Завтра к ${clock(value)}` : `${weekday(value)} к ${clock(value)}`;
   }
   function paintDue() {
     const box = sheet.querySelector(".task-due"), input = sheet.querySelector(".task-due-input"), presets = ctx?.presets || {};
@@ -420,31 +444,59 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       chips.push(chip(label, on, () => { sheetDue = value; input.hidden = true; paintDue(); }));
     }
     const custom = Boolean(sheetDue) && !matched;
-    chips.push(chip(custom ? `${shortDay(sheetDue)}, ${clock(sheetDue)}` : "Дата…", custom || !input.hidden, () => {
+    chips.push(chip(custom ? `${shortDay(sheetDue)}, ${clock(sheetDue)}` : "Выбрать дату…", custom || !input.hidden, () => {
       input.hidden = false; input.value = localInput(sheetDue || presets.default || Date.now()); input.focus(); input.showPicker?.();
     }));
     box.replaceChildren(...chips);
   }
   function paintKinds(selected) {
-    const box = sheet.querySelector(".task-kinds");
-    box.replaceChildren(...Object.entries(KINDS).map(([key, title]) => chip(title, key === selected, () => {
-      sheet.dataset.kind = sheet.dataset.kind === key ? "" : key; paintKinds(sheet.dataset.kind);
-    }, " small")));
+    const select = sheet.querySelector('select[name="kind"]');
+    if (select.options.length !== Object.keys(KINDS).length + 1) select.replaceChildren(new Option("Не выбран", ""), ...Object.entries(KINDS).map(([key, title]) => new Option(title, key)));
+    select.value = selected || "";
+    const box = sheet.querySelector(".task-kind-pick");
+    box.querySelector(".task-pick-label").textContent = sheet.dataset.kindAi && selected ? "Тип · AI" : "Тип";
+    box.querySelector(".task-pick-value").textContent = KINDS[selected] || "Не выбран";
+    box.classList.toggle("empty", !selected);
   }
-  function paintQuotes(sources, editable) {
-    const box = sheet.querySelector(".task-quotes"); box.replaceChildren();
+  function paintAssignee() {
+    const select = sheet.querySelector('select[name="assignee"]'), box = sheet.querySelector(".task-assignee");
+    box.querySelector(".task-pick-value").textContent = select.selectedOptions[0]?.textContent || "Вы";
+  }
+  const detailsPoints = text => text.split("\n").map(line => line.trim()).filter(Boolean);
+  function paintDetails(open) {
+    const box = sheet.querySelector(".task-details"), field = box.querySelector("textarea"), toggle = box.querySelector(".task-details-toggle");
+    const lines = detailsPoints(field.value), preview = box.querySelector(".task-details-preview");
+    box.classList.toggle("open", open); toggle.setAttribute("aria-expanded", String(open)); field.hidden = !open;
+    toggle.replaceChildren(document.createTextNode(open ? "Свернуть" : lines.length > 1 ? `Подробности · ${lines.length} ${plural(lines.length, "пункт", "пункта", "пунктов")}` : lines.length ? "Подробности" : "+ Подробности"), icon("down"));
+    preview.textContent = lines.join(" · "); preview.hidden = open || !lines.length;
+  }
+  function detailsOpenByDefault() { try { return localStorage.getItem("cm:task-details-open") === "1"; } catch (_) { return false; } }
+  function paintQuotes(sources, editable, open = false) {
+    const box = sheet.querySelector(".task-quotes"); box.replaceChildren(); box.classList.toggle("open", open);
+    box.hidden = !sources.length; if (!sources.length) return;
+    if (!open) {
+      const short = node("button", undefined, `task-quote task-quote-short ${sources[0].direction === "out" ? "out" : "in"}`); short.type = "button";
+      short.setAttribute("aria-label", "Показать сообщения целиком");
+      const glyph = node("span", "“", "task-quote-mark"); glyph.setAttribute("aria-hidden", "true");
+      short.append(glyph, node("span", sources[0].text || "Сообщение без текста", "task-quote-text"));
+      if (sources.length > 1) short.append(node("span", `+${sources.length - 1}`, "task-quote-more"));
+      const chev = node("span", undefined, "task-quote-chev"); chev.setAttribute("aria-hidden", "true"); chev.append(icon("chevron")); short.append(chev);
+      short.addEventListener("click", () => paintQuotes(sources, editable, true));
+      box.append(short); return;
+    }
     for (const source of sources) {
       const quote = node("div", undefined, `task-quote ${source.direction === "out" ? "out" : "in"}`);
       const glyph = node("span", "“", "task-quote-mark"); glyph.setAttribute("aria-hidden", "true");
       quote.append(glyph, node("span", source.text || "Сообщение без текста", "task-quote-text"));
       if (editable && sources.length > 1) {
         const remove = node("button", undefined, "task-quote-del"); remove.type = "button"; remove.setAttribute("aria-label", "Убрать сообщение из задачи"); remove.append(icon("close"));
-        remove.addEventListener("click", () => { sheetDraft.sources = sheetDraft.sources.filter(s => s.id !== source.id); paintQuotes(sheetDraft.sources, true); });
+        remove.addEventListener("click", () => { sheetDraft.sources = sheetDraft.sources.filter(s => s.id !== source.id); paintQuotes(sheetDraft.sources, true, true); });
         quote.append(remove);
       }
       box.append(quote);
     }
-    box.hidden = !sources.length;
+    const fold = node("button", sources.length > 1 ? "Свернуть сообщения" : "Свернуть сообщение", "task-quote-fold"); fold.type = "button";
+    fold.addEventListener("click", () => paintQuotes(sources, editable, false)); box.append(fold);
   }
   async function openSheet({ task = null, draft = null }) {
     sheet ||= buildSheet();
@@ -453,26 +505,31 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     sheetTask = task; sheetDraft = draft ? { ...draft, sources: [...(draft.sources || [])] } : null;
     const editing = Boolean(task), form = sheet.querySelector("form");
     suggestSeq += 1;
-    const heading = sheet.querySelector("#task-sheet-title"), badge = heading.querySelector(".task-ai-badge");
-    heading.firstChild.textContent = (editing ? (task.status === "open" ? "Задача" : task.status === "done" ? "Задача выполнена" : "Задача отменена") : "Новая задача") + " ";
+    const heading = sheet.querySelector("#task-sheet-title"), badge = sheet.querySelector(".task-ai-badge");
+    heading.textContent = editing ? (task.status === "open" ? "Задача" : task.status === "done" ? "Задача выполнена" : "Задача отменена") : "Новая задача";
+    sheet.classList.remove("title-editing");
     badge.hidden = !(draft?.origin === "voice" && draft?.title); badge.textContent = "Из голоса"; badge.classList.remove("busy");
     sheet.querySelector(".task-sheet-client").textContent = (editing ? task.client_label : draft?.client_label) || "";
     form.elements.title.value = editing ? task.title : draft?.title || "";
     form.elements.details.value = editing ? task.details || "" : "";
     sheetDue = editing ? task.due_at : draft?.due_at || ctx?.presets?.default || null;
     sheet.querySelector(".task-due-input").hidden = true;
-    sheet.dataset.kind = editing ? task.kind || "" : draft?.kind || "";
+    sheet.dataset.kind = editing ? task.kind || "" : draft?.kind || ""; sheet.dataset.kindAi = "";
     paintDue(); paintKinds(sheet.dataset.kind);
     paintQuotes(editing ? task.sources || [] : sheetDraft?.sources || [], !editing);
     const assignee = form.elements.assignee, people = ctx?.assignees || [];
     assignee.replaceChildren(...people.map(p => new Option(p.id === ctx.me ? `${p.name} (я)` : p.name, p.id)));
     assignee.value = editing ? task.assignee_id : draft?.assignee_id || ctx?.me;
     if (!assignee.value) assignee.value = ctx?.me;
-    sheet.querySelector(".task-assignee").hidden = people.length < 2;
-    const mine = sheet.querySelector(".task-assignee-me"), person = editing ? task.assignee_name : (people[0]?.name || "");
-    mine.hidden = people.length >= 2; mine.querySelector("b").textContent = editing && task.assignee_id !== ctx?.me ? person : "я";
+    // With nobody else to choose, the box just says who does it.
+    const choose = people.length >= 2; sheet.dataset.assign = choose ? "1" : "";
+    if (!choose) assignee.replaceChildren(new Option(editing && task.assignee_id && task.assignee_id !== ctx?.me ? task.assignee_name || "Сотрудник" : "Вы", assignee.value || ctx?.me || ""));
+    sheet.querySelector(".task-assignee").classList.toggle("fixed", !choose);
+    paintAssignee();
+    paintDetails(detailsOpenByDefault());
     const locked = readOnly();
     for (const field of form.querySelectorAll("textarea,select,input")) field.disabled = locked;
+    if (!choose) assignee.disabled = true;
     sheet.querySelector(".task-save").hidden = locked;
     sheet.querySelector(".task-save").textContent = editing ? "Сохранить" : "Создать задачу";
     sheet.querySelector(".task-done").hidden = !editing || locked || task.status !== "open";
@@ -482,7 +539,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     const error = sheet.querySelector(".task-error"); error.hidden = true; error.textContent = "";
     if (!sheet.open) sheet.showModal();
     placeSheet(sheet); fitTitle();
-    if (!editing) requestAnimationFrame(() => { const field = form.elements.title; field.focus(); field.setSelectionRange(field.value.length, field.value.length); });
+    // No caret on opening: the keyboard would cover the sheet. A tap on the field starts editing.
   }
   async function saveSheet() {
     const form = sheet.querySelector("form"), error = sheet.querySelector(".task-error"), save = sheet.querySelector(".task-save");
@@ -490,7 +547,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     if (!title) { error.textContent = "Напишите, что нужно сделать."; error.hidden = false; form.elements.title.focus(); return; }
     if (!sheetDue) { error.textContent = "Выберите срок."; error.hidden = false; return; }
     const data = { title, details: form.elements.details.value.trim(), kind: sheet.dataset.kind || null, due_at: sheetDue };
-    if (!sheet.querySelector(".task-assignee").hidden) data.assignee_id = form.elements.assignee.value;
+    if (sheet.dataset.assign) data.assignee_id = form.elements.assignee.value;
     save.disabled = true;
     try {
       if (sheetTask) {

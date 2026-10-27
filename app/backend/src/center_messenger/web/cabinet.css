@@ -1720,3 +1720,68 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* «Сделать задачей» under the pointer: solid blue with white text and a white icon. */
 .task-menu-item.primary:hover,.task-menu-item.primary:focus-visible{background:var(--primary);color:var(--on-primary)}
 .task-menu-item.primary:hover svg,.task-menu-item.primary:focus-visible svg{color:var(--on-primary)}
+/* ── «Новая задача», compact: no keyboard on opening, type as in the chat, no scroll ── */
+.task-sheet .task-head{display:flex;align-items:center;gap:10px;padding:0}
+.task-sheet .task-head h2{flex:1;min-width:0;margin:0;font-size:17px;font-weight:700;letter-spacing:-.2px;line-height:36px}
+.task-sheet .task-head .task-ai-badge{margin:0;vertical-align:0;white-space:nowrap}
+.task-sheet .task-close{width:36px;height:36px;min-width:36px;border-radius:50%;background:var(--sunken);color:var(--muted);display:grid;place-items:center;padding:0}
+.task-sheet .task-close svg{width:16px;height:16px}
+.task-sheet>.task-sheet-client{margin:0 0 12px;font-size:13px;color:var(--muted)}
+.task-sheet .task-form{gap:12px;padding-left:0;padding-right:0}
+.task-sheet .task-field>span{font-size:13px;line-height:16px}
+.task-title-field{gap:12.5px!important;margin-bottom:3px!important}
+.task-title-box{position:relative;display:block}
+.task-sheet .task-title-box textarea{display:block;padding:11px 42px 11px 13px;border-radius:14px;font-size:15px;line-height:1.38;font-weight:400;
+  background:color-mix(in srgb,var(--primary) 5%,var(--surface));border:1px solid color-mix(in srgb,var(--primary) 30%,var(--surface))}
+#task-dialog .task-title-box textarea:focus{border-color:var(--primary);box-shadow:inset 0 0 0 1px var(--primary),0 0 0 4px color-mix(in srgb,var(--primary) 12%,transparent)}
+.task-title-pen{position:absolute;top:10px;right:10px;width:24px;height:24px;border-radius:8px;display:grid;place-items:center;pointer-events:none;
+  background:color-mix(in srgb,var(--primary) 12%,var(--surface));color:var(--primary)}
+.task-title-pen svg{width:14px;height:14px;stroke-width:2.2}
+/* iPhone zooms into a field typed in smaller than 16px; only while typing it grows by a pixel. */
+@media (pointer:coarse){#task-dialog .task-title-box textarea:focus,#task-dialog .task-details textarea:focus{font-size:16px}}
+/* Client's messages: one line until tapped. */
+.task-quote-short{width:100%;align-items:center;height:38px;padding:0 10px 0 12px;border:0;text-align:left;font:inherit;font-size:15px;cursor:pointer}
+.task-quote-short .task-quote-text{display:block;white-space:nowrap;text-overflow:ellipsis;-webkit-line-clamp:unset}
+.task-quote-short .task-quote-mark{font-size:18px;margin-top:0}
+.task-quote-more{flex:none;font-size:12px;font-weight:600;color:var(--muted)}
+.task-quote-chev{flex:none;display:grid;color:var(--muted)}.task-quote-chev svg{width:16px;height:16px}
+.task-quotes.open .task-quote{font-size:15px;line-height:1.38}
+.task-quotes.open .task-quote-text{-webkit-line-clamp:unset;display:block}
+.task-quote-fold{align-self:flex-start;padding:2px 0;font-size:13px;font-weight:600;color:var(--primary);background:none;border:0}
+/* Due: an even 2×2 grid, edge to edge with the fields. */
+.task-sheet .task-due{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 8px}
+.task-sheet .task-due .task-chip{height:36px;padding:0 10px;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Type and assignee: two equal boxes in one row, the whole box opens the choice. */
+.task-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.task-pick{position:relative;display:flex!important;flex-direction:column!important;justify-content:center;align-items:stretch!important;text-align:left;gap:2px!important;margin:0!important;min-width:0;height:52px;
+  padding:0 34px 0 12px;box-sizing:border-box;border:1px solid var(--line);border-radius:14px;background:var(--surface);cursor:pointer}
+.task-pick-label{font-size:12px;line-height:14px;font-weight:600;color:var(--muted)}
+.task-pick-value{font-size:15px;line-height:19px;font-weight:500;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.task-pick.empty .task-pick-value{color:var(--faint)}
+.task-pick select{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:16px;-webkit-appearance:none;appearance:none}
+.task-pick-chev{position:absolute;right:10px;top:50%;margin-top:-8px;display:grid;color:var(--muted)}.task-pick-chev svg{width:16px;height:16px}
+.task-pick.fixed{cursor:default}.task-pick.fixed .task-pick-chev{display:none}.task-pick.fixed{padding-right:12px}
+.task-pick:has(select:focus-visible){border-color:var(--primary);box-shadow:inset 0 0 0 1px var(--primary)}
+/* Details fold away behind a link. */
+.task-details{display:flex;flex-direction:column;gap:6px}
+.task-details-head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:26px}
+.task-details-label{display:none;font-size:13px;font-weight:600;color:var(--muted)}
+.task-details.open .task-details-label{display:block}
+.task-details-toggle{display:inline-flex;align-items:center;gap:6px;padding:0;border:0;background:none;color:var(--primary);font-size:14px;font-weight:600;min-height:26px}
+.task-details.open .task-details-toggle{font-size:13px}
+.task-details-toggle svg{width:14px;height:14px;stroke-width:2.4;transition:transform .15s}
+.task-details.open .task-details-toggle svg{transform:rotate(180deg)}
+.task-details-preview{margin:-4px 0 0;font-size:13px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.task-details-preview[hidden],.task-details textarea[hidden]{display:none}
+.task-sheet .task-details textarea{width:100%;box-sizing:border-box;padding:11px 13px;border:1px solid var(--line);border-radius:14px;font-size:15px;line-height:1.38;resize:none;background:var(--surface);color:var(--ink)}
+.task-sheet .task-actions{position:sticky;bottom:-1px;z-index:1;background:var(--surface);padding-top:2px}
+.task-sheet .task-actions .btn{min-height:50px;border-radius:14px;font-size:15px}
+.task-sheet .task-actions .task-save{flex:1 1 100%}
+/* Typing the task on a phone: the text and «Готово» above the keyboard, the rest after it. */
+.task-edit-bar{display:none}
+#task-dialog.title-editing .task-edit-bar{display:flex;align-items:center;gap:8px;padding:8px 8px 8px 14px;border-radius:14px;background:var(--surface-2);border:1px solid var(--line)}
+.task-edit-bar span{flex:1;font-size:13px;color:var(--muted)}
+.task-edit-done{height:36px;padding:0 16px;border:0;border-radius:18px;background:var(--primary);color:var(--on-primary);font-size:14px;font-weight:650}
+#task-dialog.title-editing :is(.task-due-field,.task-pair,.task-details,.task-actions,.task-error){display:none}
+@media (max-width:719px){#task-dialog.live-sheet{padding:8px 16px calc(16px + env(safe-area-inset-bottom,0px))}
+  #task-dialog.live-sheet::before{content:"";display:block;width:40px;height:5px;border-radius:3px;background:var(--line);margin:0 auto 12px}}
