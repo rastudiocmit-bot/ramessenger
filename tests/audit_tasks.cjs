@@ -80,8 +80,9 @@ async function geometry(page, label) {
       await page.locator('#task-dialog [data-task-close]').click();
       // Hint
       await page.locator('#chat-input').fill('Уточню расписание и напишу');
-      await page.locator('#chat-send').click(); await page.waitForSelector('.task-hint:not([hidden])'); await shot('hint');
-      await page.locator('.task-hint-close').click();
+      // With an open task the capsule asks «Задача выполнена?» instead of a hint.
+      await page.locator('#chat-send').click(); await page.waitForTimeout(1800); await shot('after-reply');
+      await page.evaluate(() => document.querySelectorAll('.notice-capsule .notice-del, .task-hint-close').forEach(b => { if (b.offsetParent) b.click(); }));
       // Reminder
       await page.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith('cm:task-reminded')) localStorage.removeItem(k); });
       await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
