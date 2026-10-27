@@ -24,6 +24,7 @@ from center_messenger.chat_store import changed, refresh_unread
 from center_messenger.chat_queue import PROJECTION_VERSION, queue_state_sql, cached_state_sql, preview as queue_preview, materialize_legacy_handled
 from center_messenger.crm_api import DirectoryReader, search_query
 from center_messenger import card_preference
+from center_messenger import alfa_shared_parent
 from center_messenger.chat_list_window import ListWindows
 from center_messenger import chat_preferences
 from center_messenger import bulk_handled, chat_revision
@@ -305,6 +306,10 @@ class ChatReader:
                      "external": external}).scalar_one_or_none()
                 if canonical:
                     return ChatReader._family_conversation(db, workspace, canonical)
+            shared = alfa_shared_parent.canonical_alias(db, workspace, row["connection_id"],
+                DirectoryReader._published(db, workspace), row["contact_id"])
+            if shared and shared != row["id"]:
+                return ChatReader._family_conversation(db, workspace, shared)
         return row
 
     @staticmethod
@@ -349,6 +354,12 @@ class ChatReader:
             .mappings()
             .one_or_none()
         )
+        if (row and not row["stored_message_count"] and row["channel_kind"] == "alfa_max_browser"
+                and row["contact_id"] and not row["crm_link_manual"]):
+            shared = alfa_shared_parent.canonical_alias(db, workspace, row["connection_id"],
+                snapshot, row["contact_id"])
+            if shared and shared != row["id"]:
+                return ChatReader._conversation(db, workspace, shared, lock=lock, cached=cached)
         if row is None:
             raise AuthError(404, "Диалог недоступен.")
         if row["channel_kind"] == "alfa_max_browser" and row["contact_id"] and not row["crm_link_manual"]:

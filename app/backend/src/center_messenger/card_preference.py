@@ -278,8 +278,17 @@ def _rank(rows, facts, members, snapshot):
     return rank, evidence, chosen
 
 
-def choose(source, by_contact, by_phone, facts, members, snapshot, previous=None):
+def choose(source, by_contact, by_phone, facts, members, snapshot, previous=None, verified_contacts=None):
     phone, cohort, eligible, ambiguous = _cohort(source, by_contact, by_phone)
+    proven = set(map(str, verified_contacts or []))
+    if (len(proven) > 1 and phone and source in proven
+            and proven <= {row["contact_id"] for row in cohort}):
+        # A shared inbound MAX row proves this particular peer; the phone alone
+        # never bypasses the conflicting-parent guard for other contacts.
+        eligible = [row for row in cohort if row["contact_id"] in proven]
+        ambiguous = None
+    else:
+        proven = set()
     if not eligible:
         return None
     customers = defaultdict(list)
@@ -294,7 +303,9 @@ def choose(source, by_contact, by_phone, facts, members, snapshot, previous=None
     # than appearing as an extra child in the displayed active family.
     displayed = {r["contact_id"] for r in eligible if r["status"] != "archive" and person_name(r["name"], real_phones)}
     displayed = displayed or {row["contact_id"]}
-    if rank < 3 or ambiguous:
+    if proven:
+        displayed = proven
+    if (rank < 3 and not proven) or ambiguous:
         displayed = {source}
     # A global Customer ID with contradictory branch observations is never
     # allowed to redirect a different family automatically.
@@ -349,7 +360,13 @@ def refresh(db, workspace, snapshot, sources):
         key = f"{snapshot['connection_id']}:{source}"
         previous = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND topic=:t AND event_key=:key"),
             {"w": workspace, "t": TOPIC, "key": key}).scalar_one_or_none()
-        result = choose(source, by_contact, by_phone, facts, members, snapshot, previous)
+        from center_messenger.alfa_shared_parent import members as proven_members
+        own = by_contact.get(source, [])
+        phones = {r["phones"][0] for r in own if r["phones"]}
+        verified = (proven_members(db, workspace, snapshot["connection_id"], snapshot,
+                                   UUID(source), next(iter(phones))) if len(phones) == 1 else [])
+        result = choose(source, by_contact, by_phone, facts, members, snapshot, previous,
+                        verified_contacts=verified)
         if not result:
             continue
         same = previous and previous.get("signature") == result["signature"]

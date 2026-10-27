@@ -19,7 +19,7 @@ def customer_directory(db, workspace, snapshot, identities):
     if not snapshot or not identities:
         return {}
     rows = db.execute(text(
-        "SELECT a.branch_id,a.external_id,a.contact_id,b.available FROM alfa_customers a "
+        "SELECT a.branch_id,a.external_id,a.contact_id,a.phones->>0 AS primary_phone,a.status,b.available FROM alfa_customers a "
         "LEFT JOIN alfa_branches b ON b.workspace_id=a.workspace_id AND b.connection_id=:crm "
         "AND b.external_id=a.branch_id WHERE a.workspace_id=:w AND a.run_id=:r "
         "AND a.external_id=ANY(CAST(:ids AS bigint[])) ORDER BY a.external_id,a.branch_id"
@@ -42,11 +42,14 @@ def resolve_customer(raw, directory):
         # The journal URL is a viewing context. The published CRM directory
         # determines the customer's real membership, even from another route.
         chosen = min(matches, key=lambda row: (row.get("available") is False, row["branch_id"]))
-        customer.update(contact_id=chosen["contact_id"], branch_id=chosen["branch_id"], global_id_verified=True)
+        customer.update(contact_id=chosen["contact_id"], branch_id=chosen["branch_id"],
+                        primary_phone=chosen["primary_phone"], status=chosen["status"],
+                        global_id_verified=True)
     elif exact:
         # Reused IDs in different branches remain separate when the directory
         # does not prove a single contact for this customer ID.
-        customer.update(contact_id=exact["contact_id"])
+        customer.update(contact_id=exact["contact_id"], primary_phone=exact["primary_phone"],
+                        status=exact["status"])
     return customer
 
 
@@ -156,9 +159,13 @@ def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None, o
     snapshot = DirectoryReader._published(db, workspace)
     if not snapshot:
         return False
+    shared_changed = False
+    if only_contacts is None:
+        from center_messenger.alfa_shared_parent import repair_batch as repair_shared
+        shared_changed = repair_shared(service, db, workspace, channel, snapshot, cursor)
     previous = cursor.get("client_repair", {}) if only_contacts is None else {}
     if only_contacts is None and cursor.get("sync_policy") == 1 and previous.get("version") == REPAIR_VERSION and previous.get("complete"):
-        return False
+        return shared_changed
     run = str(snapshot["run"])
     # A refreshed CRM snapshot gets a new run UUID even when all identities
     # are unchanged. Resume by identity evidence so refreshes cannot starve
@@ -178,7 +185,7 @@ def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None, o
             if previous.get("run") != run or previous.get("mapping") != mapping["fingerprint"] or "total" not in previous:
                 cursor["client_repair"] = previous | {"run": run, "mapping": mapping["fingerprint"], "total": mapping["total"]}
                 return True
-            return False
+            return shared_changed
         after, processed = previous.get("after"), previous.get("processed", 0)
     else:
         after, processed = None, 0
