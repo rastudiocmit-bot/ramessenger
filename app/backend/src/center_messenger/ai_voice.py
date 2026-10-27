@@ -377,6 +377,29 @@ class AiVoice:
         ), {"w": workspace, "a": agent_id, "v": version, "n": values["name"], "m": values["model"],
             "p": values["prompt"], "t": values["temperature"], "task": values["task"], "u": actor.user_id})
 
+    @staticmethod
+    def _ensure_default(db, workspace, task):
+        """Every task with an enabled agent has exactly one main agent.
+
+        Saving an agent with «Основной» unticked, switching it off and on, or
+        moving the main agent to another task used to leave the task without a
+        main agent, so voice input silently skipped polishing. Pick the most
+        recently changed enabled agent instead; the change takes effect on the
+        very next recording (agents are read fresh for every request).
+        """
+        db.execute(text(
+            "UPDATE ai_agents SET is_default=false WHERE workspace_id=:w AND task=:t AND is_default "
+            "AND (NOT enabled OR deleted_at IS NOT NULL)"
+        ), {"w": workspace, "t": task})
+        if db.execute(text(
+            "SELECT 1 FROM ai_agents WHERE workspace_id=:w AND task=:t AND is_default AND enabled AND deleted_at IS NULL"
+        ), {"w": workspace, "t": task}).first() is None:
+            db.execute(text(
+                "UPDATE ai_agents SET is_default=true WHERE workspace_id=:w AND id=("
+                "SELECT id FROM ai_agents WHERE workspace_id=:w AND task=:t AND enabled AND deleted_at IS NULL "
+                "ORDER BY updated_at DESC, id LIMIT 1)"
+            ), {"w": workspace, "t": task})
+
     def create_agent(self, actor, workspace, data):
         values = _clean_agent(data)
         with self.accounts.transaction(actor) as db:
@@ -399,6 +422,7 @@ class AiVoice:
                 "p": values["prompt"], "t": values["temperature"], "e": values["enabled"],
                 "d": values["is_default"], "u": actor.user_id})
             self._version(db, workspace, agent_id, 1, values, actor)
+            self._ensure_default(db, workspace, values["task"])
             audit(db, "ai_agent_created", user_id=actor.user_id, workspace_id=workspace, subject_id=agent_id)
             return _agent_public(self._agent(db, workspace, agent_id))
 
@@ -422,17 +446,20 @@ class AiVoice:
                 "d": values["is_default"] and values["enabled"], "v": version, "u": actor.user_id})
             if content:
                 self._version(db, workspace, agent_id, version, values, actor)
+            for task in {old["task"], values["task"]}:
+                self._ensure_default(db, workspace, task)
             audit(db, "ai_agent_updated", user_id=actor.user_id, workspace_id=workspace, subject_id=agent_id)
             return _agent_public(self._agent(db, workspace, agent_id))
 
     def delete_agent(self, actor, workspace, agent_id):
         with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
-            self._agent(db, workspace, agent_id, lock=True)
+            old = self._agent(db, workspace, agent_id, lock=True)
             db.execute(text(
                 "UPDATE ai_agents SET deleted_at=now(),is_default=false,enabled=false,updated_at=now(),updated_by=:u "
                 "WHERE workspace_id=:w AND id=:id"
             ), {"w": workspace, "id": agent_id, "u": actor.user_id})
+            self._ensure_default(db, workspace, old["task"])
             audit(db, "ai_agent_deleted", user_id=actor.user_id, workspace_id=workspace, subject_id=agent_id)
 
     def versions(self, actor, workspace, agent_id):
@@ -539,8 +566,8 @@ class AiVoice:
                 raise AuthError(429, "Лимит голосового ввода на этот месяц исчерпан.")
             agent = db.execute(text(
                 "SELECT * FROM ai_agents WHERE workspace_id=:w AND task='voice_input' AND enabled "
-                "AND deleted_at IS NULL AND (id=CAST(:id AS uuid) OR (CAST(:id AS uuid) IS NULL AND is_default)) "
-                "LIMIT 1"
+                "AND deleted_at IS NULL AND (id=CAST(:id AS uuid) OR CAST(:id AS uuid) IS NULL) "
+                "ORDER BY is_default DESC, updated_at DESC LIMIT 1"
             ), {"w": workspace, "id": str(agent_id) if agent_id else None}).mappings().one_or_none()
             if agent_id and agent is None:
                 raise AuthError(404, "Агент не найден или выключен.")
@@ -573,13 +600,13 @@ class AiVoice:
         if on_recognized:
             on_recognized({"text": raw, "seconds": round(seconds, 1)})
         result = {"raw_text": raw, "text": raw, "seconds": round(seconds, 1), "agent": None,
-                  "fallback": False, "warning": None}
+                  "fallback": False, "warning": None, "polish": "no_agent"}
         tokens, error = (0, 0), None
         if agent:
             normalized, tokens, model_spent, fallback, error = self._normalize(raw, agent, creds)
             cost += model_spent
-            result |= {"text": normalized, "fallback": fallback,
-                       "agent": {"id": str(agent["id"]), "name": agent["name"]}}
+            result |= {"text": normalized, "fallback": fallback, "polish": error or "ok",
+                       "agent": {"id": str(agent["id"]), "name": agent["name"], "model": agent["model"]}}
             if fallback:
                 result["warning"] = ("Текст вставлен без обработки: " + PROVIDERS[provider_of(agent["model"])]
                                      + " не подключён." if error == "not_connected"

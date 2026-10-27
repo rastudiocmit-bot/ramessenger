@@ -102,7 +102,8 @@ class FakeDB:
             return Result()
         if "FROM ai_agents WHERE workspace_id=:w AND task='voice_input'" in sql:
             wanted = params["id"]
-            rows = [a for a in self.agents if a["enabled"] and (str(a["id"]) == wanted if wanted else a["is_default"])]
+            rows = sorted((a for a in self.agents if a["enabled"] and (str(a["id"]) == wanted if wanted else True)),
+                          key=lambda a: not a["is_default"])
             return Result(rows[:1])
         raise AssertionError(f"unexpected SQL: {sql[:80]}")
 
@@ -186,6 +187,13 @@ ACTOR = Actor(user_id=uuid4())
 
 
 class TranscribeTest(unittest.TestCase):
+    def test_enabled_agent_polishes_even_when_none_is_marked_main(self):
+        voice, db = service()
+        db.agents[0]["is_default"] = False
+        result = voice.transcribe(ACTOR, WS, silence(2))
+        self.assertEqual(result["text"], "Мы придём завтра.")
+        self.assertEqual((result["polish"], result["agent"]["model"]), ("ok", "yandexgpt-5.1"))
+
     def test_dictation_polish_is_capped_so_the_operator_is_not_kept_waiting(self):
         voice, _ = service()
         voice.transcribe(ACTOR, WS, silence(2))

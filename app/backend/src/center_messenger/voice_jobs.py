@@ -76,8 +76,12 @@ class VoiceJobs:
             update = {"status": "error", "error": (503, "Не удалось обработать запись. Повторите позже.")}
         finished = monotonic()
         logging.getLogger("uvicorn.error.voice").info(
-            "Voice job workspace=%s attempt=%s job=%s status=%s queue_ms=%d recognize_ms=%d finish_ms=%d total_ms=%d",
-            workspace, attempt_id, key, update["status"], round((started - queued_at) * 1000),
+            "Voice job workspace=%s attempt=%s job=%s status=%s agent_model=%s polish=%s "
+            "queue_ms=%d recognize_ms=%d finish_ms=%d total_ms=%d",
+            workspace, attempt_id, key, update["status"],
+            ((update.get("result") or {}).get("agent") or {}).get("model", "none"),
+            (update.get("result") or {}).get("polish", "none"),
+            round((started - queued_at) * 1000),
             round(((recognized_at or finished) - started) * 1000),
             round((finished - recognized_at) * 1000) if recognized_at else 0,
             round((finished - queued_at) * 1000),
