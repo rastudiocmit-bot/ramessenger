@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
-def family_read_stage(stage):
+def family_read_stage(stage, route="/api/workspaces/{workspace_id}/chats/{conversation_id}/family"):
     started = perf_counter()
     try:
         yield
@@ -49,8 +49,7 @@ def family_read_stage(stage):
         if elapsed >= 250:
             # Same searchable prefix as the request timing; never include IDs,
             # query parameters, customer names or underlying exception text.
-            logger.warning("Slow API read route=/api/workspaces/{workspace_id}/chats/{conversation_id}/family "
-                           "stage=%s duration_ms=%.0f", stage, elapsed)
+            logger.warning("Slow API read route=%s stage=%s duration_ms=%.0f", route, stage, elapsed)
 
 # Cached columns are used only after the resumable repair has completed.
 # During repair the same policy supplies live values, so no stale zero is shown.
@@ -142,14 +141,18 @@ class ChatReader:
                     "voice_max_seconds": AiVoice.voice_duration(db, workspace) if writable else 180}
 
     def bootstrap(self, actor, workspace, **filters):
-        context = self.context(actor, workspace)
-        listing = self.listing(actor, workspace, through_page=0, window=90, **filters)
+        route = "/api/workspaces/{workspace_id}/chats/bootstrap"
+        with family_read_stage("bootstrap.context", route):
+            context = self.context(actor, workspace)
+        with family_read_stage("bootstrap.list", route):
+            listing = self.listing(actor, workspace, through_page=0, window=90, **filters)
         first = listing["conversations"][0] if listing["conversations"] else None
         history = None
         retry_history = False
         if first:
             try:
-                history = self.history(actor, workspace, UUID(first["id"]), limit=40)
+                with family_read_stage("bootstrap.history", route):
+                    history = self.history(actor, workspace, UUID(first["id"]), limit=40)
             except AuthError as error:
                 if error.status != 404:
                     raise

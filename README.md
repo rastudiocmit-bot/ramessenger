@@ -93,6 +93,7 @@ Docker Compose, сборку образа и граф миграций при pu
 
 ## Документация
 
+- [Этап 4: ошибки и продолжение загрузки карточек](docs/releases/2026-10-27-card-refresh-resume.md)
 - [Размещение](docs/deployment.md)
 - [Контроллер обновлений](docs/autodeploy.md)
 - [HTTPS](docs/https.md)

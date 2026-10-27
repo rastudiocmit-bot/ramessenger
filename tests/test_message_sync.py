@@ -1764,6 +1764,220 @@ class MessageSyncTests(unittest.TestCase):
         self.assertIn("AlfaCRM", meta["history_error"])
         self.assertIsNotNone(self.reader.listing(None, self.workspace)["conversations"][0]["history_error"])
 
+    def test_card_final_401_blocks_dependent_sections_and_settings_resume_keeps_cache(self):
+        from center_messenger.alfa_client import AlfaError, AlfaSettingsInput
+        reader, worker, _ = self.family_worker_fixture(include_groups=True)
+        self.project(self.row())
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,refreshed_at) "
+            "VALUES(:w,:c,1,7,1,123.45,now()-interval '1 hour')"), {"w":self.workspace,"c":self.crm})
+        worker.schedule(self.workspace)
+        job = worker.claim(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance', side_effect=AlfaError('unauthorized',401)):
+            worker.process(self.workspace,job)
+        self.assertIsNone(worker.claim(self.workspace))
+        cache = reader.detail(None,self.workspace,self.contact)['cache']
+        self.assertTrue(cache['paused']);self.assertFalse(cache['refreshing'])
+        self.assertEqual(cache['failures'][0]['code'],'credentials_required')
+        self.assertIsNone(cache['retry_at'])
+        self.assertEqual(str(self.family_facts()['balance']),'123.45')
+        before = [(m['id'],m['payload']) for m in self.messages()]
+        old = worker.connections._row(self.db,self.workspace)
+        self.db.execute(text("UPDATE alfa_settings SET api_email='test@example.org' WHERE workspace_id=:w"),{'w':self.workspace})
+        worker.connections.save(SimpleNamespace(user_id=self.user),self.workspace,AlfaSettingsInput(
+            origin=old['origin'],email='test@example.org',api_key='synthetic-api-key-12345'))
+        self.assertEqual(str(self.family_facts()['balance']),'123.45')
+        self.assertEqual(self.family_facts()['settings_version'],2)
+        resumed = worker.claim(self.workspace)
+        self.assertIsNotNone(resumed);self.assertEqual(resumed['version'],2)
+        self.assertNotIn('checkpoint',resumed)
+        self.assertEqual(before,[(m['id'],m['payload']) for m in self.messages()])
+
+    def test_card_403_blocks_only_one_branch_operation_and_force_can_recheck(self):
+        from center_messenger.alfa_client import AlfaError
+        from center_messenger import group_links
+        reader,worker,_=self.family_worker_fixture(include_groups=True)
+        self.project(self.row());worker.schedule(self.workspace)
+        first=worker.claim(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance',side_effect=AlfaError('forbidden',403)):
+            worker.process(self.workspace,first)
+        second=worker.claim(self.workspace)
+        self.assertIsNotNone(second);self.assertEqual(second['topic'],group_links.TOPIC)
+        with patch('center_messenger.group_links.fetch',return_value=({},[])):
+            worker.process(self.workspace,second)
+        self.assertIsNone(worker.claim(self.workspace))
+        reader.prepare(None,self.workspace,self.contact,conversation=self.conversation()['id'],force=True)
+        retry=worker.claim(self.workspace)
+        self.assertIsNotNone(retry);self.assertEqual(retry['topic'],'crm.card.refresh')
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
+            worker.process(self.workspace,retry)
+        from center_messenger.card_jobs import blocks
+        self.assertFalse(blocks(self.db,self.workspace,self.crm,1))
+
+    def test_card_429_blocks_sibling_jobs_until_the_source_deadline(self):
+        from center_messenger.alfa_client import AlfaError
+        reader,worker,_=self.family_worker_fixture(include_groups=True)
+        self.project(self.row());worker.schedule(self.workspace)
+        with patch('center_messenger.family_cache.fetch_family_finance',side_effect=AlfaError('rate_limited',429,'900')):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        self.assertIsNone(worker.claim(self.workspace))
+        data=reader.detail(None,self.workspace,self.contact)['cache']
+        self.assertFalse(data['paused']);self.assertEqual(data['failures'][0]['http_status'],429)
+        self.assertGreater(datetime.fromisoformat(data['retry_at']),datetime.now(UTC)+timedelta(seconds=895))
+
+    def test_card_checkpoint_survives_late_page_failure_and_worker_restart(self):
+        from center_messenger.alfa_client import AlfaError
+        from center_messenger.family_cache import FamilyCacheWorker
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,refreshed_at) "
+            "VALUES(:w,:c,1,7,1,123.45,now()-interval '1 hour')"),{'w':self.workspace,'c':self.crm})
+        worker.schedule(self.workspace)
+        wire=Mock();calls=[];failed=False
+        def call(path,body):
+            nonlocal failed
+            calls.append((path,dict(body)))
+            if path.endswith('/customer/index'):
+                items=[{'id':7,'balance':'450.00','paid_lesson_count':3}];total=1
+            elif '/customer-tariff/' in path:
+                items=[] if body['dead'] else [{'id':40,'customer_id':7,'tariff_id':9,'balance':'200'}];total=len(items)
+            else:
+                if body['page']==2 and not failed:
+                    failed=True
+                    raise AlfaError('network')
+                items=[{'id':9+body['page'],'name':'Tariff','type':1}];total=3
+            return {'items':items,'total':total,'page':body['page']}
+        wire.call.side_effect=call;worker.connections.client_factory.return_value=wire
+        # Three finance pages are saved; tariffs wait for another bounded turn.
+        worker.process(self.workspace,worker.claim(self.workspace))
+        self.assertEqual(str(self.family_facts()['balance']),'123.45')
+        checkpoint=self.family_jobs()[0]['payload']['checkpoint']
+        self.assertEqual(checkpoint['pages'],3)
+        restarted=FamilyCacheWorker(worker.connections)
+        with patch('center_messenger.family_cache.fetch_family_lessons',return_value=[]):
+            # Old lesson jobs can run before the yielded finance turn.
+            for _ in range(5):
+                job=restarted.claim(self.workspace)
+                if job is None:break
+                restarted.process(self.workspace,job)
+                if failed:break
+        self.assertTrue(failed)
+        self.assertEqual(str(self.family_facts()['balance']),'123.45')
+        self.assertEqual(self.family_jobs()[0]['payload']['checkpoint']['pages'],5)
+        self.db.execute(text("UPDATE outbox_events SET payload=jsonb_set(payload,'{available_at}',to_jsonb((now()-interval '1 second')::text)) "
+            "WHERE workspace_id=:w AND topic='crm.card.refresh'"),{'w':self.workspace})
+        restarted=FamilyCacheWorker(worker.connections)
+        with patch('center_messenger.family_cache.fetch_family_lessons',return_value=[]):
+            for _ in range(6):
+                job=restarted.claim(self.workspace)
+                if job is None:break
+                restarted.process(self.workspace,job)
+                if self.family_jobs()[0]['state']=='published':break
+        self.assertEqual(str(self.family_facts()['balance']),'450.00')
+        self.assertNotIn('checkpoint',self.family_jobs()[0]['payload'])
+        self.assertEqual(len([p for p,b in calls if p.endswith('/customer/index')]),1)
+        self.assertEqual([b['page'] for p,b in calls if p.endswith('/tariff/index')],[0,1,2,2])
+
+    def test_card_manual_request_during_checkpoint_is_not_lost(self):
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row());worker.schedule(self.workspace)
+        job=worker.claim(self.workspace)
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||CAST(:p AS jsonb) WHERE workspace_id=:w AND id=:id"),
+            {'w':self.workspace,'id':job['id'],'p':json.dumps({'checkpoint':{'pages':1}})})
+        reader.prepare(None,self.workspace,self.contact,conversation=self.conversation()['id'],force=True)
+        worker.finish(self.db,self.workspace,job)
+        self.assertEqual(self.family_jobs()[0]['state'],'pending')
+        self.assertNotIn('checkpoint',self.family_jobs()[0]['payload'])
+        self.assertIsNotNone(worker.claim(self.workspace))
+
+    def test_card_expired_lease_cannot_save_a_page_or_replace_good_facts(self):
+        _,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,refreshed_at) "
+            "VALUES(:w,:c,1,7,1,123.45,now()-interval '1 hour')"),{'w':self.workspace,'c':self.crm})
+        worker.schedule(self.workspace);job=worker.claim(self.workspace)
+        wire=Mock()
+        def call(path,body):
+            self.db.execute(text("UPDATE outbox_events SET payload=jsonb_set(payload,'{lease_until}',to_jsonb((now()-interval '1 second')::text)) "
+                "WHERE workspace_id=:w AND id=:id"),{'w':self.workspace,'id':job['id']})
+            return {'items':[{'id':7,'balance':'9999'}],'total':1,'page':0}
+        wire.call.side_effect=call;worker.connections.client_factory.return_value=wire
+        worker.process(self.workspace,job)
+        self.assertNotIn('checkpoint',self.family_jobs()[0]['payload'])
+        self.assertEqual(str(self.family_facts()['balance']),'123.45')
+
+    def test_card_rate_limit_uses_the_shared_host_clock_without_sending_http(self):
+        from center_messenger.alfa_service import AlfaConnections
+        from center_messenger.alfa_client import AlfaError
+        connections=AlfaConnections(self.accounts,Mock(),Mock())
+        with self.assertRaises(AlfaError):
+            with connections._host_gate('https://test.s20.online'):
+                raise AlfaError('rate_limited',429,'900')
+        self.db.execute(text("UPDATE alfa_request_leases SET lease_until=now()-interval '1 second'"))
+        with self.assertRaises(AlfaError) as caught:
+            with connections._host_gate('https://test.s20.online') as gate:
+                gate()
+        self.assertEqual(caught.exception.status,429)
+        self.assertGreater(float(caught.exception.retry_after),895)
+
+    def test_group_checkpoint_publishes_memberships_only_after_all_metadata_is_verified(self):
+        from center_messenger import group_links
+        _,worker,_=self.family_worker_fixture(include_groups=True)
+        group_links.enqueue(self.db,self.workspace,self.snapshot,contact=self.contact)
+        job=worker.claim(self.workspace);self.assertEqual(job['topic'],group_links.TOPIC)
+        wire=Mock();calls=[]
+        def call(path,body):
+            calls.append((path,dict(body)))
+            items=([{'id':100+n,'customer_id':7,'group_id':10+n} for n in range(4)]
+                   if '/cgi/customer' in path else [{'id':body['id'],'name':'Group'}])
+            return {'items':items,'total':len(items),'page':body['page']}
+        wire.call.side_effect=call;worker.connections.client_factory.return_value=wire
+        worker.process(self.workspace,job)
+        count=lambda:self.db.execute(text('SELECT count(*) FROM alfa_memberships WHERE workspace_id=:w'),{'w':self.workspace}).scalar()
+        self.assertEqual(count(),0)
+        worker.process(self.workspace,worker.claim(self.workspace))
+        self.assertEqual(count(),4)
+        self.assertEqual(len([p for p,b in calls if '/cgi/customer' in p]),1)
+
+    def test_card_quota_and_aging_let_groups_run_under_finance_pressure(self):
+        from center_messenger import group_links
+        _,worker,_=self.family_worker_fixture(include_groups=True)
+        self.project(self.row());worker.schedule(self.workspace)
+        observed=[]
+        for _ in range(5):
+            job=worker.claim(self.workspace);observed.append(job['topic']);worker.yield_job(self.workspace,job)
+        self.assertIn(group_links.TOPIC,observed)
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('manual',true) "
+            "WHERE workspace_id=:w AND topic='crm.card.refresh'"),{'w':self.workspace})
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('served_at',now()-interval '16 minutes') "
+            "WHERE workspace_id=:w AND topic=:t"),{'w':self.workspace,'t':group_links.TOPIC})
+        self.assertEqual(worker.claim(self.workspace)['topic'],group_links.TOPIC)
+
+    def test_targeted_preference_catalog_preserves_candidates_without_loading_other_clients(self):
+        policy,_,_,active,_,_=self.preferred_card_fixture()
+        unrelated=uuid4();self.add_customer(unrelated,1,12345)
+        self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79999999999\"]' WHERE workspace_id=:w AND contact_id=:c"),
+            {'w':self.workspace,'c':unrelated})
+        full=policy._catalog(self.db,self.workspace,self.snapshot)
+        bounded=policy._catalog(self.db,self.workspace,self.snapshot,[self.contact])
+        self.assertNotIn(str(unrelated),bounded[0]);self.assertIn(str(active),bounded[0])
+        self.assertEqual(policy._cohort(str(self.contact),*full),policy._cohort(str(self.contact),*bounded))
+
+    def test_client_audit_reports_matches_without_message_bodies_or_writes(self):
+        from center_messenger.client_audit import inspect
+        _,worker,_=self.family_worker_fixture()
+        self.db.execute(text("UPDATE alfa_customers SET legal_name='Кашук Мария Васильевна' WHERE workspace_id=:w"),{'w':self.workspace})
+        self.project(self.row(body='private message contents'))
+        before=self.db.execute(text('SELECT count(*) FROM outbox_events WHERE workspace_id=:w'),{'w':self.workspace}).scalar()
+        result=inspect(self.db,self.workspace,'Кашук Мария Васильевна')
+        self.assertEqual(result['status'],'found');self.assertEqual(len(result['matches']),1)
+        self.assertEqual(result['conversations'][0]['messages']['visible'],1)
+        self.assertNotIn('private message contents',json.dumps(result,default=str))
+        foreign=inspect(self.db,uuid4(),'Кашук Мария Васильевна')
+        self.assertFalse(foreign['matches']);self.assertFalse(foreign['conversations']);self.assertFalse(foreign['jobs'])
+        with patch.object(DirectoryReader,'_published',return_value=None):
+            self.assertEqual(inspect(self.db,uuid4(),'Кашук Мария Васильевна')['status'],'directory_unavailable')
+        self.assertEqual(before,self.db.execute(text('SELECT count(*) FROM outbox_events WHERE workspace_id=:w'),{'w':self.workspace}).scalar())
+
     def family_worker_fixture(self, *, include_groups=False):
         from center_messenger.alfa_service import AlfaConnections
         from center_messenger.family_cache import FamilyCacheWorker
@@ -2461,7 +2675,7 @@ class MessageSyncTests(unittest.TestCase):
         student=uuid4()
         self.db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES (:w,:id,'Child')"),{'w':self.workspace,'id':student})
         self.db.execute(text("UPDATE alfa_customers SET student_id=:student,balance=3962.50,paid_lesson_count=3 WHERE workspace_id=:w"),{'w':self.workspace,'student':student})
-        return DirectoryReader(SimpleNamespace(_transaction=self.accounts.transaction,chat_transaction=self.accounts.transaction)),student
+        return DirectoryReader(SimpleNamespace(_transaction=self.accounts.transaction,chat_transaction=self.accounts.transaction,accounts=self.accounts)),student
 
     def test_family_balance_is_customer_total_before_any_subscription_cache_is_loaded(self):
         reader,student=self.family_balance_fixture()

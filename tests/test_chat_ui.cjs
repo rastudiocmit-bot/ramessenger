@@ -951,6 +951,28 @@ test('card footer stays brief while the tooltip retains separate freshness dates
   assert.match(ui.$('.family-stats').textContent,/100/);
 });
 
+test('paused CRM credentials keep cached facts visible without animation and polling observes recovery', async t=>{
+  let family=preparedFamily(1);
+  family.cache={...family.cache,pending:true,paused:true,refreshing:false,auto_refresh:false,
+    error:'CRM не приняла ключ.',failures:[{code:'credentials_required'}]};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return family;
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.match(ui.$('#chat-details-sync').textContent,/проверьте ключ CRM/);
+  assert.match(ui.$('.family-stats').textContent,/100/);
+  assert.equal(ui.$('#chat-details-dialog').classList.contains('is-refreshing'),false);
+  const timer=[...ui.timers.entries()].find(([,item])=>item.delay===60000);
+  assert.ok(timer,'a paused manual card still observes a later server recovery');
+  family={...family,cache:{...family.cache,pending:false,paused:false,error:null,failures:[],updated_at:'2026-10-27T00:00:00Z'}};
+  ui.timers.delete(timer[0]);await timer[1].callback();await flush();
+  assert.match(ui.$('#chat-details-sync').textContent,/2026-10-27/);
+  assert.doesNotMatch(ui.$('#chat-details-sync').textContent,/проверьте ключ CRM/);
+});
+
 test('ready card footer shows one update time and its refresh interval', async t=>{
   const family=preparedFamily(1);family.cache.auto_refresh=true;
   const ui=setup(t,url=>{

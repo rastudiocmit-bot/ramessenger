@@ -8,6 +8,9 @@ import secrets
 import socket
 import ssl
 import time
+import math
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 from pydantic import EmailStr, Field, SecretStr, field_validator
@@ -15,6 +18,7 @@ from pydantic import EmailStr, Field, SecretStr, field_validator
 from center_messenger.auth_security import InputModel
 
 ERRORS = {
+    "not_found": "CRM не вернула клиента с этим ID, включая архив.",
     "unauthorized": "АльфаCRM не приняла email или ключ API (v2api).",
     "forbidden": "Проверьте доступ пользователя CRM к API и нужным филиалам.",
     "branch_required": (
@@ -36,6 +40,23 @@ class AlfaError(Exception):
     def __init__(self, code, status=None, retry_after=None):
         self.code, self.status, self.retry_after = code, status, retry_after
         super().__init__(ERRORS[code])
+
+
+def retry_seconds(value, *, now=None):
+    """Retry-After accepts both delay seconds and an HTTP date."""
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (ValueError, TypeError):
+        try:
+            at = parsedate_to_datetime(str(value))
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=UTC)
+            seconds = (at - (now or datetime.now(UTC))).total_seconds()
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return max(0, seconds) if math.isfinite(seconds) else None
 
 
 def normalize_origin(value: str) -> str:
@@ -193,15 +214,13 @@ class AlfaClient:
             except AlfaError as error:
                 if error.code not in {"rate_limited", "unavailable", "network"} or attempt == 2:
                     raise
-                try:
-                    delay = (
-                        float(error.retry_after) if error.retry_after is not None else 2**attempt
-                    )
-                    if not 0 <= delay <= 30:
-                        delay = 30
-                except (ValueError, TypeError):
-                    delay = 2**attempt
-                self._wait(max(0.35, delay) + secrets.randbelow(100) / 1000)
+                delay = retry_seconds(error.retry_after)
+                delay = max(0.35, delay if delay is not None else 2**attempt) + secrets.randbelow(100) / 1000
+                # Preserve the real HTTP cause and the full server pause for
+                # durable workers; do not turn a long 429 into a timeout.
+                if time.monotonic() + delay >= self.deadline:
+                    raise
+                self._wait(delay)
         raise AlfaError("unavailable")
 
     def _login(self):

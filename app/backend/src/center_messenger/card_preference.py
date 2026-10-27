@@ -144,14 +144,31 @@ def person_name(value, phones):
     return normalized_name(value)
 
 
-def _catalog(db, workspace, snapshot):
-    rows = list(db.execute(text("SELECT a.external_id,a.branch_id,a.contact_id,a.student_id,a.name,a.legal_name,a.legal_type,"
+def _catalog(db, workspace, snapshot, sources=None):
+    # A card opening needs only its own contacts and all direct primary-phone
+    # candidates, including every branch/card of those candidates. Keep the
+    # same ambiguity guards; do not read the entire directory for one family.
+    prefix, restriction = "", ""
+    if sources is not None:
+        prefix = """WITH source_phones AS MATERIALIZED (
+          SELECT a.phones->>0 AS phone FROM alfa_customers a JOIN alfa_branches b
+            ON b.workspace_id=a.workspace_id AND b.connection_id=:conn AND b.external_id=a.branch_id AND b.available
+          WHERE a.workspace_id=:w AND a.run_id=:r AND a.contact_id=ANY(CAST(:sources AS uuid[]))
+        ), candidates AS MATERIALIZED (
+          SELECT unnest(CAST(:sources AS uuid[])) AS contact_id UNION
+          SELECT a.contact_id FROM alfa_customers a JOIN alfa_branches b
+            ON b.workspace_id=a.workspace_id AND b.connection_id=:conn AND b.external_id=a.branch_id AND b.available
+          WHERE a.workspace_id=:w AND a.run_id=:r AND a.phones->>0 IN (SELECT phone FROM source_phones)
+        ) """
+        restriction = " AND a.contact_id IN (SELECT contact_id FROM candidates) "
+    rows = list(db.execute(text(prefix + "SELECT a.external_id,a.branch_id,a.contact_id,a.student_id,a.name,a.legal_name,a.legal_type,"
         "a.dob,a.status,a.phones,d.display_name," + guard_piece() + " AS guard_piece FROM alfa_customers a "
         "JOIN alfa_branches b ON b.workspace_id=a.workspace_id AND b.connection_id=:conn "
         "AND b.external_id=a.branch_id AND b.available LEFT JOIN alfa_directory d ON d.workspace_id=a.workspace_id "
         "AND d.run_id=a.run_id AND d.contact_id=a.contact_id WHERE a.workspace_id=:w AND a.run_id=:r "
-        "AND a.contact_id IS NOT NULL ORDER BY a.external_id,a.branch_id"),
-        {"w": workspace, "r": snapshot["run"], "conn": snapshot["connection_id"]}).mappings())
+        "AND a.contact_id IS NOT NULL " + restriction + "ORDER BY a.external_id,a.branch_id"),
+        {"w": workspace, "r": snapshot["run"], "conn": snapshot["connection_id"],
+         "sources": list(map(str, sources or []))}).mappings())
     by_contact, by_phone = defaultdict(list), defaultdict(list)
     for raw in rows:
         row = dict(raw); row["contact_id"] = str(row["contact_id"])
@@ -324,7 +341,7 @@ def refresh(db, workspace, snapshot, sources):
         {"w": workspace, "conn": snapshot["connection_id"], "r": snapshot["run"], "v": snapshot["version"]}).scalar_one_or_none()
     if not valid:
         return 0
-    by_contact, by_phone = _catalog(db, workspace, snapshot)
+    by_contact, by_phone = _catalog(db, workspace, snapshot, sources)
     cohorts = [_cohort(str(source), by_contact, by_phone)[1] for source in sources]
     facts, members = _facts(db, workspace, snapshot, {r["external_id"] for cohort in cohorts for r in cohort})
     count, at = 0, datetime.now(UTC).isoformat()
