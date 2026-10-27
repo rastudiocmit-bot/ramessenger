@@ -171,8 +171,10 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     // Real touch on the stream: taps and swipes do not start recording.
     const cdp = await phoneContext.newCDPSession(phone);
     const touchAt = async (type, spot) => cdp.send('Input.dispatchTouchEvent', {type, touchPoints: spot ? [spot] : []});
+    // A long press on a message opens its menu (tasks); the background beside it records.
+    const beside = box => ({x: box.x > 390 - box.x - box.width ? box.x / 2 : (box.x + box.width + 390) / 2, y: box.y + box.height/2});
     const bubble = await phone.locator('.chat-bubble').nth(1).boundingBox();
-    const spot = {x:bubble.x + bubble.width/2, y:bubble.y + bubble.height/2};
+    const spot = beside(bubble);
     const listHeard = phoneData.ai.transcribe.length;
     await touchAt('touchStart',spot); await phone.waitForTimeout(100); await touchAt('touchEnd'); await phone.waitForTimeout(600);
     assert.equal(await phone.locator('#voice-hold').isVisible(), false);
@@ -190,7 +192,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     // result mode or automatic sending, upward motion discards the recording.
     await phone.locator('#chat-input').fill(''); await phone.waitForTimeout(300);
     const dragBox=await phone.locator('.chat-bubble').nth(1).boundingBox();
-    const from={x:dragBox.x+dragBox.width/2,y:dragBox.y+dragBox.height/2};
+    const from=beside(dragBox);
     await touchAt('touchStart',from); await phone.waitForSelector('#voice-hold[data-phase="recording"]'); await phone.waitForTimeout(600);
     const orbStill=await phone.locator('.voice-hold-orb').boundingBox();
     for(let step=1;step<=5;step++){await touchAt('touchMove',{x:from.x,y:from.y+step*18});await phone.waitForTimeout(30);}

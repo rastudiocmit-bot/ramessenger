@@ -374,6 +374,11 @@ window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
   const interactive = "button,a,input,textarea,select,label,summary,[contenteditable],[role=button]";
   stream.addEventListener("pointerdown", event => {
     if (event.pointerType !== "touch" || !event.isPrimary || !available() || busy() || event.target.closest(interactive)) return;
+    // Long press on a message opens its menu (tasks.js); the background stays for voice.
+    // «Везде меню» leaves voice to the microphone button; picking messages pauses it.
+    const pressMode = state.taskPress || "split";
+    if (pressMode === "menu" || document.documentElement.classList.contains("task-selecting")) return;
+    if (pressMode === "split" && event.target.closest(".chat-bubble.msg")) return;
     hold = { id: event.pointerId, x: event.clientX, y: event.clientY, source: "stream", prepared: prepare() };
     document.documentElement.classList.add("voice-pending");
     hold.timer = setTimeout(() => {

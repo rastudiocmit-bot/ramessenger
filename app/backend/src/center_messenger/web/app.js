@@ -171,9 +171,9 @@
     const workspace = state.workspace;
     const none = { overview: false, team: false, messages: false, clients: false, connections: false, security: true };
     if (!workspace) return none;
-    if (["owner", "admin"].includes(workspace.role)) return { overview: true, team: true, messages: true, clients: true, connections: true, security: true };
+    if (["owner", "admin"].includes(workspace.role)) return { overview: true, team: true, messages: true, tasks: true, clients: true, connections: true, security: true };
     const granted = new Set(workspace.sections && workspace.sections.length ? workspace.sections : ["overview", "security"]);
-    return { overview: granted.has("overview"), team: false, messages: granted.has("messages"), clients: ["branch_manager", "observer"].includes(workspace.role) && granted.has("messages"), connections: false, security: granted.has("security") };
+    return { overview: granted.has("overview"), team: false, messages: granted.has("messages"), tasks: granted.has("messages"), clients: ["branch_manager", "observer"].includes(workspace.role) && granted.has("messages"), connections: false, security: granted.has("security") };
   }
   const cabinet = window.CenterCabinet({ $, state, api, node, show, roles, renderPane });
   async function renderPane(pane) {
@@ -181,7 +181,7 @@
     const sections = grantedSections();
     sections.profile = true;
     sections.summary = sections.overview && sections.messages && state.workspace?.role !== "operator";
-    if (!sections[state.pane]) state.pane = ["messages", "summary", "clients", "overview", "security", "profile"].find(key => sections[key]);
+    if (!sections[state.pane]) state.pane = ["messages", "tasks", "summary", "clients", "overview", "security", "profile"].find(key => sections[key]);
     if (state.pane !== "connections") alfaMaxProgress.reset();
 
     if (state.pane !== "clients") directory.leave();
@@ -190,6 +190,7 @@
     document.querySelectorAll("[data-page]").forEach(element => show(element, (Boolean(state.workspace) || ["security", "profile"].includes(state.pane)) && element.id === `pane-${state.pane}`));
     cabinet.update(sections);
     chat.watch();
+    tasks?.sync();
     if (!state.workspace) { if (state.pane === "security") await loadSessions(); return; }
     const manage = Boolean(state.workspace && ["owner", "admin"].includes(state.workspace.role));
     $("#workspace-role").textContent = roles[state.workspace.role] || "Сотрудник";
@@ -202,6 +203,7 @@
     show($("#workspace-readonly"), !manage);
     if (state.pane === "connections") await Promise.allSettled([ai.load(), loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
     if (state.pane === "messages") { chat.setView(state.chatView || "all", false); await chat.enter(); }
+    if (state.pane === "tasks") await tasks?.enter();
     if (state.pane === "summary") await cabinet.summary();
     if (state.pane === "clients") await directory.enter();
     if (["profile", "overview"].includes(state.pane) && sections.messages) await cabinet.metadata();
@@ -691,6 +693,7 @@
   const directory = window.CenterDirectory({ $, state, api, node, show, notice, date });
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast: feedback, confirm, renderPane });
   window.CenterVoice({ $, state, api, toast: feedback });
+  const tasks = window.CenterTasks ? window.CenterTasks({ $, state, api, node, show, toast: feedback, notices, renderPane }) : null;
   const ai = window.CenterAi({ $, state, api, node, show, notice, toast: feedback, confirm });
   const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date, onStatus: (payload, view) => {
     connectionSummary("#alfa-history-summary", view.title, view.mode === "complete" ? "active" : ["error", "offline", "attention"].includes(view.mode) ? "error" : "waiting");

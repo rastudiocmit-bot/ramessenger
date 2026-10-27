@@ -4,6 +4,9 @@ const path = require('node:path');
 const web = path.join(__dirname, '../app/backend/src/center_messenger/web');
 async function fixture(context, role = 'owner', sections = ['overview', 'messages', 'security'], options = {}) {
   const calls = [], mutations = [], errors = [], unexpected = [];
+  const tasks = { items: (options.tasks || []).map(t => ({ version: 1, status: 'open', sources: [], details: '', assignee_id: 'test', assignee_name: 'Олег Иванов', created_by: 'test', ...t })),
+    studio: { day_start: '10:00', day_end: '20:00', work_days: [1, 2, 3, 4, 5, 6], default_due: 'end_of_day', visibility: 'all', alfa_copy: false },
+    personal: { press: 'split', voice_task: 'instant', reminders: true, hints: true, digest: false } };
   const preferences = { name_order: "parent_first" };
   // Voice input and AI agents (Connections → service settings). Off in the chat unless asked.
   const ai = { settings: { configured: Boolean(options.voice), folder_id: options.voice ? 'b1gexamplefolder0000' : '', key_hint: options.voice ? 'k3y9' : '',
@@ -63,6 +66,40 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       workspaces: [{ id: 'test', name: 'Развивайся', role, timezone: 'Europe/Moscow', sections }] };
     else if (p === '/api/auth/sessions') payload = { sessions: [{ id: 'session', current: true, device_label: 'Chrome · Linux', last_seen_at: '2026-10-24T11:00:00Z' }] };
     else if (p === '/api/auth/logout') payload = {};
+    else if (p.includes('/tasks')) {
+      // Operator tasks (tasks.js): an in-memory list with the server's shapes.
+      const now = Date.now(), iso = ms => new Date(ms).toISOString();
+      const findTask = () => tasks.items.find(t => p.includes('/tasks/' + t.id));
+      if (p.endsWith('/tasks/options')) payload = { me: 'test', admin: ['owner', 'admin'].includes(role), read_only: role === 'observer', timezone: 'Europe/Moscow',
+        studio: tasks.studio, personal: tasks.personal, kinds: [], assignees: [{ id: 'test', name: 'Олег Иванов' }].concat(['owner', 'admin'].includes(role) ? [{ id: 'operator-1', name: 'Мария Петрова' }] : []),
+        presets: { hour: iso(now + 3600e3), two_hours: iso(now + 7200e3), end_of_day: iso(now + 5 * 3600e3), tomorrow_morning: iso(now + 20 * 3600e3), default: iso(now + 5 * 3600e3), default_kind: 'end_of_day' } };
+      else if (p.endsWith('/tasks/settings')) { Object.assign(tasks.studio, entry.body); payload = tasks.studio; }
+      else if (p.endsWith('/tasks/preferences')) { Object.assign(tasks.personal, entry.body); payload = tasks.personal; }
+      else if (p.endsWith('/tasks/summary')) {
+        const open = tasks.items.filter(t => t.status === 'open'), mine = open.filter(t => t.assignee_id === 'test');
+        const overdue = mine.filter(t => Date.parse(t.due_at) < now).length, today = mine.filter(t => Date.parse(t.due_at) >= now && new Date(t.due_at).toDateString() === new Date(now).toDateString()).length;
+        const conversations = {}; for (const t of open) if (t.conversation_id) { const c = conversations[t.conversation_id] ||= { count: 0, due_at: t.due_at }; c.count += 1; if (t.due_at < c.due_at) c.due_at = t.due_at; }
+        payload = { now: iso(now), overdue, today, open: mine.length, badge: overdue + today, conversations, upcoming: mine.filter(t => Date.parse(t.due_at) < now + 26 * 3600e3), studio: tasks.studio };
+      } else if (/\/tasks\/[^/]+\/(complete|cancel|reopen|snooze)$/.test(p)) {
+        const task = findTask(), verb = p.split('/').pop();
+        if (verb === 'complete') Object.assign(task, { status: 'done', completed_at: iso(now) });
+        if (verb === 'cancel') Object.assign(task, { status: 'cancelled', completed_at: iso(now) });
+        if (verb === 'reopen') Object.assign(task, { status: 'open', completed_at: null });
+        if (verb === 'snooze') Object.assign(task, { status: 'open', due_at: entry.body.due_at, completed_at: null });
+        task.version += 1; payload = task;
+      } else if (/\/tasks\/[^/]+$/.test(p) && method === 'PATCH') { const task = findTask(); Object.assign(task, entry.body); task.version += 1; payload = task; }
+      else if (/\/tasks\/[^/]+$/.test(p) && method === 'GET') payload = { task: findTask(), events: [] };
+      else if (p.endsWith('/tasks') && method === 'POST') {
+        const b = entry.body, task = { id: 'task-' + (tasks.items.length + 1), conversation_id: b.conversation_id, client_label: b.client_label, title: b.title, details: b.details || '',
+          kind: b.kind, status: 'open', due_at: b.due_at, origin: b.origin, created_by: 'test', assignee_id: b.assignee_id || 'test', assignee_name: 'Олег Иванов', completed_at: null, version: 1,
+          sources: (b.message_ids || []).map(id => { const m = messages.find(x => x.id === id); return { id, text: m?.text || '', direction: m?.direction || 'in', at: m?.occurred_at }; }) };
+        tasks.items.push(task); payload = task;
+      } else if (p.endsWith('/tasks')) {
+        const conversation = url.searchParams.get('conversation'), status = url.searchParams.get('status') || 'open', scope = url.searchParams.get('scope') || 'mine';
+        payload = { tasks: tasks.items.filter(t => conversation ? t.conversation_id === conversation : (status === 'open' ? t.status === 'open' : t.status !== 'open') && (scope === 'all' || t.assignee_id === 'test'))
+          .sort((a, b) => a.due_at.localeCompare(b.due_at)) };
+      } else { unexpected.push(method + ' ' + p); return route.fulfill({ status: 501, contentType: 'application/json', body: '{"detail":"Unmocked request"}' }); }
+    }
     else if (p.endsWith('/chats/context')) payload = { preferences, channels, branches, can_write: role !== 'observer', send_attachments: false,
       voice_input: Boolean(options.voice) && role !== 'observer' };
     else if (p.endsWith('/chats/bootstrap')) payload = {context:{version:'1:2026-10-26',preferences,channels,branches,can_write:role!=='observer',voice_input:Boolean(options.voice)&&role!=='observer'},
@@ -150,6 +187,6 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     else { unexpected.push(method + ' ' + p); return route.fulfill({ status: 501, contentType: 'application/json', body: '{"detail":"Unmocked request"}' }); }
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) });
   });
-  return { calls, mutations, errors, unexpected, conversations, messages, ai, preferences };
+  return { calls, mutations, errors, unexpected, conversations, messages, ai, preferences, tasks };
 }
 module.exports = { fixture };

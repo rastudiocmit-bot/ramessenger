@@ -4,7 +4,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
   let summaryController = null, summaryComputedAt = null;
   const icon = name => window.CenterIcon(name);
   const definition = [
-    ["messages", "Чаты", "chats"], ["summary", "Сводка", "chart"],
+    ["messages", "Чаты", "chats"], ["tasks", "Задачи", "task"], ["summary", "Сводка", "chart"],
     ["clients", "Клиенты", "people"], ["team", "Сотрудники", "team"],
     ["connections", "Подключения", "plug"], ["overview", "Организация", "building"],
     ["security", "Безопасность", "shield"], ["profile", "Профиль", "user"]
@@ -60,7 +60,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
       });
       $("#tabbar").append(more);
     }
-    $("#app").dataset.tab = ({ summary: "home", messages: "chats", clients: "clients", team: "team", connections: "conn", overview: "org", security: "sec", profile: "prof" })[state.pane] || "org";
+    $("#app").dataset.tab = ({ summary: "home", messages: "chats", tasks: "tasks", clients: "clients", team: "team", connections: "conn", overview: "org", security: "sec", profile: "prof" })[state.pane] || "org";
     if (state.workspace) {
       $("#profile-role").textContent = roles[state.workspace.role] || "Сотрудник";
       $("#profile-workspace").textContent = state.workspace.name;

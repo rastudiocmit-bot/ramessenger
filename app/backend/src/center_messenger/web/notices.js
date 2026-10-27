@@ -14,6 +14,8 @@ window.CenterNotices = ({ $ }) => {
     warning: '<rect x="4.5" y="10.5" width="15" height="9.5" rx="2.5"/><path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.4"/>',
     success: '<path d="m4 12.5 5 5L20 6.5"/>',
+    bell: '<path d="M18 16V11a6 6 0 1 0-12 0v5l-1.6 2.4h15.2z"/><path d="M10 20.5a2.2 2.2 0 0 0 4 0"/>',
+    task: '<rect x="4" y="4" width="16" height="16" rx="4.5"/><path d="m8.6 12.2 2.4 2.4 4.6-5"/>',
   };
   const svg = (paths, size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
   const cross = svg('<path d="M18 6 6 18M6 6l12 12"/>', 15);
@@ -31,6 +33,7 @@ window.CenterNotices = ({ $ }) => {
       <div class="notice-body"><strong class="notice-title"></strong><span class="notice-text"></span></div>
       <button type="button" class="notice-action" hidden></button>
       <button type="button" class="notice-del" aria-label="Удалить уведомление" title="Удалить">${cross}</button>
+      <div class="notice-acts" hidden></div>
     </div>
     <button type="button" class="notice-pill" hidden><span class="notice-count"></span><span class="notice-pill-label"></span></button>
     <div class="notice-panel" role="dialog" aria-label="Уведомления" hidden>
@@ -47,21 +50,31 @@ window.CenterNotices = ({ $ }) => {
   const clock = at => new Date(at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   const unread = () => items.filter(item => !item.read && (item.type === "error" || item.type === "warning"));
 
-  function icon(target, type) { target.className = `notice-ic ${type}`; target.innerHTML = svg(icons[type] || icons.info); }
+  function icon(target, type, glyph) { target.className = `notice-ic ${type}`; target.innerHTML = svg(icons[glyph] || icons[type] || icons.info); }
 
   function render() {
     capsule.hidden = !shown || panelOpen;
     if (shown) {
-      icon(capsule.querySelector(".notice-ic"), shown.type);
+      icon(capsule.querySelector(".notice-ic"), shown.type, shown.glyph);
       capsule.dataset.type = shown.type;
       capsule.setAttribute("role", shown.type === "error" ? "alert" : "status");
       capsule.querySelector(".notice-title").textContent = shown.title + (shown.count > 1 ? ` · ${shown.count} раза` : "");
       const text = capsule.querySelector(".notice-text"); text.textContent = shown.text || ""; text.hidden = !shown.text;
-      const action = capsule.querySelector(".notice-action");
-      action.hidden = !shown.action; action.textContent = shown.action?.label || "";
+      const action = capsule.querySelector(".notice-action"), many = (shown.actions || []).length > 0;
+      action.hidden = !shown.action || many; action.textContent = shown.action?.label || "";
+      const acts = capsule.querySelector(".notice-acts"); acts.hidden = !many; acts.replaceChildren();
+      capsule.classList.toggle("has-acts", many);
+      for (const [index, entry] of (shown.actions || []).entries()) {
+        const act = document.createElement("button"); act.type = "button"; act.textContent = entry.label;
+        act.className = index === 0 ? "notice-act primary" : "notice-act";
+        const item = shown;
+        act.addEventListener("click", event => { event.stopPropagation(); run(item, entry); });
+        acts.append(act);
+      }
+      acts.style.gridTemplateColumns = `repeat(${Math.max(1, (shown.actions || []).length)}, minmax(0, 1fr))`;
     }
     const count = unread().length;
-    pill.hidden = !enabled || Boolean(shown) || panelOpen || !count;
+    pill.hidden = Boolean(shown) || panelOpen || !count;
     pill.querySelector(".notice-count").textContent = String(count);
     pill.querySelector(".notice-pill-label").textContent = plural(count);
     panel.hidden = !panelOpen;
@@ -72,14 +85,15 @@ window.CenterNotices = ({ $ }) => {
     if (!items.length) { const empty = document.createElement("p"); empty.className = "notice-empty"; empty.textContent = "Уведомлений нет."; list.append(empty); return; }
     for (const item of items) {
       const row = document.createElement("div"); row.className = `notice-row${item.read ? " read" : ""}${item.type === "error" && !item.read ? " hot" : ""}`;
-      const ic = document.createElement("span"); icon(ic, item.type);
+      const ic = document.createElement("span"); icon(ic, item.type, item.glyph);
       const body = document.createElement("div"); body.className = "notice-body";
       const title = document.createElement("strong"); title.className = "notice-title"; title.textContent = item.title + (item.count > 1 ? ` · ${item.count} раза` : "");
       const meta = document.createElement("span"); meta.className = "notice-text"; meta.textContent = [item.text, clock(item.at)].filter(Boolean).join(" · ");
       body.append(title, meta); row.append(ic, body);
-      if (item.action) {
-        const action = document.createElement("button"); action.type = "button"; action.className = "notice-action"; action.textContent = item.action.label;
-        action.addEventListener("click", () => { run(item); });
+      const first = item.actions?.[0] || item.action;
+      if (first) {
+        const action = document.createElement("button"); action.type = "button"; action.className = "notice-action"; action.textContent = first.label;
+        action.addEventListener("click", () => { run(item, first); });
         row.append(action);
       }
       const del = document.createElement("button"); del.type = "button"; del.className = "notice-del"; del.innerHTML = cross;
@@ -104,18 +118,21 @@ window.CenterNotices = ({ $ }) => {
     if (panelOpen && !items.length) panelOpen = false;
     render();
   }
-  function run(item) {
+  function run(item, entry = item.action) {
     item.read = true;
-    try { item.action?.run?.(); } finally { if (shown === item) collapse(); else render(); }
+    if (entry?.keep !== true && item.sticky) remove(item.id);
+    try { entry?.run?.(); } finally { if (shown === item) collapse(); else render(); }
   }
 
-  /** Show a notice. Returns false when notices are switched off (the caller keeps its fallback). */
-  function notify({ type = "error", title, text = "", action = null, key = null } = {}) {
-    if (!enabled || !title) return false;
+  /** Show a notice. Returns false when notices are switched off (the caller keeps its fallback).
+   *  `always` notices (task reminders) have their own switch and ignore this one; `actions`
+   *  shows a row of buttons; `sticky` notices go away once one of their actions ran. */
+  function notify({ type = "error", title, text = "", action = null, actions = null, key = null, always = false, sticky = false, count = true, glyph = null } = {}) {
+    if ((!enabled && !always) || !title) return false;
     const id = key || `${type}|${title}|${text}`;
     let item = items.find(entry => entry.key === id);
-    if (item) { items = items.filter(entry => entry !== item); item.count += 1; item.at = Date.now(); item.read = false; item.text = text; item.action = action; }
-    else item = { id: `n${++seq}`, key: id, type, title, text, action, count: 1, at: Date.now(), read: false };
+    if (item) { items = items.filter(entry => entry !== item); if (count) item.count += 1; item.at = Date.now(); item.read = false; item.text = text; item.title = title; item.action = action; item.actions = actions; item.glyph = glyph; }
+    else item = { id: `n${++seq}`, key: id, type, title, text, action, actions, sticky, always, glyph, count: 1, at: Date.now(), read: false };
     items.unshift(item); items = items.slice(0, LIMIT);
     if (!panelOpen) { shown = item; settle(item); }
     render(); return true;
@@ -125,7 +142,7 @@ window.CenterNotices = ({ $ }) => {
     const item = items.find(entry => entry.key === key); if (item) remove(item.id);
   }
 
-  capsule.querySelector(".notice-action").addEventListener("click", () => { if (shown) run(shown); });
+  capsule.querySelector(".notice-action").addEventListener("click", event => { event.stopPropagation(); if (shown) run(shown); });
   capsule.querySelector(".notice-del").addEventListener("click", () => { if (shown) remove(shown.id); });
   capsule.addEventListener("pointerenter", () => clearTimeout(timer));
   capsule.addEventListener("pointerleave", () => { if (shown) settle(shown); });
@@ -133,6 +150,7 @@ window.CenterNotices = ({ $ }) => {
   let drag = null;
   capsule.addEventListener("pointerdown", event => {
     if (event.target.closest("button")) return;
+    if (event.target.closest(".notice-acts")) return;
     drag = { x: event.clientX, y: event.clientY, id: event.pointerId }; clearTimeout(timer);
     try { capsule.setPointerCapture(event.pointerId); } catch (_) { /* Older browsers. */ }
   });
@@ -170,10 +188,10 @@ window.CenterNotices = ({ $ }) => {
     toggle.addEventListener("change", () => {
       enabled = toggle.checked;
       try { localStorage.setItem(STORE, enabled ? "on" : "off"); } catch (_) { /* Kept for this visit only. */ }
-      if (!enabled) { shown = null; panelOpen = false; clearTimeout(timer); }
+      if (!enabled) { items = items.filter(item => item.always); shown = null; panelOpen = false; clearTimeout(timer); }
       render();
     });
   }
   render();
-  return { notify, resolve, get enabled() { return enabled; } };
+  return { notify, resolve, has: key => items.some(entry => entry.key === key), get enabled() { return enabled; } };
 };

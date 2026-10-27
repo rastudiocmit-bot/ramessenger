@@ -35,7 +35,7 @@ const nextFrame = page => page.evaluate(() => new Promise(resolve => requestAnim
           const rows = [...body.children].map(e => {const b = e.getBoundingClientRect(); return {x: b.x, right: b.right, top: b.top, transform: getComputedStyle(e).transform};});
           return {transform: getComputedStyle(body).transform, rightGap: r.right - c.right, bottom: r.bottom, rows};
         });
-        assert.equal(menu.transform, 'none'); assert.equal(menu.rows.length, 5);
+        assert.equal(menu.transform, 'none'); assert.equal(menu.rows.length, 6);
         assert.ok(menu.rightGap >= 15 && menu.rightGap <= 24, 'Close belongs at the right edge');
         for (const row of menu.rows) {assert.equal(row.transform, 'none'); assert.ok(Math.abs(row.x - menu.rows[0].x) < 1); assert.ok(row.x >= 0 && row.right <= width);}
         await save('menu');

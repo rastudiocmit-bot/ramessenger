@@ -32,7 +32,9 @@ from center_messenger.crm_api import DirectoryReader
 from center_messenger.crm_api import router as directory_router
 from center_messenger.database import SCHEMA_REVISION, database_is_ready, log_database_error, make_engine
 from center_messenger.ai_api import router as ai_router
+from center_messenger.tasks_api import router as tasks_router
 from center_messenger.ai_voice import AiVoice
+from center_messenger.tasks import Tasks
 from center_messenger.http_security import SecurityMiddleware, StaticCompressionMiddleware
 from center_messenger.max_client import MaxClient
 from center_messenger.max_connections import MaxConnections
@@ -73,6 +75,7 @@ def create_app(
         )
         app.state.alfa_sync = AlfaSync(app.state.alfa) if app.state.alfa else None
         app.state.ai_voice = AiVoice(app.state.alfa) if app.state.alfa else None
+        app.state.tasks = Tasks(app.state.alfa) if app.state.alfa else None
         app.state.alfa_max = AlfaMaxConnections(app.state.alfa) if app.state.alfa else None
         app.state.directory = DirectoryReader(app.state.alfa) if app.state.alfa else None
         app.state.max_connections = (
@@ -113,6 +116,7 @@ def create_app(
     app.include_router(directory_router)
     app.include_router(chat_router)
     app.include_router(ai_router)
+    app.include_router(tasks_router)
     app.include_router(max_hooks)
     web = Path(__file__).with_name("web")
     app.mount("/assets", StaticFiles(directory=web), name="assets")

@@ -1970,6 +1970,20 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     try { await renderPane("messages"); if (active()) await select(id); }
     catch (error) { if (!ignored(error)) toast(error.message, true); }
   });
+  // Tasks open their conversation and, when it is loaded, show the source message.
+  document.addEventListener("cm:open-chat", async event => {
+    const { id, message } = event.detail || {}; if (!id) return;
+    try {
+      await renderPane("messages"); if (!active()) return;
+      await select(id);
+      if (!message) return;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const bubble = [...$("#chat-history").children].find(child => child.dataset.id === message);
+        if (bubble) { bubble.scrollIntoView({ block: "center" }); bubble.classList.add("task-flash"); setTimeout(() => bubble.classList.remove("task-flash"), 1600); return; }
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
+    } catch (error) { if (!ignored(error)) toast(error.message, true); }
+  });
   const layout = $("#chat-layout"), resizer = $("#chat-resizer"); let width = 450, drag = null;
   function resize(value) {
     width = Math.max(300, Math.min(640, value, layout.clientWidth - 320));
