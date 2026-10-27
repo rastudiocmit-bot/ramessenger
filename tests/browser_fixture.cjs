@@ -82,7 +82,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
         else { const task = { id: 'task-' + (tasks.items.length + 1), status: 'open', origin: 'voice', created_by: 'test', assignee_name: 'Олег Иванов', details: '', version: 1, completed_at: null, ...draft };
           tasks.items.push(task); payload = { task }; }
       }
-      else if (p.endsWith('/tasks/draft')) payload = options.taskAi ? { ai: true, title: 'Записать Мишу на пробное занятие', kind: 'group', due_at: iso(now + 22 * 3600e3) } : { ai: false };
+      else if (p.endsWith('/tasks/draft')) payload = options.taskAi ? { ai: true, title: 'Записать Мишу на пробное занятие, отправить ссылку на оплату', details: '— Записать Мишу на пробное в четверг\n— Отправить ссылку на оплату', kind: 'group', due_at: iso(now + 22 * 3600e3) } : { ai: false };
       else if (p.endsWith('/tasks/hint')) payload = /уточн|провер|напиш/i.test(entry.body.text) ? { hint: { title: 'Уточнить расписание для Миши', kind: 'group', due_at: iso(now + 4 * 3600e3),
         sources: [{ id: 'm4', text: messages.find(m => m.id === 'm4')?.text || '', direction: 'in' }], ai: true } } : { hint: null };
       else if (/\/tasks\/[^/]+\/reply$/.test(p)) payload = { text: 'Анна, записали Мишу на пробное занятие в четверг в 17:00.' };

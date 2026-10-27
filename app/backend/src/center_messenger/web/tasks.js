@@ -193,7 +193,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     closeMenu(); menuFor = bubble;
     const at = bubble.getBoundingClientRect(), lifted = bubble.cloneNode(true);
     lifted.className = bubble.className + " task-lifted"; lifted.removeAttribute("data-id"); lifted.setAttribute("aria-hidden", "true");
-    lifted.querySelector(".task-tag")?.remove();
+    lifted.querySelector(".task-tag")?.remove(); lifted.querySelector(".task-pick-badge")?.remove();
     Object.assign(lifted.style, { left: `${at.left}px`, top: `${at.top}px`, width: `${at.width}px` });
     document.body.append(lifted); menuLift = lifted; bubble.classList.add("task-lift");
     const items = [];
@@ -276,7 +276,11 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   function togglePick(bubble) {
     const id = bubble.dataset.id;
     if (picked.has(id)) picked.delete(id); else if (picked.size < 5) picked.add(id); else { notices?.notify({ type: "info", title: "Не больше 5 сообщений в одной задаче", key: "task:pick-limit", count: false }); return; }
-    bubble.classList.toggle("task-picked", picked.has(id)); paintPick();
+    bubble.classList.toggle("task-picked", picked.has(id));
+    const holder = bubble.querySelector(".bub") || bubble;
+    if (picked.has(id) && !holder.querySelector(".task-pick-badge")) { const badge = node("span", undefined, "task-pick-badge"); badge.setAttribute("aria-hidden", "true"); badge.append(icon("check")); holder.append(badge); }
+    if (!picked.has(id)) holder.querySelector(".task-pick-badge")?.remove();
+    paintPick();
   }
   function paintPick() {
     const make = pickBar.querySelector(".task-pick-make");
@@ -286,7 +290,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   function endPick() {
     if (!pickMode) return;
     pickMode = false; document.documentElement.classList.remove("task-selecting"); canvas?.classList.remove("task-picking");
-    pickBar.hidden = true; for (const bubble of history.querySelectorAll(".task-picked")) bubble.classList.remove("task-picked"); picked = new Set();
+    pickBar.hidden = true; for (const bubble of history.querySelectorAll(".task-picked")) { bubble.classList.remove("task-picked"); bubble.querySelector(".task-pick-badge")?.remove(); } picked = new Set();
   }
   pickBar.querySelector(".task-pick-cancel").addEventListener("click", endPick);
   pickBar.querySelector(".task-pick-make").addEventListener("click", () => {
@@ -298,6 +302,33 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     if (!menu.hidden) { closeMenu(); event.stopPropagation(); } else if (pickMode) endPick();
   }, true);
   document.addEventListener("cm:chat-selected", () => { closeMenu(); endPick(); });
+
+  // ── sheets on a computer: a floating card exactly as wide as the composer, standing on it,
+  // with every corner rounded and the site left as it is (no shade, no blur). On a phone
+  // they stay bottom sheets.
+  function placeSheet(dialog) {
+    if (!dialog?.open) return;
+    const wide = innerWidth >= 720, compose = $("#chat-compose");
+    dialog.classList.toggle("floating", wide);
+    if (!wide) { for (const key of ["left", "width", "bottom", "top", "maxHeight"]) dialog.style[key] = ""; return; }
+    const box = compose && !compose.hidden && state.pane === "messages" ? compose.getBoundingClientRect() : null;
+    if (box && box.width > 240 && box.top > 200) {
+      const ceiling = Math.max(12, ($("#chat-header")?.getBoundingClientRect().bottom || 12) + 8);
+      Object.assign(dialog.style, { left: `${Math.round(box.left)}px`, width: `${Math.round(box.width)}px`, top: "auto",
+        bottom: `${Math.round(innerHeight - box.top + 10)}px`, maxHeight: `${Math.round(Math.max(260, box.top - 10 - ceiling))}px` });
+    } else {
+      const area = document.querySelector("[data-page]:not([hidden])")?.getBoundingClientRect() || { left: 0, width: innerWidth };
+      const width = Math.min(600, area.width - 48);
+      Object.assign(dialog.style, { left: `${Math.round(area.left + (area.width - width) / 2)}px`, width: `${Math.round(width)}px`,
+        top: "auto", bottom: "24px", maxHeight: `${innerHeight - 48}px` });
+    }
+  }
+  addEventListener("resize", () => { for (const dialog of document.querySelectorAll(".task-sheet[open], #task-settings-dialog[open]")) placeSheet(dialog); });
+  // «Что сделать» grows with a long draft instead of hiding its second half.
+  function fitTitle() {
+    const field = sheet?.querySelector('textarea[name="title"]'); if (!field) return;
+    field.style.height = "auto"; field.style.height = `${Math.min(160, field.scrollHeight + 2)}px`;
+  }
 
   // ── create / edit sheet ──────────────────────────────────────────────────
   function bubbleSource(id) {
@@ -317,14 +348,15 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   let suggestSeq = 0;
   async function suggest(draft) {
     const seq = ++suggestSeq, form = sheet.querySelector("form"), badge = sheet.querySelector(".task-ai-badge");
-    const initial = { title: form.elements.title.value, due: sheetDue, kind: sheet.dataset.kind };
+    const initial = { title: form.elements.title.value, due: sheetDue, kind: sheet.dataset.kind, details: form.elements.details.value };
     badge.hidden = false; badge.textContent = "AI думает…"; badge.classList.add("busy");
     try {
       const result = await api(`${base()}/tasks/draft`, { method: "POST", timeoutMs: 9000,
         data: { conversation_id: draft.conversation_id, message_ids: draft.sources.map(source => source.id), client_label: draft.client_label } });
       if (seq !== suggestSeq || !sheet.open || sheetTask || sheetDraft?.conversation_id !== draft.conversation_id) return;
       if (!result.ai) { badge.hidden = true; return; }
-      if (form.elements.title.value === initial.title && result.title) form.elements.title.value = result.title;
+      if (form.elements.title.value === initial.title && result.title) { form.elements.title.value = result.title; fitTitle(); }
+      if (form.elements.details.value === initial.details && !initial.details && result.details) form.elements.details.value = result.details;
       if (sheet.dataset.kind === initial.kind && !initial.kind && result.kind) { sheet.dataset.kind = result.kind; paintKinds(result.kind); }
       if (sheetDue === initial.due && result.due_at) { sheetDue = result.due_at; paintDue(); }
       badge.textContent = "Черновик AI"; badge.classList.remove("busy");
@@ -354,6 +386,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     dialog.querySelector("[data-task-close]").addEventListener("click", () => dialog.close());
     dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
     dialog.querySelector("form").addEventListener("submit", event => { event.preventDefault(); saveSheet(); });
+    dialog.querySelector('textarea[name="title"]').addEventListener("input", fitTitle);
     dialog.querySelector(".task-due-input").addEventListener("change", event => { sheetDue = zonedIso(event.target.value); paintDue(); });
     dialog.querySelector(".task-done").addEventListener("click", () => { const task = sheetTask; dialog.close(); if (task) complete(task); });
     dialog.querySelector(".task-cancel-task").addEventListener("click", async () => {
@@ -445,6 +478,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     sheet.querySelector(".task-open-chat").hidden = !editing || !task.conversation_id || (state.pane === "messages" && task.conversation_id === convId);
     const error = sheet.querySelector(".task-error"); error.hidden = true; error.textContent = "";
     if (!sheet.open) sheet.showModal();
+    placeSheet(sheet); fitTitle();
     if (!editing) requestAnimationFrame(() => { const field = form.elements.title; field.focus(); field.setSelectionRange(field.value.length, field.value.length); });
   }
   async function saveSheet() {
@@ -482,6 +516,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     dialog.querySelector(".task-sheet-client").textContent = clientLabel();
     dialog.querySelector(".task-conv-list").replaceChildren(...openTasks().map(task => taskRow(task, () => { dialog.close(); openSheet({ task }); })));
     if (!dialog.open) dialog.showModal();
+    placeSheet(dialog);
   }
 
   // ── actions ──────────────────────────────────────────────────────────────
@@ -538,6 +573,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     area.value = ""; area.placeholder = "Готовим черновик ответа…"; area.classList.add("busy"); label.textContent = "Ответ клиенту";
     paintDoneSend();
     if (!doneSheet.open) doneSheet.showModal();
+    placeSheet(doneSheet);
     try {
       const result = await api(`${base()}/tasks/${task.id}/reply`, { method: "POST", timeoutMs: 12000 });
       if (seq !== doneSeq) return;
@@ -793,7 +829,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     form.elements.alfa_copy.disabled = true; // the AlfaCRM connection is read-only for now
     show(dialog.querySelector(".task-studio-note"), !ctx.admin);
     dialog.querySelector(".task-settings-error").hidden = true;
-    dialog.showModal();
+    dialog.showModal(); placeSheet(dialog);
   }
   const settingsDialog = $("#task-settings-dialog");
   settingsDialog?.querySelector("form").addEventListener("submit", async event => {

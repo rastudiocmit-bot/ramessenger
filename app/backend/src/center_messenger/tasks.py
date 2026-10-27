@@ -103,11 +103,16 @@ def presets(now, zone, studio):
 
 
 AI_DRAFT = ("Ты помогаешь администратору детской студии. По переписке с родителем сформулируй одну задачу "
-            "для администратора. title — что нужно сделать: начни с глагола, до 80 символов, без приветствий, "
-            "с именем ребёнка, если оно есть. kind — makeup (отработка или перенос занятия), subscription "
-            "(абонемент, оплата), group (запись в группу, расписание), call (перезвонить), other. when — срок, "
-            "если он назван в переписке, фразой как в речи («завтра до обеда», «в пятницу», «в 17:00»), иначе \"\". "
-            "Сообщения, отмеченные «→», — главные. Ответь только JSON: {\"title\": \"…\", \"kind\": \"…\", \"when\": \"…\"}")
+            "для администратора. Сообщения, отмеченные «→», — главные: задача должна охватить их все. "
+            "title — что нужно сделать: начни с глагола, без приветствий, с именем ребёнка, если оно есть. "
+            "Если отмечено одно сообщение — до 90 символов. Если несколько — перечисли через запятую все действия "
+            "по каждому из них (до 180 символов), ничего не теряя. details — по строке на каждое действие с "
+            "подробностями из переписки (даты, время, суммы, группы, имена), каждая строка начинается с «— »; для "
+            "одного простого действия details может быть пустым. kind — makeup (отработка или перенос занятия), "
+            "subscription (абонемент, оплата, чеки), group (запись в группу, расписание), call (перезвонить), other. "
+            "when — срок, если он назван в переписке, фразой как в речи («завтра до обеда», «в пятницу», "
+            "«в 17:00»), иначе \"\". Ответь только JSON: "
+            "{\"title\": \"…\", \"details\": \"…\", \"kind\": \"…\", \"when\": \"…\"}")
 AI_HINT = ("Ты помогаешь администратору детской студии не забывать обещания. Последнее сообщение в переписке "
            "написал администратор. Если в нём он пообещал родителю что-то сделать позже (уточнить, проверить, "
            "перезвонить, записать, сообщить, прислать), сформулируй задачу: title начинается с глагола, до 80 "
@@ -458,7 +463,7 @@ class Tasks:
 
     def _fields(self, answer, now, zone, studio):
         data = _json(answer) or {}
-        title = " ".join(str(data.get("title") or "").split()).strip(" .")[:200]
+        title = " ".join(str(data.get("title") or "").split()).strip(" .")[:200].rstrip(" ,;")
         kind = data.get("kind") if data.get("kind") in KINDS else None
         when = str(data.get("when") or "").strip()
         due = task_speech.parse(when, now, zone, studio)["due_at"] if when else None
@@ -471,15 +476,22 @@ class Tasks:
             member = self._member(db, actor, workspace)
             studio, zone = self._studio(db, workspace), ZoneInfo(member["timezone"])
             now = db.execute(text("SELECT now()")).scalar_one()
-            rows = self._dialog(db, workspace, conversation, 12) if conversation else []
+            rows = self._dialog(db, workspace, conversation, 14) if conversation else []
+            missing = [UUID(i) for i in marked if i not in {str(row["id"]) for row in rows}]
+            if conversation and missing:
+                # Picked messages older than the recent window still go to the model.
+                rows += list(db.execute(text(
+                    "SELECT id, direction, text, occurred_at FROM messages WHERE workspace_id=:w AND conversation_id=:c "
+                    "AND id = ANY(:ids) AND coalesce(text,'') <> ''"), {"w": workspace, "c": conversation, "ids": missing[:5]}).mappings().all())
         content = self._transcript(rows, marked)
         if data.get("client_label"):
             content = f"Клиент: {data['client_label']}\n{content}"
-        answer = self._ai(actor, workspace, AI_DRAFT, content, max_tokens=300, timeout=5)
-        _, title, kind, due = self._fields(answer, now, zone, studio)
+        answer = self._ai(actor, workspace, AI_DRAFT, content, max_tokens=700, timeout=8)
+        raw, title, kind, due = self._fields(answer, now, zone, studio)
         if not title:
             return {"ai": False}
-        return {"ai": True, "title": title, "kind": kind, "due_at": _iso(due)}
+        details = "\n".join(line.strip() for line in str(raw.get("details") or "").splitlines() if line.strip())[:2000]
+        return {"ai": True, "title": title, "details": details, "kind": kind, "due_at": _iso(due)}
 
     def hint(self, actor, workspace, data):
         """After the operator's message: suggest a task when it reads like a promise."""

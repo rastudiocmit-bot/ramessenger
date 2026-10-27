@@ -1491,9 +1491,8 @@ body:has(#cabinet[hidden]){overflow:auto}
 .task-menu-item.primary svg{color:var(--primary)}
 .canvas.task-picking>.compose{visibility:hidden}
 .task-picking #chat-history .chat-bubble.msg{cursor:pointer}
-.chat-bubble.task-picked{box-shadow:0 0 0 2px var(--primary)}
-.chat-bubble.task-flash{animation:task-flash 1.5s ease-out}
-@keyframes task-flash{0%,40%{box-shadow:0 0 0 3px var(--primary)}100%{box-shadow:0 0 0 0 transparent}}
+.chat-bubble.task-flash .bub{animation:task-flash 1.6s ease-out}
+@keyframes task-flash{0%,45%{box-shadow:0 0 0 6px color-mix(in srgb,var(--primary) 22%,transparent),0 10px 28px color-mix(in srgb,var(--primary) 30%,transparent)}100%{box-shadow:none}}
 .task-pick-bar{position:absolute;z-index:4;left:max(8px,env(safe-area-inset-left,0px));right:max(8px,env(safe-area-inset-right,0px));bottom:calc(var(--sab) + 12px);
   display:flex;gap:8px;padding:8px;border-radius:16px;background:var(--glass);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);box-shadow:var(--card),inset 0 0 0 1px var(--glass-line)}
 .task-pick-bar[hidden]{display:none}
@@ -1618,8 +1617,9 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 /* Task polish after the design review. */
 .chat-bubble.task-lift{visibility:hidden}
-.chat-bubble.task-lifted{position:fixed;z-index:1101;margin:0;max-width:none;transform:scale(1.02);transform-origin:left top;box-shadow:0 10px 30px rgba(25,37,45,.24);
+.chat-bubble.task-lifted{position:fixed;z-index:1101;margin:0;max-width:none;transform:scale(1.02);transform-origin:left top;box-shadow:none;
   pointer-events:none;animation:none}
+.chat-bubble.task-lifted .bub{box-shadow:0 14px 34px rgba(25,37,45,.26),0 2px 6px rgba(25,37,45,.10)}
 .chat-bubble.task-lifted.out{transform-origin:right top}
 .task-menu-backdrop{background:rgba(24,39,56,.34)}
 @media (min-width:720px){.task-head,.task-pane .task-scope,.task-pane .task-groups,.task-pane .task-pane-error{max-width:760px}
@@ -1676,3 +1676,24 @@ body:has(#cabinet[hidden]){overflow:auto}
 .task-days input,.task-seg input{min-height:0;padding:0}
 .task-hours .task-field,.task-days label,.task-seg label{margin:0}
 .task-field textarea[name="details"],.task-done-text{font-weight:400!important}
+
+/* Picking messages: the chosen ones glow softly in the site's blue, keep their own rounded
+   shape and get a check badge; the rest step back. No outline drawn around the frame. */
+.task-picking #chat-history .chat-bubble.msg .bub{transition:opacity .18s,transform .18s,box-shadow .18s}
+.task-picking #chat-history .chat-bubble.msg:not(.task-picked) .bub{opacity:.55}
+.chat-bubble.task-picked .bub{transform:scale(1.015);box-shadow:0 0 0 5px color-mix(in srgb,var(--primary) 16%,transparent),0 12px 28px color-mix(in srgb,var(--primary) 28%,transparent)}
+.chat-bubble.task-picked .bub::after{content:"";position:absolute;inset:0;border-radius:inherit;background:color-mix(in srgb,var(--primary) 10%,transparent);pointer-events:none}
+.task-pick-badge{position:absolute;z-index:2;top:-7px;right:-7px;width:22px;height:22px;border-radius:50%;display:grid;place-items:center;
+  background:var(--primary);color:var(--on-primary);box-shadow:0 0 0 2px var(--surface),0 3px 8px rgba(25,37,45,.2);animation:task-badge-in .22s cubic-bezier(.2,1.4,.4,1)}
+.task-pick-badge svg{width:13px;height:13px;stroke-width:2.6}
+.chat-bubble.msg.out .task-pick-badge{right:auto;left:-7px}
+@keyframes task-badge-in{from{transform:scale(.3);opacity:0}}
+/* A computer keeps the page bright behind the message menu. */
+@media (min-width:720px),(pointer:fine){.task-menu-backdrop{background:transparent}}
+/* Sheets on a computer: a floating card over the composer, no shade and no blur behind. */
+.live-sheet.floating{position:fixed;inset:auto;right:auto;margin:0;box-sizing:border-box;border-radius:22px;border:1px solid var(--line);overflow:auto;
+  box-shadow:0 22px 60px rgba(25,37,45,.22),0 3px 10px rgba(25,37,45,.10);animation:task-float-in .18s ease-out}
+.live-sheet.floating::backdrop{background:transparent;-webkit-backdrop-filter:none;backdrop-filter:none}
+@keyframes task-float-in{from{opacity:0;transform:translateY(10px)}}
+.task-field textarea[name="title"]{overflow-y:auto}
+@media (prefers-reduced-motion:reduce){.task-pick-badge,.live-sheet.floating{animation:none}}

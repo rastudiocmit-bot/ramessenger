@@ -146,9 +146,19 @@ async function longPress(page, selector) {
       await page.locator('.chat-select').first().click();
       await page.waitForSelector('#chat-history .chat-bubble.msg[data-id="m4"]');
       await page.locator('#chat-history .chat-bubble.msg[data-id="m4"] .msg-text').click({ button: 'right' });
+      await page.waitForSelector('.task-menu:not([hidden])');
+      assert.equal(await page.evaluate(() => { const b = document.querySelector('.task-menu-backdrop'); return b ? getComputedStyle(b).backgroundColor : 'rgba(0, 0, 0, 0)'; }), 'rgba(0, 0, 0, 0)', 'no shade behind the menu on a computer');
       await page.locator('.task-menu-item.primary').click();
       await page.waitForSelector('#task-dialog .task-ai-badge:not([hidden]):not(.busy)');
-      assert.equal(await page.locator('#task-dialog textarea[name="title"]').inputValue(), 'Записать Мишу на пробное занятие');
+      assert.equal(await page.locator('#task-dialog textarea[name="title"]').inputValue(), 'Записать Мишу на пробное занятие, отправить ссылку на оплату');
+      assert.match(await page.locator('#task-dialog textarea[name="details"]').inputValue(), /— Отправить ссылку на оплату/);
+      // On a computer the sheet floats over the composer at exactly its width, with the page left bright.
+      const geo = await page.evaluate(() => { const d = document.querySelector('#task-dialog'), c = document.querySelector('#chat-compose').getBoundingClientRect(), b = d.getBoundingClientRect();
+        return { dl: b.left - c.left, dr: b.right - c.right, gap: c.top - b.bottom, top: b.top, bottom: b.bottom, H: innerHeight,
+          shade: getComputedStyle(d, '::backdrop').backgroundColor, blur: getComputedStyle(d, '::backdrop').backdropFilter, radius: getComputedStyle(d).borderBottomLeftRadius }; });
+      assert.ok(Math.abs(geo.dl) <= 1 && Math.abs(geo.dr) <= 1, `sheet width follows the composer ${JSON.stringify(geo)}`);
+      assert.ok(geo.gap >= 0 && geo.top >= 0 && geo.bottom <= geo.H, `sheet sits above the composer inside the window ${JSON.stringify(geo)}`);
+      assert.match(geo.shade, /rgba\(0, 0, 0, 0\)|transparent/); assert.ok(!geo.blur || geo.blur === 'none'); assert.equal(geo.radius, '22px');
       assert.equal(await page.locator('#task-dialog .task-chip[aria-pressed="true"]', { hasText: 'Группа' }).count(), 1);
       await settle(page); await save(page, 'tasks-ai-draft');
       await page.locator('#task-dialog [data-task-close]').click();
