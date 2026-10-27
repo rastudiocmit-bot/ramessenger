@@ -102,6 +102,20 @@ class HistoryCursorTests(unittest.TestCase):
         self.assertIn("OperationalError", output)
         self.assertNotIn("secret", output)
 
+    def test_catchup_uses_previous_head_ids_not_an_unrelated_saved_row(self):
+        cursor, _ = plan_history({'sync_policy':1,'head:1:receive':'30','head_ids:1:receive':['30','29'],
+            'complete:1:receive':True,'imported:1:receive':True},[1],self.now)
+        def read(page, ids, known):
+            advance_history(cursor,[(1,'receive',page)],[{'messages':[{'record_id':n} for n in ids],
+                'has_more':True,'known_ids':known}],self.now)
+        read(0,['40','10'],['10'])
+        self.assertEqual(cursor['catchup:1:receive'],1)
+        read(1,['39','10'],['10'])
+        self.assertEqual(cursor['catchup:1:receive'],2)
+        read(2,['38','29'],['29'])  # The old first row 30 was removed, but its neighbour remains.
+        self.assertEqual(cursor['catchup:1:receive'],0)
+        self.assertTrue(cursor['complete:1:receive'])
+
 
 class PageTests(unittest.TestCase):
     def test_last_older_page_finishes_backfill(self):
@@ -721,14 +735,18 @@ class MessageSyncTests(unittest.TestCase):
 
     def test_new_bursts_do_not_restart_the_archive_before_it_reaches_old_clients(self):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 5,
-                                  "head:1:receive": "old"},
+                                  "head:1:receive": "9"},
                                  page_result=lambda request: {"messages": [self.row("10")], "has_more": True})
         self.assertEqual(cursor["1:receive"], 5)  # Newly discovered catchup takes the next turn.
         self.assertEqual(cursor["catchup:1:receive"], 1)
         cursor = self.run_worker(cursor, after_seconds=3,
                                  page_result=lambda request: {"messages": [self.row("10")], "has_more": True})
         self.assertEqual(cursor["1:receive"], 6)
+        self.assertEqual(cursor["catchup:1:receive"], 2)  # Saved 10 is not the previous boundary 9.
+        cursor = self.run_worker(cursor, after_seconds=3,
+                                 page_result=lambda request: {"messages": [self.row("9")], "has_more": True})
         self.assertEqual(cursor["catchup:1:receive"], 0)
+        self.assertEqual(cursor["1:receive"], 7)
 
     def test_a_failed_page_does_not_discard_other_clients_or_advance_its_cursor(self):
         cursor = self.run_worker({"projection_version": PROJECTION_VERSION, "1:receive": 4}, page_result=lambda request:
@@ -1999,6 +2017,232 @@ class MessageSyncTests(unittest.TestCase):
             stub=patch('center_messenger.group_links.enqueue',return_value=0)
             stub.start();self.addCleanup(stub.stop)
         return reader, worker, student
+
+    def catalog_worker(self, handler):
+        from center_messenger.catalog_review import CatalogReviewWorker
+        worker, client = self.active_review_worker(handler)
+        return CatalogReviewWorker(worker.connections), client
+
+    def catalog_rows(self):
+        from center_messenger.catalog_review import TOPICS
+        return list(self.db.execute(text('SELECT topic,state,payload FROM outbox_events WHERE workspace_id=:w '
+            'AND topic=ANY(CAST(:t AS text[])) ORDER BY topic,event_key'),{'w':self.workspace,'t':list(TOPICS)}).mappings())
+
+    def test_catalog_six_hour_cycle_only_reads_branches_statuses_and_keeps_completed_journals(self):
+        original={'sync_policy':1,'streams':['1:receive','1:sent'],'complete:1:receive':True,
+            'complete:1:sent':True,'finished:1:receive':self.at.isoformat(),'2:sent':17}
+        self.db.execute(text('UPDATE alfa_max_settings SET history_cursor=CAST(:p AS jsonb) WHERE workspace_id=:w'),
+            {'w':self.workspace,'p':json.dumps(original)})
+        def handler(path,body):
+            self.assertNotIn('customer',path);self.assertNotIn('lesson',path)
+            items=[{'id':n,'name':f'Branch {n}'} for n in (1,2,3)] if '/branch/index' in path else [{'id':1,'name':'Updated status'}]
+            return {'items':items,'total':len(items),'page':body['page']}
+        worker,client=self.catalog_worker(handler)
+        for _ in range(7):self.assertTrue(worker.step(self.workspace))
+        self.assertFalse(worker.step(self.workspace));self.assertEqual(client.call.call_count,7)
+        self.assertEqual(len(self.catalog_rows()),7)
+        self.assertTrue(all(r['state']=='published' for r in self.catalog_rows()))
+        saved=self.db.execute(text('SELECT history_cursor FROM alfa_max_settings WHERE workspace_id=:w'),{'w':self.workspace}).scalar_one()
+        self.assertEqual(saved,original)
+        cursor,_=plan_history(saved,[1,2,3],self.at+timedelta(days=1))
+        self.assertTrue(cursor['complete:1:receive']);self.assertEqual(cursor['2:sent'],17)
+        self.assertFalse(cursor.get('complete:3:sent',False))
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_statuses WHERE workspace_id=:w'),{'w':self.workspace}).scalar(),6)
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('next_at',now()-interval '1 second') "
+            "WHERE workspace_id=:w AND topic LIKE 'crm.catalog.%'"),{'w':self.workspace})
+        for _ in range(7):self.assertTrue(worker.step(self.workspace))
+        self.assertEqual(client.call.call_count,14)
+        self.assertEqual(self.messages(),[])
+
+    def test_catalog_checkpoint_keeps_old_branches_until_every_page_is_valid(self):
+        from center_messenger.alfa_client import AlfaError
+        fail=[True];calls=[]
+        def handler(path,body):
+            calls.append((path,body['page']))
+            if '/branch/index' in path:
+                if body['page']==3 and fail[0]:raise AlfaError('network')
+                return {'items':[{'id':body['page']+10,'name':'New branch'}], 'total':5,'page':body['page']}
+            return {'items':[],'total':0,'page':body['page']}
+        worker,client=self.catalog_worker(handler)
+        branches=lambda:list(self.db.execute(text('SELECT external_id FROM alfa_branches WHERE workspace_id=:w AND available ORDER BY external_id'),{'w':self.workspace}).scalars())
+        self.assertTrue(worker.step(self.workspace));self.assertEqual(branches(),[1,2])
+        # The fixture holds one outer transaction (now() is frozen); make the
+        # yielded turn due before simulating the next real worker transaction.
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('available_at',now()-interval '1 second') "
+            "WHERE workspace_id=:w AND topic='crm.catalog.branches'"),{'w':self.workspace})
+        self.assertTrue(worker.step(self.workspace));self.assertEqual(branches(),[1,2])
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('available_at',now()-interval '1 second') "
+            "WHERE workspace_id=:w AND topic='crm.catalog.branches'"),{'w':self.workspace})
+        fail[0]=False
+        from center_messenger.catalog_review import CatalogReviewWorker
+        self.assertTrue(CatalogReviewWorker(worker.connections).step(self.workspace))
+        self.assertEqual(branches(),[10,11,12,13,14])
+        self.assertEqual([page for path,page in calls if '/branch/index' in path],[0,1,2,3,3,4])
+
+    def test_catalog_forbidden_status_isolated_from_other_branches_and_max_session(self):
+        from center_messenger.alfa_client import AlfaError
+        def handler(path,body):
+            if path=='/v2api/1/study-status/index':raise AlfaError('forbidden',403)
+            items=[{'id':n,'name':'Branch'} for n in (1,2)] if '/branch/index' in path else [{'id':1,'name':'Status'}]
+            return {'items':items,'total':len(items),'page':body['page']}
+        worker,client=self.catalog_worker(handler)
+        for _ in range(6):worker.step(self.workspace)
+        rows=self.catalog_rows()
+        failed=[r for r in rows if r['state']=='pending']
+        self.assertEqual(len(failed),1);self.assertEqual(failed[0]['payload']['error'],'access_denied')
+        self.assertGreater(datetime.fromisoformat(failed[0]['payload']['available_at']),datetime.now(UTC)+timedelta(hours=5))
+        self.assertTrue(all(r['state']=='published' for r in rows if r not in failed))
+        native=self.db.execute(text('SELECT state,session_ciphertext,history_cursor FROM alfa_max_settings WHERE workspace_id=:w'),{'w':self.workspace}).mappings().one()
+        self.assertEqual(native['state'],'active');self.assertEqual(native['session_ciphertext'],'test')
+        self.assertEqual(native['history_cursor'],{})
+
+    def test_catalog_expired_lease_and_changed_settings_cannot_publish_old_pages(self):
+        def handler(path,body):
+            self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('lease_until',now()-interval '1 second') "
+                "WHERE workspace_id=:w AND topic='crm.catalog.branches'"),{'w':self.workspace})
+            return {'items':[{'id':9,'name':'Stale'}],'total':1,'page':0}
+        worker,client=self.catalog_worker(handler)
+        self.assertFalse(worker.step(self.workspace))
+        self.assertFalse(any(r['payload'].get('checkpoint') for r in self.catalog_rows()))
+        def changed(path,body):
+            self.db.execute(text('UPDATE alfa_settings SET version=version+1 WHERE workspace_id=:w'),{'w':self.workspace})
+            return {'items':[{'id':9,'name':'Stale'}],'total':1,'page':0}
+        client.call.side_effect=changed
+        self.assertFalse(worker.step(self.workspace))
+        self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_branches WHERE workspace_id=:w AND external_id=9'),{'w':self.workspace}).scalar(),0)
+
+    def test_catalog_401_waits_for_new_settings_then_resumes(self):
+        from center_messenger.alfa_client import AlfaError
+        worker,client=self.catalog_worker(lambda p,b:(_ for _ in ()).throw(AlfaError('unauthorized',401)))
+        self.assertTrue(worker.step(self.workspace));self.assertFalse(worker.step(self.workspace))
+        self.assertEqual(client.call.call_count,1)
+        self.db.execute(text('UPDATE alfa_settings SET version=2 WHERE workspace_id=:w'),{'w':self.workspace})
+        client.call.side_effect=lambda p,b:{'items':[{'id':1,'name':'Branch'}],'total':1,'page':0}
+        self.assertTrue(worker.step(self.workspace));self.assertEqual(client.call.call_count,2)
+
+    def test_active_review_adds_only_new_branch_without_moving_existing_six_hour_deadline(self):
+        from center_messenger import active_review
+        def handler(path,body):
+            items=[{'id':7,'name':'Child','is_study':1}] if path.startswith('/v2api/1/') else []
+            return {'items':items,'total':len(items),'page':body['page']}
+        worker,client=self.active_review_worker(handler)
+        for _ in range(4):self.assertTrue(worker.step(self.workspace))
+        deadline=active_review.status(self.db,self.workspace,self.crm)['next_at']
+        self.db.execute(text("INSERT INTO alfa_branches(workspace_id,connection_id,external_id,name) VALUES(:w,:c,3,'New')"),{'w':self.workspace,'c':self.crm})
+        client.call.reset_mock()
+        for _ in range(2):self.assertTrue(worker.step(self.workspace))
+        self.assertEqual([c.args[0] for c in client.call.call_args_list],['/v2api/3/customer/index'])
+        result=active_review.status(self.db,self.workspace,self.crm)
+        self.assertEqual(result['next_at'],deadline);self.assertEqual(result['known_branches'],[1,2,3])
+        self.assertFalse(worker.step(self.workspace))
+
+    def test_active_review_forbidden_branch_does_not_block_other_branches(self):
+        from center_messenger import active_review
+        from center_messenger.alfa_client import AlfaError
+        def handler(path,body):
+            if path.startswith('/v2api/1/'):raise AlfaError('forbidden',403)
+            return {'items':[{'id':8,'name':'Another child','is_study':1}],'total':1,'page':0}
+        worker,client=self.active_review_worker(handler)
+        self.assertFalse(worker.step(self.workspace))
+        self.assertTrue(worker.step(self.workspace));self.assertTrue(worker.step(self.workspace))
+        result=active_review.status(self.db,self.workspace,self.crm)
+        self.assertEqual(result['state'],'complete');self.assertEqual(result['branch_errors']['1']['error'],'forbidden')
+        self.assertEqual(self.db.execute(text('SELECT name FROM alfa_customers WHERE workspace_id=:w AND external_id=8'),{'w':self.workspace}).scalar(),'Another child')
+
+    def test_active_review_network_retries_keep_the_page_after_three_failures(self):
+        from center_messenger import active_review
+        from center_messenger.alfa_client import AlfaError
+        fail=[True]
+        def handler(path,body):
+            if body['page']==1 and fail[0]:raise AlfaError('network')
+            return {'items':[{'id':7+body['page'],'name':'Child','is_study':1}],'total':2,'page':body['page']}
+        worker,client=self.active_review_worker(handler)
+        self.assertTrue(worker.step(self.workspace))
+        run=active_review.status(self.db,self.workspace,self.crm)['run']
+        for _ in range(3):
+            self.assertFalse(worker.step(self.workspace))
+            value=active_review.status(self.db,self.workspace,self.crm)
+            self.assertEqual(value['page'],1);self.assertEqual(value['run'],run)
+            active_review.store(self.db,self.workspace,self.crm,dict(value,next_at=self.at.isoformat()))
+        fail[0]=False;self.assertTrue(worker.step(self.workspace))
+        self.assertEqual([c.args[1]['page'] for c in client.call.call_args_list],[0,1,1,1,1])
+
+    def seed_lesson_cadence(self, *, recent_minutes=0):
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row())
+        today=datetime.now(UTC).date()
+        lesson={'id':71,'date':(today+timedelta(days=3)).isoformat(),'status':1,'branch_id':1,
+            'customer_id':7,'customer_verified':True,'subject_id':1,'lesson_type_id':1}
+        self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,lessons,"
+            "lessons_refreshed_at,lessons_full_refreshed_at) VALUES(:w,:c,1,7,1,123.45,CAST(:l AS jsonb),"
+            "now()-(:minutes * interval '1 minute'),now()-interval '25 hours')"),
+            {'w':self.workspace,'c':self.crm,'l':json.dumps([lesson]),'minutes':recent_minutes})
+        return reader,worker,today,lesson
+
+    def test_daily_lessons_reuse_fresh_recent_window_without_fetching_future_again(self):
+        from center_messenger.family_cache import enqueue,HISTORY
+        _,worker,today,lesson=self.seed_lesson_cadence()
+        before=dict(self.family_facts())
+        enqueue(self.db,self.workspace,self.snapshot,topics=(HISTORY,))
+        client=SimpleNamespace(call=Mock(return_value={'items':[],'total':0,'page':0}))
+        worker.connections.client_factory.return_value=client
+        worker.process(self.workspace,worker.claim(self.workspace))
+        self.assertEqual(client.call.call_count,1)
+        body=client.call.call_args.args[1]
+        self.assertEqual(body['status'],3);self.assertEqual(body['date_to'],(today-timedelta(days=31)).isoformat())
+        facts=self.family_facts()
+        self.assertEqual(facts['lessons'],[lesson]);self.assertEqual(facts['lessons_refreshed_at'],before['lessons_refreshed_at'])
+        self.assertGreater(facts['lessons_full_refreshed_at'],before['lessons_full_refreshed_at'])
+        self.assertEqual(facts['lessons_history_through'],today-timedelta(days=31))
+
+    def test_daily_lessons_fetch_future_when_recent_coverage_is_stale(self):
+        from center_messenger.family_cache import enqueue,HISTORY
+        _,worker,today,lesson=self.seed_lesson_cadence(recent_minutes=31)
+        enqueue(self.db,self.workspace,self.snapshot,topics=(HISTORY,))
+        client=SimpleNamespace(call=Mock(return_value={'items':[],'total':0,'page':0}))
+        worker.connections.client_factory.return_value=client
+        worker.process(self.workspace,worker.claim(self.workspace))
+        self.assertEqual([c.args[1]['status'] for c in client.call.call_args_list],[3,1])
+        self.assertEqual(self.family_facts()['lessons'],[])
+        self.assertEqual(self.family_facts()['lessons_history_through'],today+timedelta(days=90))
+
+    def test_late_yearly_result_preserves_a_newer_recent_cancellation(self):
+        from center_messenger.family_cache import enqueue,HISTORY
+        _,worker,today,lesson=self.seed_lesson_cadence(recent_minutes=31)
+        enqueue(self.db,self.workspace,self.snapshot,topics=(HISTORY,))
+        old={**lesson,'id':70,'status':3,'date':(today-timedelta(days=100)).isoformat()}
+        def fetch(*args,**kwargs):
+            self.db.execute(text("UPDATE alfa_family_details SET lessons='[]',lessons_refreshed_at=clock_timestamp() WHERE workspace_id=:w"),{'w':self.workspace})
+            return [old,lesson]
+        with patch('center_messenger.family_cache.fetch_family_lessons',side_effect=fetch):
+            worker.process(self.workspace,worker.claim(self.workspace))
+        facts=self.family_facts()
+        self.assertEqual([item['id'] for item in facts['lessons']],[70])
+        self.assertGreater(facts['lessons_refreshed_at'],facts['lessons_full_refreshed_at'])
+        self.assertEqual(facts['lessons_history_through'],today-timedelta(days=31))
+
+    def test_cached_only_card_does_not_enqueue_or_wait_for_crm(self):
+        reader,worker,_,_=self.seed_lesson_cadence(recent_minutes=31)
+        before=dict(self.family_facts());conversation=self.conversation()['id']
+        value=reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True)
+        self.assertEqual(value['students'][0]['balance'],'123.45');self.assertEqual(self.family_jobs(),[])
+        worker.connections.client_factory.assert_not_called()
+        reader.prepare(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(dict(self.family_facts()),before)
+        self.assertTrue(value['cache']['ready'])
+        self.assertTrue(self.db.execute(text("SELECT 1 FROM outbox_events WHERE workspace_id=:w AND topic='crm.card.lessons' AND state='pending'"),{'w':self.workspace}).scalar())
+        worker.connections.client_factory.assert_not_called()
+
+    def test_archived_customer_new_messages_keep_distinct_ids_and_skip_saved_source(self):
+        from center_messenger.history_receipts import new_records
+        self.db.execute(text("UPDATE alfa_customers SET status='archive' WHERE workspace_id=:w"),{'w':self.workspace})
+        first=self.row('100',body='Same text');second=self.row('101',body='Same text')
+        self.project(first)
+        fresh=new_records(self.db,self.workspace,self.channel,1,[first,second])
+        self.assertEqual([r['record_id'] for r in fresh],['101'])
+        self.project(*fresh)
+        self.assertEqual(len(self.messages()),2)
+        self.assertEqual(new_records(self.db,self.workspace,self.channel,1,[first,second]),[])
 
     def family_jobs(self):
         return list(self.db.execute(text("SELECT * FROM outbox_events WHERE workspace_id=:w AND topic='crm.card.refresh'"),
@@ -3920,8 +4164,13 @@ class MessageSyncTests(unittest.TestCase):
         self.db.execute(text('SET CONSTRAINTS ALL IMMEDIATE'))
         path=ROOT/'app/backend/migrations/versions/0017_chat_read_versions.py'
         spec=importlib.util.spec_from_file_location(path.stem,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        later_path=ROOT/'app/backend/migrations/versions/0020_lesson_history_coverage.py'
+        later_spec=importlib.util.spec_from_file_location(later_path.stem,later_path)
+        later=importlib.util.module_from_spec(later_spec);later_spec.loader.exec_module(later)
         with Operations.context(MigrationContext.configure(self.db)):
-            module.downgrade();module.upgrade()
+            # The later status trigger depends on the version function. Roll it
+            # back before its parent, as Alembic does in the actual graph.
+            later.downgrade();module.downgrade();module.upgrade();later.upgrade()
         self.assertEqual([m['id'] for m in self.messages()],before)
         self.assertEqual(self.reader.history(None,self.workspace,self.conversation()['id'])['total'],1)
         self.assertTrue(self.db.execute(text("SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='messages_chat_order_idx')")).scalar_one())

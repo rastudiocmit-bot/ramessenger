@@ -415,6 +415,7 @@ class DirectoryReader:
                             refreshed_at=source["refreshed_at"].isoformat(),
                             lessons_refreshed_at=source["lessons_refreshed_at"].isoformat() if source["lessons_refreshed_at"] else None,
                             lessons_full_refreshed_at=source["lessons_full_refreshed_at"].isoformat() if source["lessons_full_refreshed_at"] else None,
+                            lessons_history_through=source["lessons_history_through"].isoformat() if source["lessons_history_through"] else None,
                         )
                         zone = ZoneInfo(snapshot.get("timezone", "UTC"))
                         card["lessons_recent_day"] = source["lessons_refreshed_at"].astimezone(zone).date().isoformat() if source["lessons_refreshed_at"] else None
@@ -609,7 +610,7 @@ class DirectoryReader:
                             "settings_version=EXCLUDED.settings_version,balance=EXCLUDED.balance,"
                             "paid_lesson_count=EXCLUDED.paid_lesson_count,"
                             "subscriptions=EXCLUDED.subscriptions,lessons=EXCLUDED.lessons,"
-                            "refreshed_at=now(),lessons_refreshed_at=now(),lessons_full_refreshed_at=now()"
+                            "refreshed_at=now(),lessons_refreshed_at=now(),lessons_full_refreshed_at=now(),lessons_history_through=NULL"
                         ),
                         {
                             "w": workspace,

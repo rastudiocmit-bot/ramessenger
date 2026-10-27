@@ -332,14 +332,18 @@ def advance_history(cursor, requests, results, now=None, *, allow_archive=True):
         if current is not None and not current.get("error"):
             identities = [str(m["record_id"]) for m in current["messages"]]
             previous_head = cursor.get(f"head:{key}")
-            if previous_head and current["has_more"] and previous_head not in identities and not current.get("known_ids"):
+            anchors = cursor.get(f"head_ids:{key}") or ([previous_head] if previous_head else [])
+            if anchors and current["has_more"] and not set(anchors).intersection(identities):
                 if catchup:
                     cursor.setdefault(f"queued:{key}", previous_head)
+                    cursor.setdefault(f"queued_ids:{key}", anchors)
                 else:
                     cursor[f"catchup:{key}"] = 1
                     cursor[f"until:{key}"] = previous_head
+                    cursor[f"until_ids:{key}"] = anchors
             if identities:
                 cursor[f"head:{key}"] = identities[0]
+                cursor[f"head_ids:{key}"] = identities[:500]
             if current.get("total") is not None:
                 cursor[f"total:{key}"] = current["total"]
         if catchup:
@@ -348,13 +352,17 @@ def advance_history(cursor, requests, results, now=None, *, allow_archive=True):
                 _retry_result(cursor, key, "catchup", result, now)
             if result is not None and not result.get("error"):
                 identities = {str(m["record_id"]) for m in result["messages"]}
-                if not result["has_more"] or cursor.get(f"until:{key}") in identities or result.get("known_ids"):
+                anchors = cursor.get(f"until_ids:{key}") or [cursor.get(f"until:{key}")]
+                if not result["has_more"] or set(anchors).intersection(identities):
                     queued = cursor.pop(f"queued:{key}", None)
+                    queued_ids = cursor.pop(f"queued_ids:{key}", None)
                     cursor[f"catchup:{key}"] = 1 if queued else 0
                     if queued:
                         cursor[f"until:{key}"] = queued
+                        cursor[f"until_ids:{key}"] = queued_ids or [queued]
                     else:
                         cursor.pop(f"until:{key}", None)
+                        cursor.pop(f"until_ids:{key}", None)
                 else:
                     cursor[f"catchup:{key}"] = catchup + 1
         if archive and not archive.get("error") and not cursor.get(f"complete:{key}") and not cursor.get(f"paused:{key}"):

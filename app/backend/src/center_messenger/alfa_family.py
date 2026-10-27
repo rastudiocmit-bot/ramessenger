@@ -175,7 +175,7 @@ def fetch_family_finance(client, branch_id, customer_id, *, source_customer):
     return {"balance": money, "paid_lesson_count": paid, "subscriptions": subscriptions}
 
 
-def fetch_family_lessons(client, branch_id, customer_id, *, today=None, full=False):
+def fetch_family_lessons(client, branch_id, customer_id, *, today=None, full=False, history_only=False):
     """Replace a date window, so removed/cancelled lessons do not linger.
 
     AlfaCRM documents date_from/date_to for lesson/index. A short complete
@@ -185,10 +185,15 @@ def fetch_family_lessons(client, branch_id, customer_id, *, today=None, full=Fal
     root = f"/v2api/{positive_id(branch_id)}"
     customer_id = positive_id(customer_id)
     lessons, seen = [], set()
-    for status, start, end in (
+    windows = (
         (3, today - timedelta(days=365 if full else 30), today),
         (1, today, today + timedelta(days=90)),
-    ):
+    )
+    if history_only:
+        if not full:
+            raise ValueError("Only a daily check can reuse the recent window")
+        windows = ((3, today - timedelta(days=365), today - timedelta(days=31)),)
+    for status, start, end in windows:
         for raw in pages(
             client,
             f"{root}/lesson/index",
@@ -211,13 +216,20 @@ def fetch_family_lessons(client, branch_id, customer_id, *, today=None, full=Fal
     return lessons
 
 
-def merge_family_lessons(saved, incoming, *, today, full=False):
+def merge_family_lessons(saved, incoming, *, today, full=False, history_only=False):
     """Retain older proof of branch/subject/purchase; replace the recent window."""
     first = (today - timedelta(days=365)).isoformat()
     recent = (today - timedelta(days=30)).isoformat()
-    replacement_ids = {item["id"] for item in incoming}
-    retained = [] if full else [item for item in saved
-        if first <= item["date"] < recent and item["id"] not in replacement_ids]
+    if history_only:
+        # The half-hour task owns recent cancellations and mutable future dates.
+        # It may have published while the larger historical task was reading.
+        retained = [item for item in saved if item["date"] >= recent]
+        current_ids = {item["id"] for item in retained}
+        incoming = [item for item in incoming if first <= item["date"] < recent and item["id"] not in current_ids]
+    else:
+        replacement_ids = {item["id"] for item in incoming}
+        retained = [] if full else [item for item in saved
+            if first <= item["date"] < recent and item["id"] not in replacement_ids]
     return sorted(retained + incoming, key=lambda item: (item["date"], item.get("time") or "", item["id"]))
 
 
@@ -293,7 +305,8 @@ def _coverage_windows(card):
         if at is None:
             continue
         checked_day = source_date(card.get(local_field)) or at.date()
-        windows.append((checked_day - timedelta(days=days), checked_day + timedelta(days=90), at))
+        through = source_date(card.get("lessons_history_through")) if field == "lessons_full_refreshed_at" else None
+        windows.append((checked_day - timedelta(days=days), through or checked_day + timedelta(days=90), at))
     return windows
 
 

@@ -9,6 +9,7 @@ import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
@@ -390,6 +391,11 @@ class FamilyCacheWorker:
                                    {"w": workspace}).scalar_one()
                 checkpoint = self.checkpoint(job, owned, snapshot, today)
                 today = date.fromisoformat(checkpoint["today"])
+                if job["topic"] == HISTORY and "history_only" not in checkpoint:
+                    recent_at = saved["lessons_refreshed_at"] if saved else None
+                    checkpoint["history_only"] = bool(recent_at and not metadata_stale
+                        and recent_at + INTERVAL > datetime.fromisoformat(checkpoint["started_at"])
+                        and recent_at.astimezone(ZoneInfo(snapshot.get("timezone", "UTC"))).date() == today)
             started_at = datetime.fromisoformat(checkpoint["started_at"])
             with self.connections._host_gate(settings["origin"]) as gate:
                 credentials = self.connections.vault.open(workspace, settings["connection_id"], settings["secret_ciphertext"])
@@ -401,7 +407,8 @@ class FamilyCacheWorker:
                     data = fetch_family_finance(client, int(job["branch"]), int(job["customer"]), source_customer=source)
                 else:
                     data = fetch_family_lessons(client, int(job["branch"]), int(job["customer"]),
-                                                today=today, full=job["topic"] == HISTORY)
+                                                today=today, full=job["topic"] == HISTORY,
+                                                history_only=checkpoint.get("history_only", False))
                 with self.accounts.transaction(workspace_id=workspace) as db:
                     # Same lock order as existing settings/message writers.
                     db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
@@ -429,6 +436,7 @@ class FamilyCacheWorker:
                             "lessons=CASE WHEN alfa_family_details.settings_version=:v THEN alfa_family_details.lessons ELSE '[]'::jsonb END,"
                             "lessons_refreshed_at=CASE WHEN alfa_family_details.settings_version=:v THEN alfa_family_details.lessons_refreshed_at END,"
                             "lessons_full_refreshed_at=CASE WHEN alfa_family_details.settings_version=:v THEN alfa_family_details.lessons_full_refreshed_at END,"
+                            "lessons_history_through=CASE WHEN alfa_family_details.settings_version=:v THEN alfa_family_details.lessons_history_through END,"
                             "settings_version=EXCLUDED.settings_version WHERE alfa_family_details.settings_version<>:v "
                             "OR alfa_family_details.refreshed_at<=:observed"),
                             params | {"balance": data["balance"], "paid": data["paid_lesson_count"], "subs": json.dumps(data["subscriptions"])})
@@ -438,16 +446,23 @@ class FamilyCacheWorker:
                             enqueue(db, workspace, snapshot, contact=job["contact"] if own.get("manual") else None,
                                     force=bool(job.get("force_at")), topics=(LESSONS, HISTORY))
                     else:
-                        cached = db.execute(text("SELECT lessons,lessons_refreshed_at FROM alfa_family_details "
+                        cached = db.execute(text("SELECT lessons,lessons_refreshed_at,lessons_full_refreshed_at FROM alfa_family_details "
                             "WHERE workspace_id=:w AND connection_id=:conn AND branch_id=:b AND customer_id=:id "
                             "AND settings_version=:v FOR UPDATE"), params).mappings().one_or_none()
-                        if cached is not None and (cached["lessons_refreshed_at"] is None or cached["lessons_refreshed_at"] <= started_at):
+                        clock = "lessons_full_refreshed_at" if job["topic"] == HISTORY else "lessons_refreshed_at"
+                        if cached is not None and (cached[clock] is None or cached[clock] <= started_at):
+                            history_only = job["topic"] == HISTORY and (checkpoint.get("history_only", False)
+                                or bool(cached["lessons_refreshed_at"] and cached["lessons_refreshed_at"] > started_at))
                             incoming = [dict(item, observed_at=started_at.isoformat()) for item in data]
-                            lessons = merge_family_lessons(cached["lessons"], incoming, today=today, full=job["topic"] == HISTORY)
-                            db.execute(text("UPDATE alfa_family_details SET lessons=CAST(:data AS jsonb),lessons_refreshed_at=:observed,"
-                                "lessons_full_refreshed_at=CASE WHEN :full THEN :observed ELSE lessons_full_refreshed_at END "
+                            lessons = merge_family_lessons(cached["lessons"], incoming, today=today,
+                                full=job["topic"] == HISTORY, history_only=history_only)
+                            db.execute(text("UPDATE alfa_family_details SET lessons=CAST(:data AS jsonb),"
+                                "lessons_refreshed_at=CASE WHEN :history_only THEN lessons_refreshed_at ELSE :observed END,"
+                                "lessons_full_refreshed_at=CASE WHEN :full THEN :observed ELSE lessons_full_refreshed_at END,"
+                                "lessons_history_through=CASE WHEN :full THEN CAST(:through AS date) ELSE lessons_history_through END "
                                 "WHERE workspace_id=:w AND connection_id=:conn AND branch_id=:b AND customer_id=:id AND settings_version=:v"),
-                                params | {"data": json.dumps(lessons), "full": job["topic"] == HISTORY})
+                                params | {"data": json.dumps(lessons), "full": job["topic"] == HISTORY,
+                                    "history_only": history_only, "through": today + timedelta(days=-31 if history_only else 90)})
                     db.execute(text("UPDATE alfa_settings SET secret_ciphertext=:secret WHERE workspace_id=:w AND version=:v"),
                         {"w": workspace, "v": settings["version"], "secret": self.connections.vault.seal(workspace, settings["connection_id"], credentials)})
                     card_jobs.clear_verified_denial(db, workspace, job)

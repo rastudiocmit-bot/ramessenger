@@ -11,6 +11,15 @@ from center_messenger.alfa_family import customer_balance, fetch_family_card, fe
 
 
 class FamilyBalanceTests(unittest.TestCase):
+    def test_history_only_coverage_cannot_erase_a_more_recent_future_lesson_in_another_card(self):
+        lesson={'id':7,'branch_id':1,'customer_id':9,'date':'2026-11-02','status':1,'observed_at':'2026-10-27T10:00:00+00:00'}
+        cards=[{'id':9,'branch_id':1,'lessons':[lesson]},
+               {'id':9,'branch_id':1,'lessons':[],'lessons_refreshed_at':'2026-10-27T09:00:00+00:00',
+                'lessons_full_refreshed_at':'2026-10-27T11:00:00+00:00','lessons_history_through':'2026-09-26'}]
+        self.assertEqual(current_lessons(cards),[lesson])
+        cards[1]['lessons_refreshed_at']='2026-10-27T12:00:00+00:00'
+        self.assertEqual(current_lessons(cards),[])
+
     def test_total_already_contains_base_and_subscriptions(self):
         # The screenshot case: 2725 on a subscription, 1237.50 on base.
         cards = [{'id':'7','balance':'3962.50','subscriptions':[{'balance':'2725.00'}]}]

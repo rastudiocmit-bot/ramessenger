@@ -350,12 +350,10 @@ class AlfaSync:
     def _step(self, workspace, lease):
         with self._work_transaction(workspace, lease) as (db, control):
             settings = self.connections._row(db, workspace)
-            # Native MAX's incremental policy replaces automatic whole-directory
-            # reimports with the active-only six-hour worker. Explicit runs still finish.
-            if control["running_id"] is None and control["published_id"] and db.execute(text(
-                "SELECT 1 FROM alfa_max_settings WHERE workspace_id=:w AND crm_connection_id=:c "
-                "AND history_cursor->>'sync_policy'='1'"),
-                {"w": workspace, "c": control["connection_id"]}).scalar_one_or_none():
+            # A published directory is maintained by the six-hour active/catalog
+            # workers, whether or not native MAX is connected. Explicit imports
+            # still finish, but a legacy timer must never reread the whole archive.
+            if control["running_id"] is None and control["published_id"]:
                 db.execute(text("DELETE FROM alfa_sync_queue WHERE workspace_id=:w"), {"w": workspace})
                 db.execute(text("UPDATE alfa_sync_control SET enabled=false WHERE workspace_id=:w"), {"w": workspace})
                 return
