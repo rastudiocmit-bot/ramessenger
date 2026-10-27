@@ -608,9 +608,19 @@ class AiVoice:
             result |= {"text": normalized, "fallback": fallback, "polish": error or "ok",
                        "agent": {"id": str(agent["id"]), "name": agent["name"], "model": agent["model"]}}
             if fallback:
-                result["warning"] = ("Текст вставлен без обработки: " + PROVIDERS[provider_of(agent["model"])]
-                                     + " не подключён." if error == "not_connected"
-                                     else "Текст вставлен без обработки: агент сейчас недоступен.")
+                name = PROVIDERS[provider_of(agent["model"])]
+                reason = {
+                    "not_connected": f"{name} не подключён — добавьте ключ в «Подключениях»",
+                    "unauthorized": f"{name} отклонил ключ",
+                    "no_balance": f"на счёте {name} закончились средства",
+                    "network": f"{name} не ответил за {VOICE_POLISH_TIMEOUT} секунд",
+                    "unavailable": f"{name} сейчас недоступен",
+                    "rate_limited": f"{name} временно ограничил запросы",
+                    "model_unknown": "модель агента не поддерживается — выберите другую",
+                    "content_filter": "модель отказалась обрабатывать этот текст",
+                    "unusable": "агент вернул непригодный текст",
+                }.get(error, "агент сейчас недоступен")
+                result["warning"] = f"Текст без обработки агентом «{agent['name']}»: {reason}."
         if not raw:
             result["warning"] = "Речь не распознана. Попробуйте говорить ближе к микрофону."
         self._usage(actor, workspace, kind="voice", agent=agent["id"] if agent else None, seconds=seconds,

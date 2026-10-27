@@ -674,7 +674,7 @@
   }
   const directory = window.CenterDirectory({ $, state, api, node, show, notice, date });
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast: feedback, confirm, renderPane });
-  window.CenterVoice({ $, state, api });
+  window.CenterVoice({ $, state, api, toast: feedback });
   const ai = window.CenterAi({ $, state, api, node, show, notice, toast: feedback, confirm });
   const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date, onStatus: (payload, view) => {
     connectionSummary("#alfa-history-summary", view.title, view.mode === "complete" ? "active" : ["error", "offline", "attention"].includes(view.mode) ? "error" : "waiting");

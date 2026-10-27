@@ -1,7 +1,7 @@
 "use strict";
 // Audio and retry clips live only in memory. Permission/startup/recognition belong
 // to one attempt and one chat; cancelling fences even promises browsers cannot abort.
-window.CenterVoice = ({ $, state, api }) => {
+window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
   const RATE = 16000, HOLD_MS = 220, STREAM_HOLD_MS = 450;
   const recordingLimit = () => Math.max(15, Math.min(180, Number(state.voiceMaxSeconds) || 180));
   const CANCEL_PX = 90, STILL_PX = 10;
@@ -332,6 +332,9 @@ window.CenterVoice = ({ $, state, api }) => {
           insert(result.text);
         }
       } else if (result.text) insert(result.text);
+      // The agent was meant to polish the text but did not: say why, once, so a
+      // missing key or a slow model is not mistaken for «the agent does nothing».
+      if (result.warning && result.polish && !["ok", "no_agent"].includes(result.polish)) toast(result.warning, true);
       // Recognition only edits the draft. Empty speech and provider notices do
       // not add a row, a popup or a message to the conversation.
       reset();
