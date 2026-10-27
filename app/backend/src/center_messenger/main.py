@@ -75,7 +75,7 @@ def create_app(
         )
         app.state.alfa_sync = AlfaSync(app.state.alfa) if app.state.alfa else None
         app.state.ai_voice = AiVoice(app.state.alfa) if app.state.alfa else None
-        app.state.tasks = Tasks(app.state.alfa) if app.state.alfa else None
+        app.state.tasks = Tasks(app.state.alfa, app.state.ai_voice) if app.state.alfa else None
         app.state.alfa_max = AlfaMaxConnections(app.state.alfa) if app.state.alfa else None
         app.state.directory = DirectoryReader(app.state.alfa) if app.state.alfa else None
         app.state.max_connections = (

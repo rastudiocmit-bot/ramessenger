@@ -509,6 +509,51 @@ class AiVoice:
         normalized = None if answer["truncated"] else (accept_normalized(raw, answer["text"]) if voice_task else answer["text"].strip())
         return (normalized, tokens, cost, False, None) if normalized else (raw, tokens, cost, True, "unusable")
 
+    def assist(self, actor, workspace, instruction, content, *, max_tokens=400, timeout=6):
+        """One short model call for tasks (draft, promise hint, reply). None when no model is ready.
+
+        Uses the workspace's text agent (or the voice agent) only for its model and
+        key; the instruction is the task's own. Nothing is stored except the usage row.
+        """
+        with self.accounts.transaction(actor, snapshot=True) as db:
+            self.accounts._workspace_chat(db, actor, workspace)
+            row = self._settings(db, workspace)
+            if row is None or (row["monthly_limit_rub"] is not None
+                               and self._month_spent(db, workspace) >= float(row["monthly_limit_rub"])):
+                return None
+            agent = db.execute(text(
+                "SELECT * FROM ai_agents WHERE workspace_id=:w AND enabled AND deleted_at IS NULL "
+                "ORDER BY (task='text_processing') DESC, is_default DESC, updated_at DESC LIMIT 1"),
+                {"w": workspace}).mappings().one_or_none()
+            if agent is None:
+                return None
+            provider = provider_of(agent["model"])
+            creds = self._credentials(db, workspace, yandex=False, selected={provider})
+        key = creds.get(provider)
+        if not key:
+            return None
+        try:
+            self.accounts.throttle(f"ai-task:{workspace}:{actor.user_id}", limit=120, minutes=60)
+        except AuthError:
+            return None
+        client = self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == "deepseek" else self.client
+        extra = {"rules": False, "timeout": timeout}
+        if provider in ai_gateways.PROVIDERS:
+            extra |= ai_gateways.options(creds, provider)
+            extra.pop("api_key")
+            extra["protocol"] = creds.get("gateways", {}).get(provider, {}).get("protocol", "chat")
+        try:
+            answer = client.complete(content, prompt=instruction, model=agent["model"], temperature=0.1, api_key=key,
+                                     folder_id=creds["folder"], max_tokens=max_tokens, **extra)
+        except YandexError as failure:
+            self._usage(actor, workspace, kind="task", agent=agent["id"], outcome="error", error=failure.code)
+            logging.getLogger(__name__).warning("Task assist failed workspace=%s code=%s", workspace, failure.code)
+            return None
+        tokens = (answer["input_tokens"], answer["output_tokens"])
+        self._usage(actor, workspace, kind="task", agent=agent["id"], tokens=tokens,
+                    cost=model_cost(agent["model"], *tokens), outcome="ok")
+        return None if answer["truncated"] else answer["text"].strip()
+
     def test_agent(self, actor, workspace, data):
         values = _clean_agent(data | {"name": data.get("name") or "Проверка"})
         sample = " ".join(str(data.get("text") or "").split())

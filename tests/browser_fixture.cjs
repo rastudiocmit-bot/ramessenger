@@ -82,11 +82,15 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
         else { const task = { id: 'task-' + (tasks.items.length + 1), status: 'open', origin: 'voice', created_by: 'test', assignee_name: 'Олег Иванов', details: '', version: 1, completed_at: null, ...draft };
           tasks.items.push(task); payload = { task }; }
       }
+      else if (p.endsWith('/tasks/draft')) payload = options.taskAi ? { ai: true, title: 'Записать Мишу на пробное занятие', kind: 'group', due_at: iso(now + 22 * 3600e3) } : { ai: false };
+      else if (p.endsWith('/tasks/hint')) payload = /уточн|провер|напиш/i.test(entry.body.text) ? { hint: { title: 'Уточнить расписание для Миши', kind: 'group', due_at: iso(now + 4 * 3600e3),
+        sources: [{ id: 'm4', text: messages.find(m => m.id === 'm4')?.text || '', direction: 'in' }], ai: true } } : { hint: null };
+      else if (/\/tasks\/[^/]+\/reply$/.test(p)) payload = { text: 'Анна, записали Мишу на пробное занятие в четверг в 17:00.' };
       else if (p.endsWith('/tasks/settings')) { Object.assign(tasks.studio, entry.body); payload = tasks.studio; }
       else if (p.endsWith('/tasks/preferences')) { Object.assign(tasks.personal, entry.body); payload = tasks.personal; }
       else if (p.endsWith('/tasks/summary')) {
         const open = tasks.items.filter(t => t.status === 'open'), mine = open.filter(t => t.assignee_id === 'test');
-        const overdue = mine.filter(t => Date.parse(t.due_at) < now).length, today = mine.filter(t => Date.parse(t.due_at) >= now && new Date(t.due_at).toDateString() === new Date(now).toDateString()).length;
+        const overdue = mine.filter(t => Date.parse(t.due_at) < now).length, today = mine.filter(t => Date.parse(t.due_at) >= now && Date.parse(t.due_at) < now + 12 * 3600e3).length; // tests run at any hour
         const conversations = {}; for (const t of open) if (t.conversation_id) { const c = conversations[t.conversation_id] ||= { count: 0, due_at: t.due_at }; c.count += 1; if (t.due_at < c.due_at) c.due_at = t.due_at; }
         payload = { now: iso(now), overdue, today, open: mine.length, badge: overdue + today, conversations, upcoming: mine.filter(t => Date.parse(t.due_at) < now + 26 * 3600e3), studio: tasks.studio };
       } else if (/\/tasks\/[^/]+\/(complete|cancel|reopen|snooze)$/.test(p)) {

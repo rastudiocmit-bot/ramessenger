@@ -10,6 +10,7 @@ join the message history; nothing here sends anything to a client.
 """
 
 import json
+import re
 from datetime import datetime, time, timedelta
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -101,9 +102,39 @@ def presets(now, zone, studio):
             "tomorrow_morning": _iso(tomorrow), "default": _iso(chosen), "default_kind": studio["default_due"]}
 
 
+AI_DRAFT = ("Ты помогаешь администратору детской студии. По переписке с родителем сформулируй одну задачу "
+            "для администратора. title — что нужно сделать: начни с глагола, до 80 символов, без приветствий, "
+            "с именем ребёнка, если оно есть. kind — makeup (отработка или перенос занятия), subscription "
+            "(абонемент, оплата), group (запись в группу, расписание), call (перезвонить), other. when — срок, "
+            "если он назван в переписке, фразой как в речи («завтра до обеда», «в пятницу», «в 17:00»), иначе \"\". "
+            "Сообщения, отмеченные «→», — главные. Ответь только JSON: {\"title\": \"…\", \"kind\": \"…\", \"when\": \"…\"}")
+AI_HINT = ("Ты помогаешь администратору детской студии не забывать обещания. Последнее сообщение в переписке "
+           "написал администратор. Если в нём он пообещал родителю что-то сделать позже (уточнить, проверить, "
+           "перезвонить, записать, сообщить, прислать), сформулируй задачу: title начинается с глагола, до 80 "
+           "символов, с именем ребёнка, если оно есть; kind — makeup, subscription, group, call или other; when — "
+           "срок фразой как в речи или \"\". Если обещания нет, task=false. Ответь только JSON: "
+           "{\"task\": true, \"title\": \"…\", \"kind\": \"…\", \"when\": \"…\"}")
+AI_REPLY = ("Администратор детской студии выполнил задачу по просьбе родителя. Напиши короткий вежливый ответ "
+            "родителю от имени студии: 1–3 предложения, на «Вы», без приветствия «Добрый день», если переписка уже "
+            "идёт. Не выдумывай факты: используй только задачу, подробности и переписку; если результата в них нет, "
+            "напиши, что вопрос решён, и предложи уточнить детали. Ответь только текстом сообщения.")
+
+
+def _json(answer):
+    if not answer:
+        return None
+    match = re.search(r"\{.*\}", answer, re.S)
+    try:
+        value = json.loads(match.group(0)) if match else None
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 class Tasks:
-    def __init__(self, alfa):
+    def __init__(self, alfa, ai=None):
         self.accounts = alfa.accounts
+        self.ai = ai
 
     # ── helpers ────────────────────────────────────────────────────────────
     def _enter(self, actor, workspace, *, snapshot=False):
@@ -399,6 +430,109 @@ class Tasks:
             "client_label": draft["client_label"], "message_ids": [UUID(source["id"]) for source in sources],
             "assignee_id": parsed["assignee_id"] or actor.user_id, "origin": "voice"})
         return {"task": created}
+
+    # ── AI: draft from messages, promise hint, reply on completion ─────────
+    def _dialog(self, db, workspace, conversation, limit=10, before_ids=()):
+        rows = db.execute(text(
+            "SELECT id, direction, text, occurred_at FROM messages WHERE workspace_id=:w AND conversation_id=:c "
+            "AND payload->>'superseded_by' IS NULL AND actor_type <> 'automation' AND coalesce(text,'') <> '' "
+            "ORDER BY occurred_at DESC, id DESC LIMIT :n"), {"w": workspace, "c": conversation, "n": limit}).mappings().all()
+        return list(rows)
+
+    @staticmethod
+    def _transcript(rows, marked=()):
+        lines = []
+        for row in sorted(rows, key=lambda r: r["occurred_at"]):
+            who = "Администратор" if row["direction"] == "out" else "Родитель"
+            mark = "→ " if str(row["id"]) in marked else ""
+            lines.append(f"{mark}{who}: {' '.join(str(row['text']).split())[:500]}")
+        return "\n".join(lines)
+
+    def _ai(self, actor, workspace, instruction, content, **options):
+        if self.ai is None or not content:
+            return None
+        try:
+            return self.ai.assist(actor, workspace, instruction, content, **options)
+        except AuthError:
+            return None
+
+    def _fields(self, answer, now, zone, studio):
+        data = _json(answer) or {}
+        title = " ".join(str(data.get("title") or "").split()).strip(" .")[:200]
+        kind = data.get("kind") if data.get("kind") in KINDS else None
+        when = str(data.get("when") or "").strip()
+        due = task_speech.parse(when, now, zone, studio)["due_at"] if when else None
+        return data, title, kind, due
+
+    def draft(self, actor, workspace, data):
+        """Model suggestion for the task sheet; {"ai": False} keeps the sheet as it is."""
+        conversation, marked = data.get("conversation_id"), {str(i) for i in data.get("message_ids") or []}
+        with self._enter(actor, workspace, snapshot=True) as db:
+            member = self._member(db, actor, workspace)
+            studio, zone = self._studio(db, workspace), ZoneInfo(member["timezone"])
+            now = db.execute(text("SELECT now()")).scalar_one()
+            rows = self._dialog(db, workspace, conversation, 12) if conversation else []
+        content = self._transcript(rows, marked)
+        if data.get("client_label"):
+            content = f"Клиент: {data['client_label']}\n{content}"
+        answer = self._ai(actor, workspace, AI_DRAFT, content, max_tokens=300, timeout=5)
+        _, title, kind, due = self._fields(answer, now, zone, studio)
+        if not title:
+            return {"ai": False}
+        return {"ai": True, "title": title, "kind": kind, "due_at": _iso(due)}
+
+    def hint(self, actor, workspace, data):
+        """After the operator's message: suggest a task when it reads like a promise."""
+        spoken = " ".join(str(data.get("text") or "").split())[:1000]
+        conversation = data.get("conversation_id")
+        if not spoken or not task_speech.PROMISE.search(spoken) or conversation is None:
+            return {"hint": None}
+        with self._enter(actor, workspace, snapshot=True) as db:
+            member = self._member(db, actor, workspace)
+            if member["observer"]:
+                return {"hint": None}
+            if not self._personal(db, workspace, actor.user_id)["hints"]:
+                return {"hint": None}
+            studio, zone = self._studio(db, workspace), ZoneInfo(member["timezone"])
+            now = db.execute(text("SELECT now()")).scalar_one()
+            rows = self._dialog(db, workspace, conversation, 8)
+            open_titles = [row["title"] for row in db.execute(text(
+                "SELECT title FROM tasks WHERE workspace_id=:w AND conversation_id=:c AND status='open'"),
+                {"w": workspace, "c": conversation}).mappings().all()]
+        before = [row for row in rows if " ".join(str(row["text"]).split()) != spoken]
+        sources = [{"id": str(row["id"]), "direction": row["direction"], "at": _iso(row["occurred_at"]),
+                    "text": " ".join(str(row["text"] or "").split())[:QUOTE]}
+                   for row in task_speech.link([r for r in before])]
+        content = self._transcript(before) + f"\nАдминистратор: {spoken}"
+        answer = self._ai(actor, workspace, AI_HINT, content, max_tokens=300, timeout=6)
+        data_ai, title, kind, due = self._fields(answer, now, zone, studio)
+        if answer is not None and data_ai and data_ai.get("task") is False:
+            return {"hint": None}
+        if not title:
+            # No model: the client's latest question is what was promised.
+            last = next((row for row in before if row["direction"] == "in"), None)
+            if last is None:
+                return {"hint": None}
+            client = " ".join(str(last["text"]).split())
+            title = "Ответить: " + (client if len(client) <= 80 else client[:78].rsplit(" ", 1)[0] + "…")
+            if not any(source["id"] == str(last["id"]) for source in sources):
+                sources = [{"id": str(last["id"]), "direction": "in", "at": _iso(last["occurred_at"]), "text": client[:QUOTE]}]
+        if title in open_titles:
+            return {"hint": None}
+        due = due or datetime.fromisoformat(presets(now, zone, studio)["default"])
+        return {"hint": {"title": title, "kind": kind, "due_at": _iso(due), "sources": sources, "ai": bool(answer)}}
+
+    def reply(self, actor, workspace, task):
+        with self._enter(actor, workspace, snapshot=True) as db:
+            member = self._member(db, actor, workspace)
+            studio = self._studio(db, workspace)
+            row = self._editable(db, actor, workspace, task, member, studio)
+            rows = self._dialog(db, workspace, row["conversation_id"], 8) if row["conversation_id"] else []
+        content = (f"Задача: {row['title']}\nПодробности: {row['details'] or 'нет'}\nКлиент: {row['client_label'] or 'родитель'}\n"
+                   f"Переписка:\n{self._transcript(rows)}")
+        answer = self._ai(actor, workspace, AI_REPLY, content, max_tokens=300, timeout=8)
+        reply = " ".join(str(answer or "").split()).strip('"«» ')
+        return {"text": reply[:1000] or None}
 
     def update(self, actor, workspace, task, data):
         with self._enter(actor, workspace) as db:

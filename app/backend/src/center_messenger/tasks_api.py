@@ -42,6 +42,17 @@ class VoiceTaskInput(InputModel):
     create: bool = True
 
 
+class DraftInput(InputModel):
+    conversation_id: UUID | None = None
+    message_ids: list[UUID] = Field(default_factory=list, max_length=5)
+    client_label: str = Field(default="", max_length=200)
+
+
+class HintInput(InputModel):
+    conversation_id: UUID
+    text: str = Field(min_length=1, max_length=4000)
+
+
 class SnoozeInput(InputModel):
     due_at: datetime
 
@@ -111,6 +122,21 @@ def task_create(workspace_id: UUID, model: TaskInput, request: Request):
 @router.post("/tasks/voice")
 def task_voice(workspace_id: UUID, model: VoiceTaskInput, request: Request):
     return tasks(request).voice(identity(request, mutation=True), workspace_id, model.model_dump())
+
+
+@router.post("/tasks/draft")
+def task_draft(workspace_id: UUID, model: DraftInput, request: Request):
+    return tasks(request).draft(identity(request, mutation=True), workspace_id, model.model_dump())
+
+
+@router.post("/tasks/hint")
+def task_hint(workspace_id: UUID, model: HintInput, request: Request):
+    return tasks(request).hint(identity(request, mutation=True), workspace_id, model.model_dump())
+
+
+@router.post("/tasks/{task_id}/reply")
+def task_reply(workspace_id: UUID, task_id: UUID, request: Request):
+    return tasks(request).reply(identity(request, mutation=True), workspace_id, task_id)
 
 
 @router.get("/tasks/{task_id}")

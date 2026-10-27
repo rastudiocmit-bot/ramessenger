@@ -68,7 +68,7 @@ async function longPress(page, selector) {
       assert.equal(await page.locator('#tabbar [data-pane="tasks"] .dot').innerText(), '1');
       await tab.tap();
       await page.waitForSelector('#pane-tasks:not([hidden]) .task-row');
-      assert.match(await page.locator('#pane-tasks .task-group-title').first().innerText(), /Сегодня · 1/);
+      assert.match(await page.locator('#pane-tasks .task-group-title').first().innerText(), /(Сегодня|Завтра) · 1/); // «через 1 ч» late in the evening is tomorrow
       await settle(page); await save(page, 'tasks-section');
       await page.locator('#pane-tasks .task-check').first().tap();
       await page.waitForSelector('.notice-capsule:not([hidden]) .notice-title:has-text("Задача выполнена")');
@@ -134,6 +134,40 @@ async function longPress(page, selector) {
       assert.equal(created.body.assignee_id, 'operator-1');
       await page.waitForSelector('#task-strip:not([hidden])');
       await settle(page); await save(page, 'tasks-desktop');
+      assert.deepEqual(data.unexpected, []); assert.deepEqual(data.errors, []);
+      await context.close();
+    }
+    // ── AI: the sheet's draft, the promise hint, the reply draft on completion ──
+    {
+      const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      const data = await fixture(context, 'owner', undefined, { taskAi: true });
+      const page = await context.newPage(); page.setDefaultTimeout(15000);
+      await page.goto('https://cabinet.example.test/?view=messages');
+      await page.locator('.chat-select').first().click();
+      await page.waitForSelector('#chat-history .chat-bubble.msg[data-id="m4"]');
+      await page.locator('#chat-history .chat-bubble.msg[data-id="m4"] .msg-text').click({ button: 'right' });
+      await page.locator('.task-menu-item.primary').click();
+      await page.waitForSelector('#task-dialog .task-ai-badge:not([hidden]):not(.busy)');
+      assert.equal(await page.locator('#task-dialog textarea[name="title"]').inputValue(), 'Записать Мишу на пробное занятие');
+      assert.equal(await page.locator('#task-dialog .task-chip[aria-pressed="true"]', { hasText: 'Группа' }).count(), 1);
+      await settle(page); await save(page, 'tasks-ai-draft');
+      await page.locator('#task-dialog [data-task-close]').click();
+      // A promise in the answer → «Создать задачу?» above the composer.
+      await page.locator('#chat-input').fill('Уточню расписание у педагога и напишу вам');
+      await page.locator('#chat-send').click();
+      await page.waitForSelector('.task-hint:not([hidden])');
+      assert.match(await page.locator('.task-hint small').innerText(), /Уточнить расписание для Миши/);
+      await settle(page); await save(page, 'tasks-ai-hint');
+      await page.locator('.task-hint-make').click();
+      await page.waitForSelector('#task-strip:not([hidden])');
+      const created = data.mutations.find(m => m.method === 'POST' && m.path.endsWith('/tasks'));
+      assert.equal(created.body.origin, 'ai_hint'); assert.deepEqual(created.body.message_ids, ['m4']);
+      // Done from the strip → «Ответить клиенту» puts the model's draft into the field.
+      await page.locator('#task-strip .task-strip-done').click();
+      await page.locator('.notice-capsule .notice-act', { hasText: 'Ответить клиенту' }).click();
+      await page.waitForFunction(() => document.querySelector('#chat-input').value.startsWith('Анна, записали'));
+      assert.ok(!data.mutations.some(m => m.path.endsWith('/messages') && m.body?.text?.startsWith('Анна, записали')), 'the reply is never sent by itself');
+      await settle(page); await save(page, 'tasks-ai-reply');
       assert.deepEqual(data.unexpected, []); assert.deepEqual(data.errors, []);
       await context.close();
     }

@@ -300,12 +300,31 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     const sources = ids.map(bubbleSource), first = sources.find(s => s.direction === "in") || sources[0];
     const text = (first?.text || "").replace(/\s+/g, " ").trim();
     const title = text.length > 90 ? text.slice(0, 88).replace(/\s+\S*$/, "") + "…" : text;
-    await openSheet({ draft: { title, sources, conversation_id: convId, client_label: clientLabel(), origin } });
+    const draft = { title, sources, conversation_id: convId, client_label: clientLabel(), origin };
+    await openSheet({ draft });
+    if (!readOnly()) suggest(draft);
+  }
+  // The model rewrites the sheet only where the operator has not touched it yet.
+  let suggestSeq = 0;
+  async function suggest(draft) {
+    const seq = ++suggestSeq, form = sheet.querySelector("form"), badge = sheet.querySelector(".task-ai-badge");
+    const initial = { title: form.elements.title.value, due: sheetDue, kind: sheet.dataset.kind };
+    badge.hidden = false; badge.textContent = "AI думает…"; badge.classList.add("busy");
+    try {
+      const result = await api(`${base()}/tasks/draft`, { method: "POST", timeoutMs: 9000,
+        data: { conversation_id: draft.conversation_id, message_ids: draft.sources.map(source => source.id), client_label: draft.client_label } });
+      if (seq !== suggestSeq || !sheet.open || sheetTask || sheetDraft?.conversation_id !== draft.conversation_id) return;
+      if (!result.ai) { badge.hidden = true; return; }
+      if (form.elements.title.value === initial.title && result.title) form.elements.title.value = result.title;
+      if (sheet.dataset.kind === initial.kind && !initial.kind && result.kind) { sheet.dataset.kind = result.kind; paintKinds(result.kind); }
+      if (sheetDue === initial.due && result.due_at) { sheetDue = result.due_at; paintDue(); }
+      badge.textContent = "Черновик AI"; badge.classList.remove("busy");
+    } catch (_) { if (seq === suggestSeq) badge.hidden = true; }
   }
   function buildSheet() {
     const dialog = document.createElement("dialog"); dialog.className = "live-sheet task-sheet"; dialog.id = "task-dialog";
     dialog.setAttribute("aria-labelledby", "task-sheet-title");
-    dialog.innerHTML = `<div class="sheet-head"><div><h2 id="task-sheet-title">Новая задача</h2><small class="task-sheet-client"></small></div>
+    dialog.innerHTML = `<div class="sheet-head"><div><h2 id="task-sheet-title">Новая задача <span class="task-ai-badge" hidden></span></h2><small class="task-sheet-client"></small></div>
       <button class="iconbtn plain" type="button" data-task-close aria-label="Закрыть"></button></div>
       <form class="sheet-body task-form" novalidate>
         <label class="task-field"><span>Что сделать</span><textarea name="title" rows="2" maxlength="200" required></textarea></label>
@@ -387,7 +406,10 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     catch (error) { toast(error.message, true); return; }
     sheetTask = task; sheetDraft = draft ? { ...draft, sources: [...(draft.sources || [])] } : null;
     const editing = Boolean(task), form = sheet.querySelector("form");
-    sheet.querySelector("#task-sheet-title").textContent = editing ? (task.status === "open" ? "Задача" : task.status === "done" ? "Задача выполнена" : "Задача отменена") : "Новая задача";
+    suggestSeq += 1;
+    const heading = sheet.querySelector("#task-sheet-title"), badge = heading.querySelector(".task-ai-badge");
+    heading.firstChild.textContent = (editing ? (task.status === "open" ? "Задача" : task.status === "done" ? "Задача выполнена" : "Задача отменена") : "Новая задача") + " ";
+    badge.hidden = !(draft?.origin === "voice" && draft?.title); badge.textContent = "Из голоса"; badge.classList.remove("busy");
     sheet.querySelector(".task-sheet-client").textContent = (editing ? task.client_label : draft?.client_label) || "";
     form.elements.title.value = editing ? task.title : draft?.title || "";
     form.elements.details.value = editing ? task.details || "" : "";
@@ -464,9 +486,20 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     const here = state.pane === "messages" && task.conversation_id === convId;
     notices?.notify({ type: "success", title: "Задача выполнена", text: done.title, key: `task:complete:${task.id}`, always: true, count: false,
       actions: [
-        ...(task.conversation_id ? [{ label: "Ответить клиенту", run: () => (here ? Promise.resolve() : openChat(task)).then(() => $("#chat-input")?.focus()) }] : []),
+        ...(task.conversation_id ? [{ label: "Ответить клиенту", run: () => replyTo(task, here) }] : []),
         { label: "Вернуть", run: () => action(task, "reopen", "Задача снова открыта") },
       ] });
+  }
+  // «Ответить клиенту»: open the dialog, then put the model's draft into an empty field.
+  async function replyTo(task, here) {
+    if (!here) await openChat(task);
+    const input = $("#chat-input"); input?.focus();
+    try {
+      const result = await api(`${base()}/tasks/${task.id}/reply`, { method: "POST", timeoutMs: 12000 });
+      if (!result.text || !input || input.disabled || input.value.trim() || convId !== task.conversation_id) return;
+      input.value = result.text; input.dispatchEvent(new Event("input", { bubbles: true })); input.focus();
+      notices?.notify({ type: "info", glyph: "task", title: "Черновик ответа в поле ввода", text: "Проверьте и отправьте сами.", key: `task:reply:${task.id}`, always: true, count: false });
+    } catch (_) { /* The operator writes the answer themselves. */ }
   }
   function snoozeTarget(kind) {
     const presets = ctx?.presets || {};
@@ -539,6 +572,46 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       }
     } catch (error) { if (error.name !== "AbortError") toast(error.message, true); }
   });
+
+  // ── promise hint: «уточню», «проверю» in the operator's answer → «Создать задачу?» ──
+  const PROMISE = /уточн|провер|посмотр|сообщ|перезвон|вернусь|напиш|узна|отвеч/i;
+  const hintBar = node("div", undefined, "task-hint"); hintBar.hidden = true; hintBar.setAttribute("role", "status");
+  hintBar.innerHTML = `<span class="task-hint-ic"></span><button type="button" class="task-hint-main"><strong>Создать задачу?</strong><small></small></button><button type="button" class="task-hint-make">Создать</button><button type="button" class="task-hint-close" aria-label="Не создавать"></button>`;
+  hintBar.querySelector(".task-hint-ic").append(icon("task")); hintBar.querySelector(".task-hint-close").append(icon("close"));
+  canvas?.append(hintBar);
+  let hint = null, hintSeq = 0;
+  const hintOffKey = id => `cm:task-hint-off:${id}:${dayKey(Date.now())}`;
+  function hideHint() { hint = null; hintSeq += 1; hintBar.hidden = true; canvas?.classList.remove("has-task-hint"); }
+  async function askHint(text, conversation) {
+    if (!conversation || !text || !PROMISE.test(text) || readOnly() || ctx?.personal?.hints === false || store.get(hintOffKey(conversation))) return;
+    const seq = ++hintSeq;
+    await new Promise(resolve => setTimeout(resolve, 900));
+    try {
+      const result = await api(`${base()}/tasks/hint`, { method: "POST", timeoutMs: 12000, data: { conversation_id: conversation, text } });
+      if (seq !== hintSeq || conversation !== convId || !result.hint) return;
+      hint = { ...result.hint, conversation_id: conversation, client_label: clientLabel() };
+      hintBar.querySelector("small").textContent = `${hint.title} · ${dueText(hint)}`;
+      hintBar.hidden = false; canvas?.classList.add("has-task-hint");
+    } catch (_) { /* A missed hint is not an error for the operator. */ }
+  }
+  hintBar.querySelector(".task-hint-close").addEventListener("click", () => { if (hint) store.set(hintOffKey(hint.conversation_id), "1"); hideHint(); });
+  hintBar.querySelector(".task-hint-main").addEventListener("click", () => {
+    const current = hint; hideHint(); if (!current) return;
+    openSheet({ draft: { title: current.title, sources: current.sources || [], conversation_id: current.conversation_id, client_label: current.client_label,
+      origin: "ai_hint", due_at: current.due_at, kind: current.kind } });
+  });
+  hintBar.querySelector(".task-hint-make").addEventListener("click", async () => {
+    const current = hint; hideHint(); if (!current) return;
+    try {
+      const created = await api(`${base()}/tasks`, { method: "POST", data: { title: current.title, kind: current.kind || null, due_at: current.due_at,
+        conversation_id: current.conversation_id, client_label: current.client_label, message_ids: (current.sources || []).map(source => source.id), origin: "ai_hint" } });
+      notices?.notify({ type: "success", glyph: "task", title: "Задача создана", text: `${created.title} · ${dueText(created)}`, key: `task:created:${created.id}`, always: true, count: false,
+        actions: [{ label: "Изменить", keep: true, run: () => openSheet({ task: created }) }] });
+      await changed();
+    } catch (error) { if (error.name !== "AbortError") toast(error.message, true); }
+  });
+  document.addEventListener("cm:chat-selected", hideHint);
+  $("#chat-compose")?.addEventListener("submit", () => { const text = $("#chat-input")?.value || ""; if (convId) askHint(text.trim(), convId); }, true);
 
   // ── after an answer to the client: «Задача выполнена?» ─────────────────────
   let seenOut = new Set(), seenFor = null, replySent = 0;
