@@ -323,7 +323,37 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
         top: "auto", bottom: "24px", maxHeight: `${innerHeight - 48}px` });
     }
   }
-  addEventListener("resize", () => { for (const dialog of document.querySelectorAll(".task-sheet[open], #task-settings-dialog[open]")) placeSheet(dialog); });
+  addEventListener("resize", () => { for (const dialog of document.querySelectorAll(".task-sheet[open], #task-settings-dialog[open]")) { placeSheet(dialog); paintEdges(dialog); } fitKeyboard(); });
+  // The middle of a sheet scrolls; its head and the button at the bottom stay put. Lines and soft
+  // edges show only when there is something to scroll.
+  function paintEdges(dialog) {
+    const body = dialog?.querySelector(".sheet-body"); if (!body) return;
+    const more = body.scrollHeight - body.clientHeight > 2;
+    dialog.classList.toggle("scrolls", more);
+    dialog.classList.toggle("at-top", body.scrollTop <= 1);
+    dialog.classList.toggle("at-end", body.scrollTop >= body.scrollHeight - body.clientHeight - 1);
+  }
+  // Bring a just-opened block (or the field being typed in) into the visible middle.
+  function revealIn(element) {
+    const body = element?.closest(".sheet-body"); if (!body) return;
+    requestAnimationFrame(() => {
+      const top = element.offsetTop - body.offsetTop - 8, bottom = top + element.offsetHeight + 16;
+      if (top < body.scrollTop) body.scrollTo({ top, behavior: "smooth" });
+      else if (bottom > body.scrollTop + body.clientHeight) body.scrollTo({ top: Math.min(top, bottom - body.clientHeight), behavior: "smooth" });
+    });
+  }
+  // On a phone the sheet stands on the keyboard: its bottom follows the visible part of the screen.
+  function fitKeyboard() {
+    if (!sheet?.open || innerWidth >= 720) return;
+    const view = window.visualViewport, covered = view ? Math.max(0, innerHeight - view.height - view.offsetTop) : 0;
+    // A tall phone keeps the chat header in sight; a short one gives the sheet the whole height.
+    const ceiling = innerHeight < 700 ? 10 : Math.max(12, ($("#chat-header")?.getBoundingClientRect().bottom || 12) + 8);
+    sheet.style.bottom = covered ? `${Math.round(covered)}px` : "";
+    sheet.style.maxHeight = `${Math.round((view ? view.height + view.offsetTop : innerHeight) - ceiling)}px`;
+    paintEdges(sheet);
+  }
+  window.visualViewport?.addEventListener("resize", fitKeyboard);
+  window.visualViewport?.addEventListener("scroll", fitKeyboard);
   // «Что сделать» grows with a long draft instead of hiding its second half.
   function fitTitle() {
     for (const [name, most] of [["title", 160], ["details", 220]]) {
@@ -373,7 +403,6 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       <form class="sheet-body task-form" novalidate>
         <label class="task-field task-title-field"><span>Что сделать?</span><span class="task-title-box"><textarea name="title" rows="1" maxlength="200" required></textarea><span class="task-title-pen" aria-hidden="true"></span></span></label>
         <div class="task-quotes"></div>
-        <div class="task-edit-bar"><span>Правка текста задачи</span><button class="task-edit-done" type="button">Готово</button></div>
         <div class="task-field task-due-field" role="group" aria-labelledby="task-due-label"><span id="task-due-label">Срок</span><div class="task-chips task-due"></div>
           <input class="task-due-input" type="datetime-local" aria-label="Дата и время срока" hidden></div>
         <div class="task-pair">
@@ -389,7 +418,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
         <div class="task-actions"><button class="btn sec task-open-chat" type="button" hidden>Открыть переписку</button>
           <button class="btn sec task-cancel-task" type="button" hidden>Отменить задачу</button>
           <button class="btn sec task-done" type="button" hidden>Выполнено</button>
-          <button class="btn primary task-save" type="submit">Создать задачу</button></div>
+          <button class="btn primary task-save" type="submit">Создать задачу</button>
+          <button class="btn primary task-edit-done" type="button">Готово</button></div>
       </form>`;
     dialog.querySelector("[data-task-close]").append(icon("close"));
     dialog.querySelector(".task-title-pen").append(icon("edit"));
@@ -397,9 +427,14 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     const title = dialog.querySelector('textarea[name="title"]');
     // A phone keeps only the text and «Готово» above the keyboard while the task is being typed.
     const typing = () => matchMedia("(pointer: coarse)").matches && innerWidth < 720;
-    // Applied once the tap is over: the sheet shrinking under the finger would land the tap elsewhere.
-    title.addEventListener("focus", () => { if (typing()) setTimeout(() => { if (document.activeElement === title) dialog.classList.add("title-editing"); }, 320); });
-    title.addEventListener("blur", () => dialog.classList.remove("title-editing"));
+    // Nothing is hidden while typing: only the button at the bottom reads «Готово», so the sheet never jumps.
+    title.addEventListener("focus", () => {
+      if (!typing()) return;
+      dialog.classList.add("title-editing");
+      setTimeout(() => { if (document.activeElement === title) { fitKeyboard(); revealIn(title.closest(".task-field")); } }, 280);
+    });
+    title.addEventListener("blur", () => { dialog.classList.remove("title-editing"); setTimeout(fitKeyboard, 60); });
+    dialog.querySelector("form").addEventListener("scroll", () => paintEdges(dialog), { passive: true });
     dialog.querySelector(".task-edit-done").addEventListener("pointerdown", event => event.preventDefault());
     dialog.querySelector(".task-edit-done").addEventListener("click", () => title.blur());
     dialog.querySelector('select[name="kind"]').addEventListener("change", event => { sheet.dataset.kind = event.target.value; sheet.dataset.kindAi = ""; paintKinds(sheet.dataset.kind); });
@@ -407,7 +442,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     dialog.querySelector(".task-details-toggle").addEventListener("click", () => {
       const open = !dialog.querySelector(".task-details").classList.contains("open");
       try { localStorage.setItem("cm:task-details-open", open ? "1" : ""); } catch (_) {}
-      paintDetails(open); if (open) { fitTitle(); dialog.querySelector('textarea[name="details"]').focus(); }
+      paintDetails(open); if (open) { fitTitle(); revealIn(dialog.querySelector(".task-details")); dialog.querySelector('textarea[name="details"]').focus({ preventScroll: true }); }
+      paintEdges(dialog);
     });
     dialog.querySelector("[data-task-close]").addEventListener("click", () => dialog.close());
     dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
@@ -481,7 +517,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       short.append(glyph, node("span", sources[0].text || "Сообщение без текста", "task-quote-text"));
       if (sources.length > 1) short.append(node("span", `+${sources.length - 1}`, "task-quote-more"));
       const chev = node("span", undefined, "task-quote-chev"); chev.setAttribute("aria-hidden", "true"); chev.append(icon("chevron")); short.append(chev);
-      short.addEventListener("click", () => paintQuotes(sources, editable, true));
+      short.addEventListener("click", () => { paintQuotes(sources, editable, true); paintEdges(sheet); revealIn(box); });
       box.append(short); return;
     }
     for (const source of sources) {
@@ -496,7 +532,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       box.append(quote);
     }
     const fold = node("button", sources.length > 1 ? "Свернуть сообщения" : "Свернуть сообщение", "task-quote-fold"); fold.type = "button";
-    fold.addEventListener("click", () => paintQuotes(sources, editable, false)); box.append(fold);
+    fold.addEventListener("click", () => { paintQuotes(sources, editable, false); paintEdges(sheet); }); box.append(fold);
   }
   async function openSheet({ task = null, draft = null }) {
     sheet ||= buildSheet();
@@ -538,7 +574,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     sheet.querySelector(".task-open-chat").hidden = !editing || !task.conversation_id || (state.pane === "messages" && task.conversation_id === convId);
     const error = sheet.querySelector(".task-error"); error.hidden = true; error.textContent = "";
     if (!sheet.open) sheet.showModal();
-    placeSheet(sheet); fitTitle();
+    placeSheet(sheet); fitTitle(); fitKeyboard(); sheet.querySelector(".sheet-body").scrollTop = 0; paintEdges(sheet);
     // No caret on opening: the keyboard would cover the sheet. A tap on the field starts editing.
   }
   async function saveSheet() {

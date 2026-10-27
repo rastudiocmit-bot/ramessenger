@@ -45,16 +45,19 @@ async function longPress(page, selector) {
       // Opening never puts the caret in the text: the keyboard would cover the sheet.
       assert.equal(await page.evaluate(() => document.activeElement?.name || ''), '', 'no field is focused on opening');
       // Everything fits on the phone without scrolling the sheet.
-      const fits = await page.evaluate(() => { const d = document.querySelector('#task-dialog'); return { scroll: d.scrollHeight - d.clientHeight, top: d.getBoundingClientRect().top }; });
+      const fits = await page.evaluate(() => { const d = document.querySelector('#task-dialog'), b = d.querySelector('.sheet-body'); return { scroll: b.scrollHeight - b.clientHeight, top: d.getBoundingClientRect().top }; });
       assert.ok(fits.scroll <= 1 && fits.top >= 0, `the sheet fits without scrolling ${JSON.stringify(fits)}`);
       await settle(page); await save(page, 'tasks-sheet');
       await page.locator('#task-dialog .task-chip', { hasText: 'Через 1 час' }).tap();
       await page.locator('#task-dialog select[name="kind"]').selectOption('makeup');
       assert.equal(await page.locator('#task-dialog .task-kind-pick .task-pick-value').innerText(), 'Отработка');
       // Typing on a phone: only the text and «Готово» stay above the keyboard.
+      const before = await page.evaluate(() => document.querySelector('#task-dialog').getBoundingClientRect().top);
       await page.locator('#task-dialog textarea[name="title"]').tap();
-      await page.waitForSelector('#task-dialog .task-edit-bar', { state: 'visible' });
+      await page.waitForSelector('#task-dialog .task-edit-done', { state: 'visible' });
       assert.equal(await page.locator('#task-dialog .task-save').isVisible(), false);
+      assert.equal(await page.locator('#task-dialog .task-pair').isVisible(), true, 'nothing is hidden while typing');
+      assert.ok(Math.abs(await page.evaluate(() => document.querySelector('#task-dialog').getBoundingClientRect().top) - before) <= 1, 'the sheet does not move when the field is tapped');
       await save(page, 'tasks-sheet-typing');
       await page.locator('#task-dialog .task-edit-done').tap();
       assert.equal(await page.locator('#task-dialog .task-save').isVisible(), true);
@@ -141,6 +144,10 @@ async function longPress(page, selector) {
       assert.match(await page.locator('#task-dialog .task-quote-more').innerText(), /\+1/);
       await page.locator('#task-dialog .task-quote-short').click();
       assert.equal(await page.locator('#task-dialog .task-quote').count(), 2);
+      await page.locator('#task-dialog .task-details-toggle').click();
+      const kept = await page.evaluate(() => { const s = document.querySelector('#task-dialog .task-save').getBoundingClientRect(), d = document.querySelector('#task-dialog').getBoundingClientRect(); return { s: s.bottom, d: d.bottom, top: d.top }; });
+      assert.ok(kept.s <= kept.d && kept.top >= 0, `«Создать задачу» stays inside the sheet ${JSON.stringify(kept)}`);
+      await settle(page); await save(page, 'tasks-sheet-opened-desktop');
       assert.equal(await page.locator('#task-dialog .task-assignee').isVisible(), true, 'administrators choose the assignee');
       await page.locator('#task-dialog select[name="assignee"]').selectOption('operator-1');
       await page.locator('#task-dialog .task-save').click();

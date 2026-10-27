@@ -1777,11 +1777,20 @@ body:has(#cabinet[hidden]){overflow:auto}
 .task-sheet .task-actions{position:sticky;bottom:-1px;z-index:1;background:var(--surface);padding-top:2px}
 .task-sheet .task-actions .btn{min-height:50px;border-radius:14px;font-size:15px}
 .task-sheet .task-actions .task-save{flex:1 1 100%}
-/* Typing the task on a phone: the text and «Готово» above the keyboard, the rest after it. */
-.task-edit-bar{display:none}
-#task-dialog.title-editing .task-edit-bar{display:flex;align-items:center;gap:8px;padding:8px 8px 8px 14px;border-radius:14px;background:var(--surface-2);border:1px solid var(--line)}
-.task-edit-bar span{flex:1;font-size:13px;color:var(--muted)}
-.task-edit-done{height:36px;padding:0 16px;border:0;border-radius:18px;background:var(--primary);color:var(--on-primary);font-size:14px;font-weight:650}
-#task-dialog.title-editing :is(.task-due-field,.task-pair,.task-details,.task-actions,.task-error){display:none}
-@media (max-width:719px){#task-dialog.live-sheet{padding:8px 16px calc(16px + env(safe-area-inset-bottom,0px))}
+/* The new-task sheet: head and the button stay, the middle scrolls when something is opened. */
+#task-dialog[open]{display:flex;flex-direction:column;overflow:hidden}
+#task-dialog>.task-head,#task-dialog>.task-sheet-client{flex:none}
+#task-dialog .sheet-body{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--ink) 22%,transparent) transparent;
+  margin:0 -20px;padding:2px 20px 0}
+#task-dialog .sheet-body::-webkit-scrollbar{width:3px}#task-dialog .sheet-body::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--ink) 22%,transparent);border-radius:2px}
+#task-dialog>.task-sheet-client{padding-bottom:12px;margin-bottom:0}
+#task-dialog.scrolls>.task-sheet-client{border-bottom:1px solid var(--line-soft)}
+#task-dialog.scrolls:not(.at-top) .sheet-body{-webkit-mask-image:linear-gradient(transparent,#000 18px);mask-image:linear-gradient(transparent,#000 18px)}
+#task-dialog .task-actions{position:sticky;bottom:0;margin:0 -20px;padding:10px 20px 0;background:var(--surface)}
+#task-dialog.scrolls:not(.at-end) .task-actions{border-top:1px solid var(--line-soft);box-shadow:0 -10px 16px -12px rgba(25,37,45,.18)}
+.task-sheet .task-actions .task-edit-done{display:none;flex:1 1 100%}
+#task-dialog.title-editing .task-actions .task-edit-done{display:block}
+#task-dialog.title-editing .task-actions>:not(.task-edit-done){display:none}
+@media (max-width:719px){#task-dialog.live-sheet{padding:8px 16px calc(16px + env(safe-area-inset-bottom,0px));transition:bottom .2s ease,max-height .2s ease}
+  #task-dialog .sheet-body{margin:0 -16px;padding:2px 16px 0}#task-dialog .task-actions{margin:0 -16px;padding:10px 16px 0}
   #task-dialog.live-sheet::before{content:"";display:block;width:40px;height:5px;border-radius:3px;background:var(--line);margin:0 auto 12px}}

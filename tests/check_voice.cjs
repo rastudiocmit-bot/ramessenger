@@ -65,6 +65,9 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await page.locator('#ai-cloud-card .gateway-credentials summary').click();
     await page.locator('#ai-settings-form [name=api_key]').fill('AQVN' + 'x'.repeat(36));
     await page.locator('#ai-settings-form button[type=submit]').click();
+    // Let the key save and the card redraw first, or the redraw resets the limit typed below.
+    for (let i = 0; i < 50 && !data.mutations.some(m => m.method === 'PUT' && m.path.endsWith('/ai/settings')); i++) await page.waitForTimeout(100);
+    await page.waitForTimeout(400);
     await page.locator('#ai-voice-options-form [name=monthly_limit_rub]').fill('500');
     await page.locator('#ai-voice-options-form button[type=submit]').click();
     await page.waitForFunction(() => document.querySelector('#ai-spent').textContent.includes('500'));
