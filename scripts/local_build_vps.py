@@ -171,6 +171,12 @@ def main(preview):
         if len(heads)!=1 or " (head)" not in heads[0]:
             raise RuntimeError("Unexpected migration heads: "+repr(heads))
         head=heads[0].split(" ")[0]
+        runtime_revision=run("docker","run","--rm","--network","none",
+                             "--entrypoint","/opt/venv/bin/python",target,"-c",
+                             "from center_messenger.database import SCHEMA_REVISION; print(SCHEMA_REVISION)")
+        if runtime_revision!=head:
+            raise RuntimeError("Image readiness revision does not match migration head: "+
+                               runtime_revision+" != "+head)
         if head!=db_rev:
             # The database must be an ancestor of the new head (no branches, no downgrades).
             history=alembic(target,"history","-r",db_rev+":head")
