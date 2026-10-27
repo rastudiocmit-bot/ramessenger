@@ -1406,3 +1406,42 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* Native CRM recovery keeps a normal-sized checkbox beside its label. */
 #alfa-max-connect-form .native-auto-login>span{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink)}
 #alfa-max-auto-reconnect{width:18px;height:18px;min-height:18px;padding:0;margin:0;flex:none;accent-color:var(--primary)}
+
+/* Service notices: a light glass capsule over the current screen (notices.js).
+   Only the site's blue: importance is shown by how saturated the icon is. */
+.notices{position:fixed;z-index:1050;top:calc(var(--sat) + 72px);left:50%;width:min(460px,calc(100% - 32px));transform:translateX(-50%);pointer-events:none}
+@media (min-width:720px){.notices{top:86px}}
+.notices>*{pointer-events:auto}
+.notice-capsule{position:relative;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:12px;padding:10px;border-radius:20px;
+  background:var(--glass);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);color:var(--ink);
+  box-shadow:var(--card),inset 0 0 0 1px var(--glass-line);touch-action:none;cursor:pointer;animation:notice-in .24s cubic-bezier(.2,.9,.3,1.15)}
+.notice-capsule[hidden],.notice-pill[hidden],.notice-panel[hidden],.notice-action[hidden],.notice-text[hidden]{display:none}
+@keyframes notice-in{from{opacity:0;transform:translate(-50%,-10px) scale(.96)}}
+.notice-ic{flex:none;width:36px;height:36px;border-radius:50%;display:grid;place-items:center;background:var(--sunken);color:var(--muted)}
+.notice-ic.error{background:var(--primary);color:var(--on-primary)}
+.notice-ic.warning{background:var(--primary-tint);color:var(--primary-ink)}
+.notice-ic.success{background:var(--primary-tint);color:var(--primary)}
+.notice-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.notice-title{font-size:14px;font-weight:650;line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.notice-text{font-size:12.5px;color:var(--muted);line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.notice-action{flex:none;height:36px;padding:0 14px;border-radius:11px;background:var(--primary);color:var(--on-primary);font-size:13px;font-weight:650;box-shadow:var(--card)}
+.notice-del{flex:none;width:32px;height:32px;border-radius:10px;display:grid;place-items:center;color:var(--faint)}
+.notice-del:hover{background:var(--sunken);color:var(--ink)}
+.notice-pill{display:flex;align-items:center;gap:8px;height:34px;margin:0 auto;padding:0 14px 0 6px;border-radius:17px;
+  background:var(--glass);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);color:var(--ink);font-size:13px;font-weight:650;
+  box-shadow:var(--card),inset 0 0 0 1px var(--glass-line);animation:notice-pill-in .2s ease-out}
+@keyframes notice-pill-in{from{opacity:0;transform:scale(.8)}}
+.notice-count{min-width:22px;height:22px;padding:0 6px;box-sizing:border-box;border-radius:11px;background:var(--primary);color:var(--on-primary);font-size:12px;display:grid;place-items:center}
+.notice-panel{border-radius:20px;padding:8px;background:var(--glass);-webkit-backdrop-filter:blur(18px) saturate(1.4);backdrop-filter:blur(18px) saturate(1.4);
+  color:var(--ink);box-shadow:var(--card),inset 0 0 0 1px var(--glass-line);max-height:min(70vh,560px);display:flex;flex-direction:column;animation:notice-in-panel .2s ease-out}
+@keyframes notice-in-panel{from{opacity:0;transform:translateY(-8px)}}
+.notice-panel-head{display:flex;align-items:center;gap:8px;padding:6px 4px 8px 12px}
+.notice-panel-head strong{flex:1;font-size:15px;font-weight:650}
+.notice-clear,.notice-fold{height:36px;padding:0 12px;border-radius:11px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:13px;font-weight:650;display:grid;place-items:center}
+.notice-fold{width:36px;padding:0}
+.notice-list{overflow:auto;display:flex;flex-direction:column;gap:2px}
+.notice-row{display:flex;align-items:center;gap:12px;padding:10px 6px 10px 10px;border-radius:14px}
+.notice-row.hot{background:var(--primary-tint)}
+.notice-row.read{opacity:.62}
+.notice-empty{margin:6px 12px 10px;color:var(--muted);font-size:13px}
+@media (prefers-reduced-motion:reduce){.notice-capsule,.notice-pill,.notice-panel{animation:none}}

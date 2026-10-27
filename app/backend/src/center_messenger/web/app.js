@@ -11,11 +11,20 @@
     return result;
   }
   function show(element, visible = true) { element.hidden = !visible; }
+  // Light glass capsule for service notices and errors (notices.js); it can be
+  // switched off in «Настройки мессенджера», then errors stay inline as before.
+  const notices = window.CenterNotices ? window.CenterNotices({ $ }) : null;
   // Routine successes need no notification. Errors stay in the relevant form;
   // this helper never creates a floating layer, timer or focus change.
   function feedback(message, error = false, target = null) {
     if (!message) return;
     const dialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+    // Errors outside an open dialog or a named form go to the notice capsule; an
+    // error inside a dialog stays next to the fields the operator is looking at.
+    if (error && !target && !dialog && notices?.notify({ type: "error", title: String(message) })) {
+      document.querySelectorAll(".action-feedback").forEach(line => line.remove());
+      return;
+    }
     const pane = document.querySelector(`[data-page="${state.pane}"]:not([hidden])`);
     target ||= dialog?.querySelector("form, .family-scroll, .family-panel") || dialog
       || (state.pane === "messages" ? (!$("#chat-compose").hidden ? $("#chat-compose") : $("#chat-list-notice")) : pane)
@@ -427,8 +436,15 @@
     $("#alfa-config").open = true;
     alfaButtons();
   }
+  const connectionNames = { "#alfa-connection-summary": "AlfaCRM", "#alfa-max-connection-summary": "MAX через AlfaCRM", "#alfa-history-summary": "История MAX" };
+  const connectionModes = {};
   function connectionSummary(selector, text, mode) {
     const label = $(selector); label.textContent = text; label.closest(".connection-tile").dataset.state = mode;
+    // A service that breaks says so once; when it is back, the notice goes away.
+    const before = connectionModes[selector]; connectionModes[selector] = mode;
+    if (mode === "error" && before !== "error") notices?.notify({ type: "warning", title: connectionNames[selector] || "Подключение", text,
+      key: "connection:" + selector, action: { label: "Открыть", run: () => { $("#connections-tab")?.click(); } } });
+    else if (mode === "active" && before === "error") notices?.resolve("connection:" + selector);
   }
   function connectionView(view) {
     if (!["monitor", "settings", "voice", "agents"].includes(view)) view = "monitor";
