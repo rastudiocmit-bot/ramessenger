@@ -1712,3 +1712,11 @@ body:has(#cabinet[hidden]){overflow:auto}
 @container app (min-width:720px){
   .list,.scroll{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent);mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
 }
+/* Focus on task fields is drawn inside the field's own rounded edge, so a scrolling sheet
+   never cuts it off at the sides. */
+:is(#task-dialog,#task-done-dialog,#task-settings-dialog) :is(textarea,select,input:not([type=checkbox]):not([type=radio])):focus,
+:is(#task-dialog,#task-done-dialog,#task-settings-dialog) :is(textarea,select,input:not([type=checkbox]):not([type=radio])):focus-visible{
+  outline:none;border-color:var(--primary);box-shadow:inset 0 0 0 1px var(--primary)}
+/* «Сделать задачей» under the pointer: solid blue with white text and a white icon. */
+.task-menu-item.primary:hover,.task-menu-item.primary:focus-visible{background:var(--primary);color:var(--on-primary)}
+.task-menu-item.primary:hover svg,.task-menu-item.primary:focus-visible svg{color:var(--on-primary)}

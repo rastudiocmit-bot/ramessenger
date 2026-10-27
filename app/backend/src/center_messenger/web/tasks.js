@@ -326,8 +326,10 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   addEventListener("resize", () => { for (const dialog of document.querySelectorAll(".task-sheet[open], #task-settings-dialog[open]")) placeSheet(dialog); });
   // «Что сделать» grows with a long draft instead of hiding its second half.
   function fitTitle() {
-    const field = sheet?.querySelector('textarea[name="title"]'); if (!field) return;
-    field.style.height = "auto"; field.style.height = `${Math.min(160, field.scrollHeight + 2)}px`;
+    for (const [name, most] of [["title", 160], ["details", 220]]) {
+      const field = sheet?.querySelector(`textarea[name="${name}"]`); if (!field) continue;
+      field.style.height = "auto"; field.style.height = `${Math.min(most, field.scrollHeight + 2)}px`;
+    }
   }
 
   // ── create / edit sheet ──────────────────────────────────────────────────
@@ -356,7 +358,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       if (seq !== suggestSeq || !sheet.open || sheetTask || sheetDraft?.conversation_id !== draft.conversation_id) return;
       if (!result.ai) { badge.hidden = true; return; }
       if (form.elements.title.value === initial.title && result.title) { form.elements.title.value = result.title; fitTitle(); }
-      if (form.elements.details.value === initial.details && !initial.details && result.details) form.elements.details.value = result.details;
+      if (form.elements.details.value === initial.details && !initial.details && result.details) { form.elements.details.value = result.details; fitTitle(); }
       if (sheet.dataset.kind === initial.kind && !initial.kind && result.kind) { sheet.dataset.kind = result.kind; paintKinds(result.kind); }
       if (sheetDue === initial.due && result.due_at) { sheetDue = result.due_at; paintDue(); }
       badge.textContent = "Черновик AI"; badge.classList.remove("busy");
@@ -387,6 +389,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     dialog.addEventListener("click", event => { if (event.target === dialog) dialog.close(); });
     dialog.querySelector("form").addEventListener("submit", event => { event.preventDefault(); saveSheet(); });
     dialog.querySelector('textarea[name="title"]').addEventListener("input", fitTitle);
+    dialog.querySelector('textarea[name="details"]')?.addEventListener("input", fitTitle);
     dialog.querySelector(".task-due-input").addEventListener("change", event => { sheetDue = zonedIso(event.target.value); paintDue(); });
     dialog.querySelector(".task-done").addEventListener("click", () => { const task = sheetTask; dialog.close(); if (task) complete(task); });
     dialog.querySelector(".task-cancel-task").addEventListener("click", async () => {
