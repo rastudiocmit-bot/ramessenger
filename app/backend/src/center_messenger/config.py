@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     trust_proxy_ip: bool = False
     crm_sync_worker: bool = False
     max_worker: bool = False
-    session_hours: int = Field(default=12, ge=1, le=168)
-    session_idle_minutes: int = Field(default=60, ge=5, le=1440)
+    session_hours: int = Field(default=1200, ge=1, le=8760)
+    session_idle_minutes: int = Field(default=6000, ge=5, le=525600)
 
     @model_validator(mode="after")
     def check_password_source(self):
