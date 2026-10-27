@@ -239,6 +239,25 @@ test("delta removes a superseded bubble from an already open chat", async t => {
   assert.deepEqual(ui.ids(), [identifier(1)]);
 });
 
+test('a partial CRM delta never hides a sent bubble before its replacement arrives',async t=>{
+  let failed=false;
+  const original=message(20,{direction:'out',actor_type:'human',state:'accepted',request_id:identifier(90)});
+  const replacement=message(21,{direction:'out',actor_type:'human',state:'accepted',request_id:identifier(90)});
+  const ui=setup(t,url=>{
+    if(!url.pathname.endsWith('/messages'))return;
+    const cursor=url.searchParams.get('after_seq');
+    if(cursor==='100')return history(identifier(1),[],{next_seq:101,more_changes:true,removed_ids:[original.id]});
+    if(cursor==='101'){
+      if(!failed){failed=true;throw new Error('History read interrupted');}
+      return history(identifier(1),[replacement],{next_seq:102});
+    }
+    return history(identifier(1),[original]);
+  });
+  await ui.app.enter();assert.deepEqual(ui.ids(),[original.id]);
+  await ui.poll();assert.deepEqual(ui.ids(),[original.id]);
+  await ui.app.enter();assert.deepEqual(ui.ids(),[replacement.id]);
+});
+
 test("refreshing loaded list pages removes conversations that left the filter", async t => {
   const full = Array.from({ length: 60 }, (_, index) => conversation(index + 1));
   let refresh = false;
@@ -1403,6 +1422,69 @@ test('an oversized dictated draft stays intact and cannot be submitted until sho
  assert.equal(input.value,'Текст '.repeat(800));assert.equal(sent,0);
  input.value='Короткий ответ';input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
  assert.equal(ui.$('#chat-send').disabled,false);assert.equal(ui.$('#chat-send-hint').hidden,true);
+});
+
+test('a lost send response retains the request ID and a new voice draft can be sent',async t=>{
+  const posts=[],saved=new Map();
+  const ui=setup(t,(url,options)=>{
+    if(!url.pathname.endsWith('/messages'))return;
+    if(options?.method==='POST'){
+      const payload=options.data;posts.push(payload);
+      if(!saved.has(payload.request_id))saved.set(payload.request_id,message(200+saved.size,{
+        text:payload.text,direction:'out',actor_type:'human',state:'accepted',request_id:payload.request_id
+      }));
+      if(posts.length===1){const error=new Error('Ответ сервера потерян');error.name='NetworkError';throw error;}
+      return {command_id:identifier(posts.length),state:'accepted',request_id:payload.request_id};
+    }
+    return history(identifier(1),[...saved.values()]);
+  });
+  await ui.app.enter();
+  const input=ui.$('#chat-input'),submit=()=>ui.$('#chat-compose').dispatchEvent(new ui.window.Event('submit',{cancelable:true}));
+  input.value='Можно во вторник с 16:30 до 18:00';input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
+  submit();await flush();
+  assert.equal(input.value,'');
+  assert.equal(ui.$('#chat-send').classList.contains('is-retry'),true);
+  input.value='Голосовой текст';input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
+  assert.equal(input.disabled,false);
+  assert.equal(ui.$('#chat-send').disabled,false);
+  assert.equal(ui.$('#chat-send').classList.contains('is-retry'),false);
+  submit();await flush();
+  assert.equal(posts.length,3);
+  assert.equal(posts[0].request_id,posts[1].request_id,'the uncertain request is retried idempotently');
+  assert.notEqual(posts[1].request_id,posts[2].request_id);
+  assert.deepEqual([...saved.values()].map(item=>item.text),['Можно во вторник с 16:30 до 18:00','Голосовой текст']);
+  assert.equal(input.value,'');
+  assert.equal(ui.$('#chat-send').classList.contains('is-retry'),false);
+  assert.equal(ui.ids().length,2);
+});
+
+test('voice transcription during an in-flight send survives its confirmation and history poll',async t=>{
+  let release,first=true,oldRequest;
+  const saved=[];
+  const ui=setup(t,(url,options)=>{
+    if(!url.pathname.endsWith('/messages'))return;
+    if(options?.method==='POST'){
+      if(first){first=false;oldRequest=options.data.request_id;
+        saved.push(message(211,{text:options.data.text,direction:'out',actor_type:'human',request_id:oldRequest}));
+        return new Promise(resolve=>{release=()=>resolve({command_id:identifier(1),state:'queued',request_id:oldRequest});});
+      }
+      saved.push(message(212,{text:options.data.text,direction:'out',actor_type:'human',request_id:options.data.request_id}));
+      return {command_id:identifier(2),state:'queued',request_id:options.data.request_id};
+    }
+    return history(identifier(1),saved);
+  });
+  await ui.app.enter();
+  const input=ui.$('#chat-input');input.value='Старый ответ';input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
+  ui.$('#chat-compose').dispatchEvent(new ui.window.Event('submit',{cancelable:true}));await flush();
+  assert.equal(input.value,'');
+  input.value='Текст из записи';input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
+  release();await flush();
+  assert.equal(input.value,'Текст из записи');
+  assert.equal(ui.$('#chat-send').disabled,false);
+  assert.equal(ui.$('#chat-send').classList.contains('is-retry'),false);
+  ui.$('#chat-compose').dispatchEvent(new ui.window.Event('submit',{cancelable:true}));await flush();
+  assert.deepEqual(saved.map(item=>item.text),['Старый ответ','Текст из записи']);
+  assert.equal(ui.ids().length,2);
 });
 
 

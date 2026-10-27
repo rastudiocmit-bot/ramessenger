@@ -582,18 +582,19 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-handled").disabled = actionBusy || bulkLoading;
     $("#chat-handled").setAttribute("aria-busy", String(bulkLoading || bulkBusy));
     const unavailable = !data.meta?.can_send || state.workspace?.role === "observer";
-    $("#chat-input").disabled = unavailable || Boolean(data.pending);
-    if ($("#chat-templates")) $("#chat-templates").disabled = unavailable || Boolean(data.pending);
+    // A lost send response must not lock a later dictated or typed answer.
+    $("#chat-input").disabled = unavailable;
+    if ($("#chat-templates")) $("#chat-templates").disabled = unavailable;
     const send = $("#chat-send");
-    const tooLong = $("#chat-input").value.trim().length > 4000;
-    send.disabled = unavailable || historyBusy || (!data.pending && (!$("#chat-input").value.trim() || tooLong));
-    send.classList.toggle("is-retry", Boolean(data.pending));
-    send.setAttribute("aria-label", data.pending ? "Проверить отправку" : "Отправить");
-    send.title = data.pending ? "Проверить отправку" : "Отправить";
+    const draft = $("#chat-input").value.trim(), tooLong = draft.length > 4000;
+    const retry = Boolean(data.pending) && !draft;
+    send.disabled = unavailable || historyBusy || (Boolean(draft) ? tooLong : !retry);
+    send.classList.toggle("is-retry", retry);
+    send.setAttribute("aria-label", retry ? "Проверить отправку" : "Отправить");
+    send.title = retry ? "Проверить отправку" : "Отправить";
     const hint = $("#chat-send-hint");
     hint.hidden = !unavailable && !data.pending && !tooLong;
-    hint.textContent = state.workspace?.role === "observer" ? "Роль «Наблюдатель» открывает переписку только для чтения." : unavailable ? "Проверьте подключение MAX, чтобы отправить ответ." : data.pending ? "Связь прервалась. Кнопка проверит тот же запрос без повторного сообщения." : "";
-    if (tooLong && !unavailable && !data.pending) hint.textContent = "Запись сохранена в черновике целиком. Сократите текст до 4000 символов перед отправкой.";
+    hint.textContent = state.workspace?.role === "observer" ? "Роль «Наблюдатель» открывает переписку только для чтения." : unavailable ? "Проверьте подключение MAX, чтобы отправить ответ." : tooLong ? "Запись сохранена в черновике целиком. Сократите текст до 4000 символов перед отправкой." : data.pending ? draft ? "Сначала проверим предыдущую отправку, затем отправим новый текст." : "Связь прервалась. Кнопка проверит тот же запрос без повторного сообщения." : "";
   }
   function compareMessages(a, b) {
     const value = message => BigInt(message.sort_time ?? Math.trunc(new Date(message.occurred_at).getTime()) * 1000);
@@ -757,7 +758,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   function reconcilePending(data) {
     if (!data.pending) return;
     const canonical = [...data.messages.values()].find(m => m.request_id === data.pending.request_id);
-    if (canonical) { data.pending = null; data.draft = ""; if (cache.get(selected) === data) { $("#chat-input").value = ""; resizeCompose(); } }
+    // The composer may already hold a new voice transcription. Only the old
+    // request is resolved by this history row; the new draft belongs to the user.
+    if (canonical) { data.pending = null; if (cache.get(selected) === data) renderHeader(); }
   }
   async function loadHistory(id, mode = "delta") {
     const epoch = state.epoch, gen = generation, choice = selectionSeq, data = entry(id);
@@ -809,14 +812,29 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       return;
     }
     let changed = Boolean(result.reset);
-    if (result.reset) { data.messages.clear(); data.loaded = false; data.oldest = null; }
+    if (result.reset) { data.messages.clear(); data.deferredRemovals = null; data.loaded = false; data.oldest = null; }
     for (const message of result.messages) {
+      data.deferredRemovals?.delete(message.id);
       const old = data.messages.get(message.id);
       if ((!old || old.version <= message.version) && JSON.stringify(old) !== JSON.stringify(message)) {
         data.messages.set(message.id, message); changed = true;
       }
     }
-    for (const removed of result.removed_ids || []) changed = data.messages.delete(removed) || changed;
+    if (mode === "delta" && result.more_changes) {
+      // The replacement for a superseded local send may be in the next batch.
+      // Keep its bubble until the whole change sequence has been read.
+      if (!data.deferredRemovals) data.deferredRemovals = new Set();
+      for (const removed of result.removed_ids || []) data.deferredRemovals.add(removed);
+    } else {
+      for (const removed of result.removed_ids || []) {
+        if (data.deferredRemovals) data.deferredRemovals.add(removed);
+        else changed = data.messages.delete(removed) || changed;
+      }
+      if (mode !== "older" && data.deferredRemovals) {
+        for (const removed of data.deferredRemovals) changed = data.messages.delete(removed) || changed;
+        data.deferredRemovals = null;
+      }
+    }
     if (changed) data.messageRevision += 1;
     data.total = result.total ?? data.messages.size;
     // Earlier pages must not advance the live cursor past unseen intervening updates.
@@ -960,24 +978,55 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   async function submit() {
     const id = selected, data = cache.get(id); if (!data || historyBusy || !data.meta?.can_send) return;
-    const content = $("#chat-input").value.trim(); if (!data.pending && !content) return;
-    if (!data.pending && content.length > 4000) { renderHeader(); return; }
-    const epoch = state.epoch, gen = generation;
-    data.draft = content;
-    const payload = data.pending || { request_id: crypto.randomUUID(), text: content, seen_inbound_seq: data.meta.inbound_seq, seen_checkpoint: data.meta.seen_checkpoint };
-    data.pending = payload; historyBusy = true; renderHeader(); let acknowledged = false;
+    if (!data.pending && !$("#chat-input").value.trim()) return;
+    if ($("#chat-input").value.trim().length > 4000) { renderHeader(); return; }
+    const epoch = state.epoch, gen = generation, choice = selectionSeq;
+    historyBusy = true; renderHeader();
+    let payload = null, acknowledged = false;
+    const refresh = async () => {
+      try {
+        await loadHistory(id);
+        if (selected === id) renderMessages(id, { bottom: true });
+        await loadList(false, true, true);
+      } catch (error) {
+        // The POST already committed. A failed read is not a failed send.
+        if (valid(epoch, gen) && selected === id && !ignored(error)) {
+          historyPollError = error; renderPollStatus();
+        }
+      }
+    };
     try {
-      await api(`${chatPath(id)}/messages`, { method: "POST", data: payload });
+      if (data.pending) {
+        payload = data.pending;
+        await api(`${chatPath(id)}/messages`, { method: "POST", data: payload, timeoutMs: 20000 });
+        if (!valid(epoch, gen)) return;
+        acknowledged = true;
+        if (data.pending === payload) data.pending = null;
+        await refresh();
+        if (selected !== id || choice !== selectionSeq) return;
+      }
+      const content = $("#chat-input").value.trim();
+      if (!content || content.length > 4000) return;
+      payload = { request_id: crypto.randomUUID(), text: content, seen_inbound_seq: data.meta.inbound_seq, seen_checkpoint: data.meta.seen_checkpoint };
+      acknowledged = false;
+      data.pending = payload; data.draft = "";
+      $("#chat-input").value = ""; resizeCompose(); renderHeader();
+      await api(`${chatPath(id)}/messages`, { method: "POST", data: payload, timeoutMs: 20000 });
       if (!valid(epoch, gen)) return;
-      acknowledged = true; data.pending = null; data.draft = ""; if (selected === id) { $("#chat-input").value = ""; resizeCompose(); }
-      await loadHistory(id); if (selected === id) renderMessages(id, { bottom: true }); await loadList(false, true, true);
+      acknowledged = true;
+      if (data.pending === payload) data.pending = null;
+      await refresh();
     } catch (error) {
       if (!valid(epoch, gen)) return;
       // HTTP rejection is definite; loss of the HTTP response keeps the same UUID.
-      if (!acknowledged && error.status && error.status < 500 && error.status !== 408) { data.pending = null; data.draft = payload.text; }
-      if (selected === id) { $("#chat-input").value = data.draft; resizeCompose(); fail(error); }
+      if (!acknowledged && payload && error.status && error.status < 500 && error.status !== 408) {
+        if (data.pending === payload) data.pending = null;
+        data.draft = [payload.text, data.draft].filter(Boolean).join("\n\n");
+        if (selected === id) { $("#chat-input").value = data.draft; resizeCompose(); }
+      }
+      if (selected === id) fail(error);
       if (!acknowledged && error.status === 409) { try { await loadHistory(id); } catch (_) { /* Preserve the draft and error. */ } }
-    } finally { if (valid(epoch, gen)) { historyBusy = false; renderHeader(); } }
+    } finally { if (valid(epoch, gen) && selected === id && choice === selectionSeq) { historyBusy = false; renderHeader(); } }
   }
   let mirrorNode = null;
   function composeMirror(input) {
@@ -1032,7 +1081,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   document.fonts?.addEventListener("loadingdone", resizeCompose);
   $("#chat-compose").addEventListener("submit", event => { event.preventDefault(); submit(); });
-  $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data && !data.pending) data.draft = $("#chat-input").value; resizeCompose(); renderHeader(); unlockSound(); });
+  $("#chat-input").addEventListener("input", () => { const data = cache.get(selected); if (data) data.draft = $("#chat-input").value; resizeCompose(); renderHeader(); unlockSound(); });
   $("#chat-templates").addEventListener("click", () => {
     const target = selected, data = cache.get(target); if (!data || $("#chat-input").disabled) return;
     const options = $("#chat-template-options"); options.replaceChildren();
