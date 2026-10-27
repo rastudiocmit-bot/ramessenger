@@ -36,6 +36,7 @@ from center_messenger.auth_security import AuthError
 from center_messenger.database import log_database_error
 from center_messenger.history_audit import compare_source_history
 from center_messenger.alfa_repair import repair_batch
+from center_messenger import alfa_shared_parent, card_preference
 from sqlalchemy.exc import OperationalError
 
 
@@ -384,6 +385,12 @@ class MessageSyncTests(unittest.TestCase):
         self.db.execute(text("INSERT INTO alfa_directory(workspace_id,run_id,contact_id,display_name,phones,emails,search_text) "
                              "VALUES (:w,:r,:id,'Parent','[]','[]','parent') ON CONFLICT DO NOTHING"),
                         {"w": self.workspace, "r": self.run, "id": contact})
+
+    def customer_phone(self, customer, *, phone="+79160000000", parent="Один родитель", status="client"):
+        self.db.execute(text("UPDATE alfa_customers SET phones=CAST(:phones AS jsonb),legal_name=:parent,status=:status "
+                             "WHERE workspace_id=:w AND run_id=:r AND external_id=:customer"),
+                        {"w": self.workspace, "r": self.run, "customer": customer,
+                         "phones": json.dumps([phone]), "parent": parent, "status": status})
 
     def row(self, record="1", *, direction="in", branch=1, customer=7, actor=None, body="Hello", at=None):
         return {"record_id": record, "crm_order": int(record), "direction": direction,
@@ -777,6 +784,104 @@ class MessageSyncTests(unittest.TestCase):
         self.project(row)
         self.project(row | {"customers": list(reversed(row["customers"]))})
         self.assertEqual(len(self.messages()), 1)
+
+    def test_shared_incoming_sender_has_one_dialog_for_three_distinct_crm_children(self):
+        second, third = uuid4(), uuid4()
+        self.add_customer(second, 1, 8)
+        self.add_customer(third, 1, 9)
+        for customer, status in ((7, "archive"), (8, "client"), (9, "client")):
+            self.customer_phone(customer, status=status,
+                                parent="Второе написание родителя" if customer == 8 else "Первое написание родителя")
+        row = self.row("300", customer=7)
+        row["customers"] += [self.row("300", customer=8)["customers"][0],
+                             self.row("300", customer=9)["customers"][0]]
+        self.project(row)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.reader.listing(None, self.workspace)["total"], 1)
+        message = self.messages()[0]
+        self.assertEqual(message["payload"]["crm_customer_ids"], [7, 8, 9])
+        self.assertEqual(set(message["payload"]["crm_family_contacts"]),
+                         {str(self.contact), str(second), str(third)})
+        self.assertEqual(self.reader.listing(None, self.workspace)["conversations"][0]["unread_count"], 1)
+        # Following rows can refer to any single child of the same proven peer.
+        self.project(self.row("301", customer=9))  # Same text and minute, different source ID.
+        self.assertEqual(self.reader.listing(None, self.workspace)["total"], 1)
+        self.assertEqual(len(self.messages()), 2)
+        self.project(row)
+        self.assertEqual(len(self.messages()), 2)
+
+    def test_a_shared_phone_without_a_shared_incoming_row_never_merges_chats(self):
+        second = uuid4()
+        self.add_customer(second, 1, 8)
+        self.customer_phone(7, parent="Первый родитель")
+        self.customer_phone(8, parent="Другой родитель")
+        row = self.row("300", direction="out", actor="automation")
+        row["customers"].append(self.row("300", customer=8)["customers"][0])
+        self.project(row)
+        self.assertEqual(self.reader.listing(None, self.workspace)["total"], 2)
+        self.assertEqual(len(self.messages()), 2)
+
+    def test_shared_incoming_row_with_different_phones_keeps_recipients_separate(self):
+        second = uuid4()
+        self.add_customer(second, 1, 8)
+        self.customer_phone(7)
+        self.customer_phone(8, phone="+79160000001")
+        row = self.row("300")
+        row["customers"].append(self.row("300", customer=8)["customers"][0])
+        self.project(row)
+        self.assertEqual(self.reader.listing(None, self.workspace)["total"], 2)
+
+    def test_manual_crm_link_blocks_automatic_shared_parent_merge(self):
+        second = uuid4()
+        self.add_customer(second, 1, 8)
+        self.customer_phone(7)
+        self.customer_phone(8)
+        self.project(self.row("200", customer=8))
+        self.db.execute(text("UPDATE conversations SET crm_link_manual=true WHERE workspace_id=:w "
+                             "AND contact_id=:contact"), {"w": self.workspace, "contact": second})
+        row = self.row("300")
+        row["customers"].append(self.row("300", customer=8)["customers"][0])
+        self.project(row)
+        self.assertEqual(self.reader.listing(None, self.workspace)["total"], 2)
+        self.assertIsNone(self.db.execute(text("SELECT 1 FROM outbox_events WHERE workspace_id=:w "
+            "AND topic=:topic LIMIT 1"), {"w": self.workspace,
+                "topic": alfa_shared_parent.TOPIC}).scalar_one_or_none())
+
+    def test_saved_source_copies_merge_without_deleting_provenance(self):
+        second, third = uuid4(), uuid4()
+        self.add_customer(second, 1, 8)
+        self.add_customer(third, 1, 9)
+        for customer in (7, 8, 9):
+            self.customer_phone(customer)
+            self.project(self.row("300", customer=customer))
+        before = self.reader.listing(None, self.workspace)
+        self.assertEqual((before["total"], before["unread"]), (3, 3))
+        cursor = {}
+        self.assertTrue(alfa_shared_parent.repair_batch(
+            self.service, self.db, self.workspace, self.channel, self.snapshot, cursor))
+        after = self.reader.listing(None, self.workspace)
+        self.assertEqual((after["total"], after["unread"]), (1, 1))
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.db.execute(text("SELECT count(*) FROM source_records WHERE workspace_id=:w"),
+                                         {"w": self.workspace}).scalar_one(), 3)
+        self.assertTrue(cursor["shared_parent_repair"]["complete"])
+
+    def test_shared_parent_preference_keeps_all_children_and_active_status(self):
+        phone, first, second = "+79160000000", str(uuid4()), str(uuid4())
+        def card(contact, customer, status, parent):
+            return {"contact_id": contact, "external_id": customer, "branch_id": 1,
+                    "name": f"Ученик {customer}", "legal_name": parent, "status": status,
+                    "legal_type": 1, "phones": [phone], "dob": None, "student_id": None,
+                    "guard_piece": str(customer)}
+        rows = {first: [card(first, 7, "archive", "Отец")],
+                second: [card(second, 8, "client", "Мать")]}
+        snapshot = {"today": self.at.date(), "timezone": "Europe/Moscow",
+                    "connection_id": self.crm, "run": self.run, "version": 1}
+        result = card_preference.choose(first, rows, {phone: rows[first] + rows[second]},
+                                        {}, defaultdict(list), snapshot, verified_contacts=[first, second])
+        self.assertEqual(result["status"], "client")
+        self.assertEqual(result["contacts"], sorted([first, second]))
+        self.assertIsNone(result["ambiguous"])
 
     def test_later_verification_merges_proven_copies_of_one_bulk_row(self):
         self.add_customer(self.contact, 2, 8)

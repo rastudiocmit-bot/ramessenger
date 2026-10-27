@@ -22,6 +22,7 @@ from center_messenger.alfa_history import (
 )
 from center_messenger.history_receipts import record_pages, finish_pages, new_records
 from center_messenger import active_review, family_cache
+from center_messenger import alfa_shared_parent
 from center_messenger.auth_security import AuthError
 from center_messenger.chat_store import changed, refresh_unread
 from center_messenger.crm_api import DirectoryReader
@@ -672,8 +673,8 @@ class AlfaMaxConnections:
             {"w": workspace, "old": old, "canonical": canonical},
         )
 
-    def _merge_contact_conversations(self, db, workspace, channel, contact, canonical):
-        """Unify only an already verified CRM contact in this one connection.
+    def _merge_contact_conversations(self, db, workspace, channel, contact, canonical, *, family_contacts=None):
+        """Unify a verified CRM contact or proven shared incoming MAX sender.
 
         Retain the old conversation IDs as aliases. All messages, pending sends
         and manual handling state survive; only proven provider-ID echoes hide.
@@ -682,14 +683,16 @@ class AlfaMaxConnections:
         if db.execute(text("SELECT crm_link_manual FROM conversations WHERE workspace_id=:w AND id=:c"),
                       {"w": workspace, "c": canonical}).scalar_one_or_none():
             return
+        contacts = family_contacts or [contact]
         old = list(db.execute(
             text("SELECT c.id FROM conversations c WHERE c.workspace_id=:w "
-                 "AND c.connection_id=:channel AND c.contact_id=:contact AND c.id<>:canonical AND NOT c.crm_link_manual "
+                 "AND c.connection_id=:channel AND c.contact_id=ANY(CAST(:contacts AS uuid[])) "
+                 "AND c.id<>:canonical AND NOT c.crm_link_manual "
                  "AND (EXISTS(SELECT 1 FROM messages m WHERE m.workspace_id=c.workspace_id "
                  "AND m.conversation_id=c.id) OR EXISTS(SELECT 1 FROM send_commands s "
                  "WHERE s.workspace_id=c.workspace_id AND s.conversation_id=c.id)) "
                  "ORDER BY c.id FOR UPDATE"),
-            {"w": workspace, "channel": channel, "contact": contact, "canonical": canonical},
+            {"w": workspace, "channel": channel, "contacts": contacts, "canonical": canonical},
         ).scalars())
         if not old:
             return
@@ -707,8 +710,14 @@ class AlfaMaxConnections:
             duplicates = list(db.execute(
                 text("SELECT m.id,m.send_command_id,n.id AS canonical_id,n.send_command_id AS canonical_send "
                      "FROM messages m JOIN messages n ON n.workspace_id=m.workspace_id "
-                     "AND n.provider_message_id=m.provider_message_id AND n.conversation_id=:canonical "
-                     "WHERE m.workspace_id=:w AND m.conversation_id=:old"),
+                     "AND n.conversation_id=:canonical AND n.payload->>'superseded_by' IS NULL "
+                     "AND (n.provider_message_id=m.provider_message_id OR ("
+                     "m.direction='in' AND n.direction='in' "
+                     "AND m.payload->>'branch_id'=n.payload->>'branch_id' "
+                     "AND m.payload->>'crm_record_id' IS NOT NULL "
+                     "AND m.payload->>'crm_record_id'=n.payload->>'crm_record_id')) "
+                     "WHERE m.workspace_id=:w AND m.conversation_id=:old "
+                     "AND m.payload->>'superseded_by' IS NULL"),
                 {"w": workspace, "old": previous, "canonical": canonical},
             ).mappings())
             for duplicate in duplicates:
@@ -753,38 +762,59 @@ class AlfaMaxConnections:
         touched = set()
         verified_conversations = set()
         merged_contacts = set()
+        refreshed_families = set()
+        peer_cache = {}
+        def peer_family(customer):
+            key = (customer["contact_id"], customer.get("primary_phone"))
+            if key not in peer_cache:
+                peer_cache[key] = alfa_shared_parent.members(db, workspace, channel, snapshot, *key)
+            return peer_cache[key]
         for item_index, item in enumerate(rows):
             customers = {}
+            resolved = []
             for raw_customer in item.get("customers") or []:
                 customer = dict(raw_customer) if raw_customer else None
                 if customer and snapshot:
                     customer = resolve_customer(customer, directory)
+                if customer:
+                    resolved.append(customer)
                 if customer and not customer.get("contact_id"):
                     from center_messenger.customer_lookup import enqueue
                     enqueue(db, workspace, crm_connection, customer["customer_id"], customer["branch_id"])
+            if item["direction"] == "in" and item["actor_type"] == "contact":
+                proven = alfa_shared_parent.prove(
+                    db, workspace, channel, snapshot, resolved,
+                    source=_source_record_id(item, branch))
+                if proven:
+                    refreshed_families.add(proven[0])
+                    peer_cache.clear()
+            for customer in resolved or [None]:
                 if not customer:
                     group = "unlinked"
                 elif customer.get("contact_id"):
-                    group = f"contact:{customer['contact_id']}"
+                    family = peer_family(customer)
+                    group = f"contact:{family[0]}"
                 else:
                     group = f"customer:{customer['branch_id']}:{customer['customer_id']}"
                 customers.setdefault(group, []).append(customer)
-            if not customers:
-                customers["single"] = [None]
             for group, records in sorted(customers.items()):
-                # One conversation per parent: prefer a linked card, else the same branch.
+                # One conversation per proven peer; retain every CRM Customer ID.
                 customer = min(
                     records,
                     key=lambda value: (
                         value is None,
                         (value.get("contact_id") is None) if value else True,
+                        -{"client": 3, "lead": 2, "archive": 1}.get(value.get("status"), 0) if value else 0,
                         value["branch_id"] != int(branch) if value else True,
                         value["branch_id"] if value else 0,
                         value["customer_id"] if value else 0,
                     ),
                 )
+                family_contacts = (peer_family(customer)
+                    if customer and customer.get("contact_id") else [])
+                peer_contact = family_contacts[0] if family_contacts else None
                 identity, conversation_id, display = self._message_identity(
-                    UUID(str(channel)), customer, branch
+                    UUID(str(channel)), dict(customer, contact_id=peer_contact) if peer_contact else customer, branch
                 )
                 client = {"name": display, "contact_id": str(customer["contact_id"]) if customer and customer.get("contact_id") else None,
                           "cards": [{"customer_id": str(c["customer_id"]), "branch_id": str(c["branch_id"]),
@@ -813,18 +843,20 @@ class AlfaMaxConnections:
                         "w": workspace,
                         "id": conversation_id,
                         "c": channel,
-                        "contact": customer.get("contact_id") if customer else None,
+                        "contact": peer_contact,
                         "external": external,
                         "name": display,
                     },
                 ).mappings().one()
                 conversation_id = saved_conversation["id"]
-                if not saved_conversation["crm_link_manual"] and customer and customer.get("contact_id") and customer["contact_id"] not in merged_contacts:
+                merge_key = (peer_contact, tuple(family_contacts))
+                if not saved_conversation["crm_link_manual"] and peer_contact and merge_key not in merged_contacts:
                     self._merge_contact_conversations(
-                        db, workspace, channel, customer["contact_id"], conversation_id
+                        db, workspace, channel, peer_contact, conversation_id,
+                        family_contacts=family_contacts,
                     )
-                    merged_contacts.add(customer["contact_id"])
-                if customer and customer.get("contact_id"):
+                    merged_contacts.add(merge_key)
+                if peer_contact:
                     verified_conversations.add(conversation_id)
                 touched.add(conversation_id)
                 base_source_id = _source_record_id(item, branch)
@@ -865,7 +897,10 @@ class AlfaMaxConnections:
                             changed(db, workspace, duplicate["conversation_id"], duplicate["id"])
                             touched.add(duplicate["conversation_id"])
                 if existing is None and len(customers) == 1:
-                    existing = next((m for m in candidates if m["source_key"] == base_source_id), None)
+                    existing = next((m for m in candidates if m["source_key"] == base_source_id
+                        and (m["payload"].get("customer_id") is None or
+                             (m["payload"].get("customer_branch_id"), m["payload"].get("customer_id"))
+                             in recipient_cards)), None)
                 if existing:
                     source_id = existing["source_key"]
                 elif not any(m["source_key"] == base_source_id for m in candidates):
@@ -919,7 +954,9 @@ class AlfaMaxConnections:
                             {"w": workspace, "conv": conversation_id},
                         )
                     existing = dict(existing) | {"conversation_id": conversation_id}
-                if existing and same_source and not existing["payload"].get("possible_send_command_id"):
+                if (existing and same_source and not existing["payload"].get("possible_send_command_id")
+                        and existing["payload"].get("crm_customer_ids") == sorted({r["customer_id"] for r in records if r})
+                        and existing["payload"].get("crm_family_contacts") == [str(c) for c in family_contacts]):
                     notify("checked")
                     continue
                 payload = {
@@ -932,6 +969,7 @@ class AlfaMaxConnections:
                     "customer_id": customer["customer_id"] if customer else None,
                     "crm_global_verified": bool(customer) and all(r.get("global_id_verified", False) for r in records if r),
                     "crm_customer_ids": sorted({r["customer_id"] for r in records if r}),
+                    "crm_family_contacts": [str(c) for c in family_contacts],
                     "crm_primary_branch": min((r["branch_id"] for r in records if r), default=None),
                     "attachments": item["attachments"],
                     "actor_name": item["actor_name"],
@@ -1147,6 +1185,9 @@ class AlfaMaxConnections:
                 reconcile_messages(self, db, workspace, channel, conversation_id)
             else:
                 refresh_unread(db, workspace, conversation_id)
+        if refreshed_families and snapshot and snapshot.get("version") is not None:
+            from center_messenger import card_preference
+            card_preference.refresh(db, workspace, snapshot, refreshed_families)
 
         logging.getLogger(__name__).debug(
             "AlfaCRM MAX history projected workspace=%s rows=%d touched_convs=%d",
