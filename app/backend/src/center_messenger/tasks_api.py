@@ -35,6 +35,13 @@ class TaskPatch(InputModel):
     message_ids: list[UUID] | None = Field(default=None, max_length=5)
 
 
+class VoiceTaskInput(InputModel):
+    text: str = Field(min_length=1, max_length=1000)
+    conversation_id: UUID | None = None
+    client_label: str = Field(default="", max_length=200)
+    create: bool = True
+
+
 class SnoozeInput(InputModel):
     due_at: datetime
 
@@ -99,6 +106,11 @@ def task_list(workspace_id: UUID, request: Request, scope: Literal["mine", "all"
 @router.post("/tasks")
 def task_create(workspace_id: UUID, model: TaskInput, request: Request):
     return tasks(request).create(identity(request, mutation=True), workspace_id, model.model_dump())
+
+
+@router.post("/tasks/voice")
+def task_voice(workspace_id: UUID, model: VoiceTaskInput, request: Request):
+    return tasks(request).voice(identity(request, mutation=True), workspace_id, model.model_dump())
 
 
 @router.get("/tasks/{task_id}")

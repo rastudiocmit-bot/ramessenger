@@ -105,7 +105,7 @@ window.CenterNotices = ({ $ }) => {
 
   function settle(item) {
     clearTimeout(timer);
-    timer = setTimeout(() => { if (shown === item) collapse(); }, LIFETIME[item.type] || 6000);
+    timer = setTimeout(() => { if (shown === item) collapse(); }, item.ttl || LIFETIME[item.type] || 6000);
   }
   function collapse() {
     clearTimeout(timer);
@@ -127,12 +127,12 @@ window.CenterNotices = ({ $ }) => {
   /** Show a notice. Returns false when notices are switched off (the caller keeps its fallback).
    *  `always` notices (task reminders) have their own switch and ignore this one; `actions`
    *  shows a row of buttons; `sticky` notices go away once one of their actions ran. */
-  function notify({ type = "error", title, text = "", action = null, actions = null, key = null, always = false, sticky = false, count = true, glyph = null } = {}) {
+  function notify({ type = "error", title, text = "", action = null, actions = null, key = null, always = false, sticky = false, count = true, glyph = null, ttl = 0 } = {}) {
     if ((!enabled && !always) || !title) return false;
     const id = key || `${type}|${title}|${text}`;
     let item = items.find(entry => entry.key === id);
-    if (item) { items = items.filter(entry => entry !== item); if (count) item.count += 1; item.at = Date.now(); item.read = false; item.text = text; item.title = title; item.action = action; item.actions = actions; item.glyph = glyph; }
-    else item = { id: `n${++seq}`, key: id, type, title, text, action, actions, sticky, always, glyph, count: 1, at: Date.now(), read: false };
+    if (item) { items = items.filter(entry => entry !== item); if (count) item.count += 1; item.at = Date.now(); item.read = false; item.text = text; item.title = title; item.action = action; item.actions = actions; item.glyph = glyph; item.ttl = ttl; }
+    else item = { id: `n${++seq}`, key: id, type, title, text, action, actions, sticky, always, glyph, ttl, count: 1, at: Date.now(), read: false };
     items.unshift(item); items = items.slice(0, LIMIT);
     if (!panelOpen) { shown = item; settle(item); }
     render(); return true;

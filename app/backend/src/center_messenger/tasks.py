@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from center_messenger.auth_security import AuthError
+from center_messenger import task_speech
 
 KINDS = {"makeup": "Отработка", "subscription": "Абонемент", "group": "Группа", "call": "Перезвонить", "other": "Другое"}
 ORIGINS = ("menu", "select", "voice", "ai_hint", "manual")
@@ -353,6 +354,51 @@ class Tasks:
                  "me": actor.user_id, "assignee": assignee, "assignee_name": assignee_name[:200]})
             self._event(db, workspace, task, "created", actor.user_id, {"origin": origin})
             return self._public(self._row(db, task))
+
+    def voice(self, actor, workspace, data):
+        """A dictated task: fields from the phrase, sources from the dialog's last messages.
+
+        With create=True a phrase of three words or more becomes a task at once
+        (the operator can undo it); otherwise the draft fills the task sheet.
+        """
+        spoken = " ".join(str(data.get("text") or "").split())[:1000]
+        with self._enter(actor, workspace, snapshot=True) as db:
+            member = self._member(db, actor, workspace)
+            if member["observer"]:
+                raise AuthError(403, "Роль «Наблюдатель» не может создавать задачи.")
+            studio, zone = self._studio(db, workspace), ZoneInfo(member["timezone"])
+            now = db.execute(text("SELECT now()")).scalar_one()
+            people = [{"id": actor.user_id, "name": actor.display_name or actor.email}]
+            if member["admin"]:
+                people = [{"id": row["user_id"], "name": row["name"]} for row in db.execute(text(
+                    "SELECT m.user_id, coalesce(nullif(u.display_name,''), u.email) AS name FROM workspace_memberships m "
+                    "JOIN auth_users u ON u.id=m.user_id WHERE m.workspace_id=:w AND m.active "
+                    "AND (m.role IN ('owner','admin') OR 'messages' = ANY(coalesce(m.sections, ARRAY[]::text[])))"),
+                    {"w": workspace}).mappings().all()] or people
+            parsed = task_speech.parse(spoken, now, zone, studio, people)
+            conversation, sources = data.get("conversation_id"), []
+            if conversation is not None:
+                recent = db.execute(text(
+                    "SELECT id, direction, text, occurred_at FROM messages WHERE workspace_id=:w AND conversation_id=:c "
+                    "AND occurred_at > now() - interval '24 hours' AND payload->>'superseded_by' IS NULL "
+                    "AND actor_type <> 'automation' ORDER BY occurred_at DESC, id DESC LIMIT 10"),
+                    {"w": workspace, "c": conversation}).mappings().all()
+                sources = [{"id": str(row["id"]), "direction": row["direction"], "at": _iso(row["occurred_at"]),
+                            "text": " ".join(str(row["text"] or "").split())[:QUOTE]} for row in task_speech.link(recent)]
+        if not parsed["title"]:
+            raise AuthError(422, "Не удалось разобрать задачу. Скажите, что нужно сделать.")
+        due = parsed["due_at"] or datetime.fromisoformat(presets(now, zone, studio)["default"])
+        draft = {"title": parsed["title"], "due_at": due.isoformat(), "kind": parsed["kind"],
+                 "assignee_id": str(parsed["assignee_id"] or actor.user_id), "sources": sources, "spoken": spoken,
+                 "conversation_id": str(conversation) if conversation else None,
+                 "client_label": " ".join(str(data.get("client_label") or "").split())[:200]}
+        if not data.get("create") or len(parsed["title"].split()) < 3:
+            return {"draft": draft}
+        created = self.create(actor, workspace, {
+            "title": draft["title"], "details": "", "kind": draft["kind"], "due_at": due, "conversation_id": conversation,
+            "client_label": draft["client_label"], "message_ids": [UUID(source["id"]) for source in sources],
+            "assignee_id": parsed["assignee_id"] or actor.user_id, "origin": "voice"})
+        return {"task": created}
 
     def update(self, actor, workspace, task, data):
         with self._enter(actor, workspace) as db:

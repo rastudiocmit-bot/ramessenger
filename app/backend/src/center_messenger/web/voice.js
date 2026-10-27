@@ -4,7 +4,10 @@
 window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
   const RATE = 16000, HOLD_MS = 220, STREAM_HOLD_MS = 450;
   const recordingLimit = () => Math.max(15, Math.min(180, Number(state.voiceMaxSeconds) || 180));
-  const CANCEL_PX = 90, STILL_PX = 10;
+  const CANCEL_PX = 90, STILL_PX = 10, TASK_PX = 70;
+  // «Задача» to the left of the orb: the dictated phrase becomes a task (tasks.js), never a message.
+  const TASK_WORDS = /^\s*(?:поставь\s+задачу|создай\s+задачу|задача|напомни(?:ть)?)(?:[\s,.:!-]|$)/i;
+  const taskTarget = () => Boolean(state.tasksVoice && $("#chat-history")?.dataset.conversation);
   const compose = $("#chat-compose"), input = $("#chat-input"), button = $("#chat-voice"), stream = $("#chat-stream");
   const panel = $("#chat-voice-panel"), label = $("#chat-voice-label"), time = $("#chat-voice-time");
   const level = $("#chat-voice-level"), done = $("#chat-voice-done"), cancel = $("#chat-voice-cancel"), retry = $("#chat-voice-retry");
@@ -24,8 +27,10 @@ window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
   layer.setAttribute("role", "region"); layer.setAttribute("aria-label", "Голосовое сообщение");
   layer.innerHTML = `<div class="voice-hold-stage">
     <div class="voice-hold-orb"><span class="voice-hold-ring"></span><span class="voice-hold-mic"></span></div>
-    <div class="voice-hold-time">0:00</div><div class="voice-hold-hint"></div></div>`;
+    <div class="voice-hold-time">0:00</div><div class="voice-hold-hint"></div></div>
+    <div class="voice-hold-task" aria-hidden="true"><span class="voice-hold-task-ic"></span><span>Задача</span></div>`;
   layer.querySelector(".voice-hold-mic").append(icon("mic"));
+  layer.querySelector(".voice-hold-task-ic").append(icon("task"));
   document.body.append(layer);
   const stage = layer.querySelector(".voice-hold-stage"), orb = layer.querySelector(".voice-hold-orb");
   const holdTime = layer.querySelector(".voice-hold-time"), holdHint = layer.querySelector(".voice-hold-hint");
@@ -162,8 +167,10 @@ window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
   function holdPhase(kind) {
     layer.hidden = false; layer.dataset.phase = kind;
     holdHint.textContent = kind === "starting" ? "Включаем микрофон…"
-      : kind === "recording" ? "Отпустите — текст в поле\nВверх — отмена"
-      : kind === "cancel" ? "Отпустите — запись удалится" : "";
+      : kind === "recording" ? (taskTarget() ? "Отпустите — текст в поле\nВверх — отмена · влево — задача" : "Отпустите — текст в поле\nВверх — отмена")
+      : kind === "cancel" ? "Отпустите — запись удалится"
+      : kind === "task" ? "Отпустите — будет задача.\nКлиенту этот текст не уйдёт." : "";
+    layer.classList.toggle("can-task", taskTarget());
   }
   async function start(prepared = prepare()) {
     if (!available() || attempt) return;
@@ -224,7 +231,7 @@ window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
   function endHold(cancelled = false) {
     const mine = hold; if (!mine) return;
     if (mine.armed) swallowUntil = performance.now() + 600;
-    const toCancel = cancelled || layer.dataset.phase === "cancel";
+    const toCancel = cancelled || layer.dataset.phase === "cancel", toTask = layer.dataset.phase === "task";
     releaseGesture();
     if (!mine.armed) {
       suppressClick = !cancelled && mine.source === "button";
@@ -235,13 +242,15 @@ window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
       if (attempt) report(attempt, "cancelled"); reset();
       return;
     }
+    if (attempt) attempt.target = toTask ? "task" : "draft";
     finish();
   }
   function track(event) {
     if (!hold?.armed || event.pointerId !== hold.id || status !== "recording") return;
     const dy = event.clientY - hold.y, eased = Math.sign(dy) * Math.min(170, Math.abs(dy) * 0.85);
-    stage.classList.add("dragging"); stage.style.transform = `translateY(${eased.toFixed(1)}px)`;
-    holdPhase(-dy > CANCEL_PX ? "cancel" : "recording");
+    const dx = event.clientX - hold.x, side = taskTarget() ? Math.max(-24, Math.min(0, dx * 0.3)) : 0;
+    stage.classList.add("dragging"); stage.style.transform = `translate(${side.toFixed(1)}px, ${eased.toFixed(1)}px)`;
+    holdPhase(-dy > CANCEL_PX ? "cancel" : taskTarget() && -dx > TASK_PX && -dx > Math.abs(dy) ? "task" : "recording");
   }
   // 16 kHz, 16-bit little-endian LPCM accepted directly by SpeechKit.
   function encode(chunks, rate, limit) {
@@ -313,7 +322,7 @@ window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
           const progress = await api(`/workspaces/${mine.workspace}/voice/jobs/${mine.job}`, { timeoutMs: 10000, signal: mine.controller.signal });
           if (progress.status === "pending") phase("working", "Ожидаем обработку записи…");
           if (progress.status === "processing") phase("working", "Распознаём запись…");
-          if (progress.status === "recognized" && progress.result?.text && !preview) {
+          if (progress.status === "recognized" && progress.result?.text && !preview && mine.target !== "task" && !TASK_WORDS.test(progress.result.text)) {
             const before = input.value;
             insert(progress.result.text);
             preview = { raw: progress.result.text, before, after: input.value };
@@ -325,6 +334,14 @@ window.CenterVoice = ({ $, state, api, toast = () => {} }) => {
       }
       if (!current(mine) || mine.controller.signal.aborted) return;
       mine.clip = null; report(mine, "complete");
+      const spoken = result.text || preview?.raw || "";
+      if (spoken && (mine.target === "task" || (taskTarget() && TASK_WORDS.test(spoken)))) {
+        // A task never lands in the client's draft: undo a preview and hand the phrase over.
+        if (preview && input.value === preview.after) { input.value = preview.before; input.dispatchEvent(new Event("input", { bubbles: true })); }
+        document.dispatchEvent(new CustomEvent("cm:voice-task", { detail: { text: spoken, conversation: $("#chat-history")?.dataset.conversation || null,
+          spokenPrefix: mine.target !== "task" } }));
+        reset(); return;
+      }
       if (preview) {
         // A typed edit or a sent raw draft always wins over a late model rewrite.
         if (result.text && result.text !== preview.raw && input.value === preview.after) {

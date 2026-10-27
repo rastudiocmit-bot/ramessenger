@@ -1580,3 +1580,12 @@ body:has(#cabinet[hidden]){overflow:auto}
 @media (prefers-reduced-motion:reduce){.task-menu,.chat-bubble.task-flash{animation:none}}
 .task-strip-on .notices{top:calc(var(--sat) + 124px)}
 @media (min-width:720px){.task-strip-on .notices{top:136px}}
+/* Voice hold: «Задача» waits to the left of the orb (voice.js). */
+.voice-hold-task{position:absolute;left:max(10px,env(safe-area-inset-left,0px));top:50%;transform:translateY(-50%);display:none;flex-direction:column;align-items:center;gap:6px;
+  width:72px;padding:10px 0;border-radius:20px;background:rgba(255,255,255,.16);color:#fff;font-size:13px;font-weight:650;transition:background .15s,color .15s,transform .15s}
+.voice-hold.can-task .voice-hold-task{display:flex}
+.voice-hold-task-ic{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.22)}
+.voice-hold-task-ic svg{width:17px;height:17px}
+.voice-hold[data-phase="task"] .voice-hold-task{background:#fff;color:var(--primary-ink);transform:translateY(-50%) scale(1.06);box-shadow:0 0 0 4px rgba(255,255,255,.35)}
+.voice-hold[data-phase="task"] .voice-hold-task-ic{background:var(--primary);color:var(--on-primary)}
+.voice-hold[data-phase="task"] .voice-hold-mic{background:#fff;color:var(--primary)}

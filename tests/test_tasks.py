@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app/backend/src"))
 
 from center_messenger.tasks import STUDIO_DEFAULTS, _personal, _studio, presets  # noqa: E402
+from center_messenger.task_speech import link, parse  # noqa: E402
 
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -57,6 +58,40 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(_personal({"press": "menu", "reminders": 0})["press"], "menu")
         self.assertIs(_personal({"reminders": 0})["reminders"], False)
         self.assertEqual(_personal({"press": "nope"})["press"], "split")
+
+
+class SpeechTests(unittest.TestCase):
+    now = datetime(2026, 10, 27, 14, 0, tzinfo=MSK)  # Tuesday
+    people = [{"id": "olga", "name": "Ольга Ким"}, {"id": "maria", "name": "Мария Петрова"}]
+
+    def test_due_assignee_kind_and_title(self):
+        result = parse("Записать Мишу на отработку в четверг, сделать до завтра до обеда, поручи Ольге",
+                       self.now, MSK, _studio({}), self.people)
+        self.assertEqual(result["title"], "Записать Мишу на отработку в четверг")
+        self.assertEqual(result["due_at"].isoformat(), "2026-10-28T13:00:00+03:00")
+        self.assertEqual((result["kind"], result["assignee_id"]), ("makeup", "olga"))
+
+    def test_trigger_word_and_relative_time(self):
+        result = parse("Задача: перезвонить Анне Смирновой через 2 часа", self.now, MSK, _studio({}))
+        self.assertEqual(result["title"], "Перезвонить Анне Смирновой")
+        self.assertEqual(result["due_at"].isoformat(), "2026-10-27T16:00:00+03:00")
+        self.assertEqual(result["kind"], "call")
+
+    def test_bare_hour_in_the_afternoon_and_weekday(self):
+        self.assertEqual(parse("напомни проверить оплату в 5", self.now, MSK, _studio({}))["due_at"].hour, 17)
+        friday = parse("в пятницу к вечеру уточнить расписание", self.now, MSK, _studio({}))["due_at"]
+        self.assertEqual(friday.isoformat(), "2026-10-30T18:00:00+03:00")
+
+    def test_no_time_leaves_the_default_to_the_studio(self):
+        self.assertIsNone(parse("проверить остаток по абонементу", self.now, MSK, _studio({}))["due_at"])
+
+    def test_link_prefers_unanswered_client_messages(self):
+        newest_first = [{"direction": "in", "text": "И справку"}, {"direction": "in", "text": "Можно в четверг?"},
+                        {"direction": "out", "text": "Добрый день"}]
+        self.assertEqual([m["text"] for m in link(newest_first)], ["Можно в четверг?", "И справку"])
+        promise = [{"direction": "out", "text": "Уточню у администратора"}, {"direction": "in", "text": "Спасибо"}]
+        self.assertEqual(link(promise), [promise[0]])
+        self.assertEqual(link([{"direction": "out", "text": "Хорошего дня"}]), [])
 
 
 if __name__ == "__main__":

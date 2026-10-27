@@ -66,6 +66,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     if (epoch !== state.epoch) return ctx;
     ctx = result; ctxAt = Date.now(); ctxEpoch = epoch;
     state.taskPress = ctx.personal?.press || "split";
+    state.tasksVoice = !ctx.read_only;
     return ctx;
   }
   async function refresh() {
@@ -390,14 +391,15 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     sheet.querySelector(".task-sheet-client").textContent = (editing ? task.client_label : draft?.client_label) || "";
     form.elements.title.value = editing ? task.title : draft?.title || "";
     form.elements.details.value = editing ? task.details || "" : "";
-    sheetDue = editing ? task.due_at : ctx?.presets?.default || null;
+    sheetDue = editing ? task.due_at : draft?.due_at || ctx?.presets?.default || null;
     sheet.querySelector(".task-due-input").hidden = true;
-    sheet.dataset.kind = editing ? task.kind || "" : "";
+    sheet.dataset.kind = editing ? task.kind || "" : draft?.kind || "";
     paintDue(); paintKinds(sheet.dataset.kind);
     paintQuotes(editing ? task.sources || [] : sheetDraft?.sources || [], !editing);
     const assignee = form.elements.assignee, people = ctx?.assignees || [];
     assignee.replaceChildren(...people.map(p => new Option(p.id === ctx.me ? `${p.name} (я)` : p.name, p.id)));
-    assignee.value = editing ? task.assignee_id : ctx?.me;
+    assignee.value = editing ? task.assignee_id : draft?.assignee_id || ctx?.me;
+    if (!assignee.value) assignee.value = ctx?.me;
     sheet.querySelector(".task-assignee").hidden = people.length < 2;
     const locked = readOnly();
     for (const field of form.querySelectorAll("textarea,select,input")) field.disabled = locked;
@@ -514,6 +516,46 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   setInterval(() => { if (!document.hidden && allowed()) refresh(); }, POLL_MS);
   setInterval(() => { if (!document.hidden) remind(); }, 20000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden && allowed()) refresh(); });
+
+  // ── dictated tasks (voice.js: finger to «Задача», or a phrase starting «Задача…») ──
+  document.addEventListener("cm:voice-task", async event => {
+    const { text, conversation, spokenPrefix } = event.detail || {};
+    if (!text || !allowed() || readOnly()) return;
+    try {
+      await context();
+      const instant = ctx?.personal?.voice_task !== "confirm";
+      const result = await api(`${base()}/tasks/voice`, { method: "POST", timeoutMs: 20000,
+        data: { text, conversation_id: conversation || null, client_label: conversation && conversation === convId ? clientLabel() : "", create: instant } });
+      if (result.task) {
+        const task = result.task;
+        notices?.notify({ type: "success", glyph: "task", title: spokenPrefix ? "Похоже на задачу — клиенту не отправили" : "Задача создана",
+          text: `${task.title} · ${dueText(task)}`, key: `task:voice:${task.id}`, always: true, sticky: true, count: false, ttl: 8000,
+          actions: [{ label: "Изменить", keep: true, run: () => openSheet({ task }) }, { label: "Отменить", run: () => action(task, "cancel", "Задача отменена") }] });
+        await changed();
+      } else {
+        const draft = result.draft;
+        await openSheet({ draft: { title: draft.title, sources: draft.sources || [], conversation_id: draft.conversation_id, client_label: draft.client_label,
+          origin: "voice", due_at: draft.due_at, kind: draft.kind, assignee_id: draft.assignee_id } });
+      }
+    } catch (error) { if (error.name !== "AbortError") toast(error.message, true); }
+  });
+
+  // ── after an answer to the client: «Задача выполнена?» ─────────────────────
+  let seenOut = new Set(), seenFor = null, replySent = 0;
+  $("#chat-compose")?.addEventListener("submit", () => { if (convId && openTasks().length) replySent = Date.now(); }, true);
+  const asked = new Set();
+  function watchReplies() {
+    const ids = [...history.querySelectorAll(".chat-bubble.msg.out[data-id]")].map(bubble => bubble.dataset.id);
+    if (seenFor !== convId) { seenFor = convId; seenOut = new Set(ids); return; }
+    const fresh = ids.filter(id => !seenOut.has(id)); fresh.forEach(id => seenOut.add(id));
+    const first = openTasks()[0];
+    // Only right after the operator pressed «Отправить» in this dialog.
+    if (!fresh.length || !first || !replySent || Date.now() - replySent > 30000 || asked.has(first.id) || readOnly()) return;
+    replySent = 0; asked.add(first.id);
+    notices?.notify({ type: "info", glyph: "task", title: "Ответили клиенту. Задача выполнена?", text: first.title, key: `task:ask:${first.id}`,
+      always: true, sticky: true, count: false, ttl: 10000, actions: [{ label: "Да, выполнена", run: () => complete(first) }, { label: "Нет", run: () => {} }] });
+  }
+  new MutationObserver(() => { if (convId) watchReplies(); }).observe(history, { childList: true });
 
   // ── «Задачи» section ─────────────────────────────────────────────────────
   const pane = $("#pane-tasks");

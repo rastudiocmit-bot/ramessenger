@@ -6,7 +6,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
   const calls = [], mutations = [], errors = [], unexpected = [];
   const tasks = { items: (options.tasks || []).map(t => ({ version: 1, status: 'open', sources: [], details: '', assignee_id: 'test', assignee_name: 'Олег Иванов', created_by: 'test', ...t })),
     studio: { day_start: '10:00', day_end: '20:00', work_days: [1, 2, 3, 4, 5, 6], default_due: 'end_of_day', visibility: 'all', alfa_copy: false },
-    personal: { press: 'split', voice_task: 'instant', reminders: true, hints: true, digest: false } };
+    personal: { press: 'split', voice_task: 'instant', reminders: true, hints: true, digest: false }, voice: [] };
   const preferences = { name_order: "parent_first" };
   // Voice input and AI agents (Connections → service settings). Off in the chat unless asked.
   const ai = { settings: { configured: Boolean(options.voice), folder_id: options.voice ? 'b1gexamplefolder0000' : '', key_hint: options.voice ? 'k3y9' : '',
@@ -73,6 +73,15 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       if (p.endsWith('/tasks/options')) payload = { me: 'test', admin: ['owner', 'admin'].includes(role), read_only: role === 'observer', timezone: 'Europe/Moscow',
         studio: tasks.studio, personal: tasks.personal, kinds: [], assignees: [{ id: 'test', name: 'Олег Иванов' }].concat(['owner', 'admin'].includes(role) ? [{ id: 'operator-1', name: 'Мария Петрова' }] : []),
         presets: { hour: iso(now + 3600e3), two_hours: iso(now + 7200e3), end_of_day: iso(now + 5 * 3600e3), tomorrow_morning: iso(now + 20 * 3600e3), default: iso(now + 5 * 3600e3), default_kind: 'end_of_day' } };
+      else if (p.endsWith('/tasks/voice')) {
+        const b = entry.body, text = b.text.replace(/^\s*(задача|напомни)[:,\s]*/i, ''), title = text.charAt(0).toUpperCase() + text.slice(1);
+        const draft = { title, due_at: iso(now + 20 * 3600e3), kind: null, assignee_id: 'test', conversation_id: b.conversation_id, client_label: b.client_label,
+          sources: [{ id: 'm4', text: messages.find(m => m.id === 'm4')?.text || '', direction: 'in' }] };
+        tasks.voice.push(b);
+        if (!b.create || title.split(/\s+/).length < 3) payload = { draft };
+        else { const task = { id: 'task-' + (tasks.items.length + 1), status: 'open', origin: 'voice', created_by: 'test', assignee_name: 'Олег Иванов', details: '', version: 1, completed_at: null, ...draft };
+          tasks.items.push(task); payload = { task }; }
+      }
       else if (p.endsWith('/tasks/settings')) { Object.assign(tasks.studio, entry.body); payload = tasks.studio; }
       else if (p.endsWith('/tasks/preferences')) { Object.assign(tasks.personal, entry.body); payload = tasks.personal; }
       else if (p.endsWith('/tasks/summary')) {
