@@ -60,7 +60,7 @@ class MimoClient:
         self.opener = opener or urllib.request.build_opener(NoRedirect()).open
         self.sleep = sleep
 
-    def _post(self, body, *, api_key, base_url=PAYG_URL, protocol="chat", plan=False, limit=2_000_000):
+    def _post(self, body, *, api_key, base_url=PAYG_URL, protocol="chat", plan=False, limit=2_000_000, timeout=25):
         base_url = endpoint(base_url, plan=plan)
         if protocol not in ("chat", "responses"):
             raise YandexError("bad_request")
@@ -69,7 +69,7 @@ class MimoClient:
             headers={"api-key": api_key.strip(), "Content-Type": "application/json"})
         for attempt in range(2):
             try:
-                with self.opener(request, timeout=25) as response:
+                with self.opener(request, timeout=timeout) as response:
                     raw = response.read(limit + 1)
                 break
             except urllib.error.HTTPError as error:
@@ -107,14 +107,14 @@ class MimoClient:
             raise YandexError("bad_response") from None
 
     def complete(self, text, *, prompt, model, temperature, api_key, max_tokens=1500,
-                 base_url=PAYG_URL, protocol="chat", rules=True, **_):
+                 base_url=PAYG_URL, protocol="chat", rules=True, timeout=25, **_):
         plan = model in PLAN_MODELS
         instructions = prompt.strip() + ("\n\n" + FIXED_RULES if rules else "")
         if protocol == "responses":
             body = {"model":model_id(model), "instructions":instructions, "input":text,
                     "max_output_tokens":int(max_tokens), "reasoning":{"effort":"none"},
                     "temperature":float(temperature), "stream":False}
-            payload = self._post(body, api_key=api_key, base_url=base_url, protocol=protocol, plan=plan)
+            payload = self._post(body, api_key=api_key, base_url=base_url, protocol=protocol, plan=plan, timeout=timeout)
             try:
                 output = "".join(part["text"] for item in payload["output"] if item.get("type") == "message"
                                  for part in item.get("content",[]) if part.get("type") == "output_text")
@@ -129,7 +129,7 @@ class MimoClient:
         body = {"model":model_id(model), "messages":[{"role":"system","content":instructions},{"role":"user","content":text}],
                 "thinking":{"type":"disabled"}, "max_completion_tokens":int(max_tokens),
                 "temperature":float(temperature), "stream":False}
-        return self._chat_result(self._post(body,api_key=api_key,base_url=base_url,plan=plan))
+        return self._chat_result(self._post(body,api_key=api_key,base_url=base_url,plan=plan,timeout=timeout))
 
     def recognize(self, audio, *, api_key, base_url=PAYG_URL, plan=False, language="auto"):
         check_audio(audio)

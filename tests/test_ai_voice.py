@@ -153,6 +153,7 @@ class FakeClient:
 
     def complete(self, text, **kwargs):
         self.calls.append(("complete", kwargs["model"], kwargs["api_key"]))
+        self.timeouts = getattr(self, "timeouts", []) + [kwargs.get("timeout")]
         if self.fail == "complete":
             raise YandexError("network")
         return {"text": self.normalized, "input_tokens": 300, "output_tokens": 20, "truncated": False}
@@ -185,6 +186,12 @@ ACTOR = Actor(user_id=uuid4())
 
 
 class TranscribeTest(unittest.TestCase):
+    def test_dictation_polish_is_capped_so_the_operator_is_not_kept_waiting(self):
+        voice, _ = service()
+        voice.transcribe(ACTOR, WS, silence(2))
+        self.assertEqual(voice.client.timeouts, [v.VOICE_POLISH_TIMEOUT])
+        self.assertLessEqual(v.VOICE_POLISH_TIMEOUT, 10)
+
     def test_recognized_text_is_normalized_and_billed(self):
         voice, db = service()
         result = voice.transcribe(ACTOR, WS, silence(4))

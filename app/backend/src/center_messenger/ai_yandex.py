@@ -222,7 +222,8 @@ class YandexClient:
             raise YandexError("bad_response")
         return " ".join(result.split())
 
-    def complete(self, text, *, prompt, model, temperature, api_key, folder_id, max_tokens=1500, rules=True):
+    def complete(self, text, *, prompt, model, temperature, api_key, folder_id, max_tokens=1500, rules=True,
+                 timeout=COMPLETION_TIMEOUT):
         if model not in MODELS:
             raise YandexError("model_unknown")
         body = {
@@ -236,7 +237,7 @@ class YandexClient:
         }
         headers = self._headers(api_key, "application/json") | {"x-folder-id": folder_id.strip()}
         payload = self._post(COMPLETION_URL, json.dumps(body, ensure_ascii=False).encode(), headers,
-                             COMPLETION_TIMEOUT)
+                             timeout)
         result = payload.get("result", payload) if isinstance(payload, dict) else None
         try:
             alternative = result["alternatives"][0]

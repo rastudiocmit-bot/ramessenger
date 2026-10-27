@@ -291,7 +291,7 @@ window.CenterVoice = ({ $, state, api }) => {
   function pollDelay(signal) {
     return new Promise((resolve, reject) => {
       const abort = () => { clearTimeout(timer); reject(new DOMException("Отменено", "AbortError")); };
-      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 750);
+      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, 300);
       if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
     });
   }

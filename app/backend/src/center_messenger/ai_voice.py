@@ -54,6 +54,7 @@ VOICE_PER_HOUR = 60
 # Uvicorn's configured INFO handler also captures successful/slow attempts;
 # the unconfigured application root logger otherwise drops INFO events.
 VOICE_LOG = logging.getLogger("uvicorn.error.voice")
+VOICE_POLISH_TIMEOUT = 8
 
 ERRORS = {
     "unauthorized": (502, "{name} отклонил ключ. Проверьте API-ключ в «Подключениях»."),
@@ -463,6 +464,11 @@ class AiVoice:
         voice_task = agent.get("task", "voice_input") == "voice_input"
         if not voice_task:
             extra["rules"] = False
+        else:
+            # Polishing dictation is optional: the operator is waiting with the
+            # recognised text already on screen. A model that has not answered
+            # in a few seconds is dropped and the transcript is used as is.
+            extra["timeout"] = VOICE_POLISH_TIMEOUT
         if not key:
             return raw, (0, 0), 0.0, True, "not_connected"
         try:

@@ -51,7 +51,7 @@ class DeepSeekClient:
     def __init__(self, opener=None):
         self.opener = opener or urllib.request.urlopen
 
-    def complete(self, text, *, prompt, model, temperature, api_key, max_tokens=1500, rules=True, **_):
+    def complete(self, text, *, prompt, model, temperature, api_key, max_tokens=1500, rules=True, timeout=TIMEOUT, **_):
         if model not in MODELS:
             raise YandexError("model_unknown")
         body = {
@@ -70,7 +70,7 @@ class DeepSeekClient:
             headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
         )
         try:
-            with self.opener(request, timeout=TIMEOUT) as response:
+            with self.opener(request, timeout=timeout) as response:
                 raw = response.read(2_000_001)
         except urllib.error.HTTPError as error:
             raise YandexError(_status_code(error.code), error.code) from None
