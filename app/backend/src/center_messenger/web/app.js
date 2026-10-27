@@ -173,7 +173,7 @@
     if (!workspace) return none;
     if (["owner", "admin"].includes(workspace.role)) return { overview: true, team: true, messages: true, tasks: true, clients: true, connections: true, security: true };
     const granted = new Set(workspace.sections && workspace.sections.length ? workspace.sections : ["overview", "security"]);
-    return { overview: granted.has("overview"), team: false, messages: granted.has("messages"), tasks: granted.has("messages"), clients: ["branch_manager", "observer"].includes(workspace.role) && granted.has("messages"), connections: false, security: granted.has("security") };
+    return { overview: granted.has("overview"), team: false, messages: granted.has("messages"), tasks: granted.has("messages") && granted.has("tasks"), clients: ["branch_manager", "observer"].includes(workspace.role) && granted.has("messages"), connections: false, security: granted.has("security") };
   }
   const cabinet = window.CenterCabinet({ $, state, api, node, show, roles, renderPane });
   async function renderPane(pane) {
@@ -213,6 +213,7 @@
   const sectionMeta = {
     overview: { icon: "◈", title: "Организация", hint: "Название центра и общая информация" },
     messages: { icon: "▤", title: "Сообщения", hint: "Переписка с клиентами в MAX" },
+    tasks: { icon: "☑", title: "Задачи", hint: "Раздел «Задачи» в меню. Работает вместе с «Сообщениями»" },
     security: { icon: "◇", title: "Безопасность", hint: "Пароль и сессии сотрудника" },
   };
   let sectionsMember = null;
@@ -222,7 +223,7 @@
     $("#member-sections-name").textContent = member.display_name;
     $("#member-sections-role").textContent = `${roles[member.role] || "Сотрудник"} · ${member.email}`;
     const box = $("#member-sections-checks"); box.replaceChildren();
-    ["overview", "messages", "security"].forEach(key => {
+    ["overview", "messages", "tasks", "security"].forEach(key => {
       const meta = sectionMeta[key];
       const row = node("div", undefined, "section-option");
       const icon = node("span", meta.icon, "section-option-icon");

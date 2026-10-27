@@ -81,7 +81,7 @@ async function longPress(page, selector) {
     // ── an overdue task reminds with actions; «Через 1 ч» snoozes ────────────
     {
       const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-      const data = await fixture(context, 'operator', ['messages', 'security'], { tasks: [
+      const data = await fixture(context, 'operator', ['messages', 'tasks', 'security'], { tasks: [
         { id: 'late-1', title: 'Перезвонить про группу «Лего»', client_label: 'Ольга Ким', conversation_id: 'client-3', due_at: new Date(Date.now() - 600e3).toISOString() }] });
       const page = await context.newPage(); page.setDefaultTimeout(15000);
       await page.goto('https://cabinet.example.test/?view=messages');
@@ -191,7 +191,7 @@ async function longPress(page, selector) {
         args: ['--no-sandbox', '--disable-dev-shm-usage', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', ...JSON.parse(process.env.CM_TEST_CHROMIUM_ARGS || '[]')] });
       try {
         const context = await voiceBrowser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['microphone'], isMobile: true, hasTouch: true });
-        const data = await fixture(context, 'operator', ['messages'], { voice: true });
+        const data = await fixture(context, 'operator', ['messages', 'tasks'], { voice: true });
         const page = await context.newPage(); page.setDefaultTimeout(15000);
         await page.goto('https://cabinet.example.test/?view=messages');
         await page.locator('.chat-select').first().tap();
@@ -225,6 +225,33 @@ async function longPress(page, selector) {
         assert.deepEqual(data.unexpected, []); assert.deepEqual(data.errors, []);
         await context.close();
       } finally { await voiceBrowser.close(); }
+    }
+    // ── «Задачи» is a section the admin shows or hides for each employee ──
+    {
+      const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      await fixture(context, 'operator', ['messages', 'security']);
+      const page = await context.newPage(); page.setDefaultTimeout(15000);
+      await page.goto('https://cabinet.example.test/?view=messages');
+      await page.waitForSelector('#navrail [data-pane="messages"]');
+      assert.equal(await page.locator('#navrail [data-pane="tasks"]').count(), 0, 'no «Задачи» without the section');
+      await context.close();
+      const admin = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      const data = await fixture(admin, 'owner');
+      const page2 = await admin.newPage(); page2.setDefaultTimeout(15000);
+      await page2.goto('https://cabinet.example.test/?view=messages');
+      await page2.locator('#navrail [data-pane="team"]').click();
+      await page2.locator('.member-row', { hasText: 'Мария Петрова' }).locator('button').click();
+      await page2.locator('#member-options-body button', { hasText: 'Доступные разделы' }).click();
+      const toggle = page2.locator('#member-sections-checks input[value="tasks"]');
+      assert.equal(await toggle.isChecked(), true);
+      await page2.locator('#member-sections-checks .section-option', { hasText: 'Задачи' }).locator('label').click();
+      await save(page2, 'tasks-member-section');
+      await page2.locator('#member-sections-form [type="submit"]').click();
+      await page2.waitForFunction(() => !document.querySelector('#member-sections-dialog').open);
+      const saved = data.mutations.find(m => m.path.endsWith('/members/operator-1/sections'));
+      assert.deepEqual(saved.body.sections.sort(), ['messages', 'security']);
+      assert.deepEqual(data.unexpected, []); assert.deepEqual(data.errors, []);
+      await admin.close();
     }
     console.log('tasks: ok');
   } finally { await browser.close(); }

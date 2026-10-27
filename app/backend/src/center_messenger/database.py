@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0022_ai_task_usage"
+SCHEMA_REVISION = "0023_member_tasks_section"
 
 
 def log_database_error(logger, error, *, operation):

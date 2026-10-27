@@ -152,7 +152,7 @@ class WorkspaceInput(InputModel):
 
 
 # Sidebar sections that a non-admin member may be granted.
-MEMBER_SECTIONS = ("overview", "security", "messages")
+MEMBER_SECTIONS = ("overview", "security", "messages", "tasks")
 
 
 def can_send_messages(role, sections):

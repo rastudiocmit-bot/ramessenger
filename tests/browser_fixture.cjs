@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const web = path.join(__dirname, '../app/backend/src/center_messenger/web');
-async function fixture(context, role = 'owner', sections = ['overview', 'messages', 'security'], options = {}) {
+async function fixture(context, role = 'owner', sections = ['overview', 'messages', 'tasks', 'security'], options = {}) {
   const calls = [], mutations = [], errors = [], unexpected = [];
   const tasks = { items: (options.tasks || []).map(t => ({ version: 1, status: 'open', sources: [], details: '', assignee_id: 'test', assignee_name: 'Олег Иванов', created_by: 'test', ...t })),
     studio: { day_start: '10:00', day_end: '20:00', work_days: [1, 2, 3, 4, 5, 6], default_due: 'end_of_day', visibility: 'all', alfa_copy: false },
@@ -41,7 +41,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     max_connected: true, max_bot_connected: true, students: [{ id: 'student-0', name: 'Миша Смирнов', dob: '2020-05-14', balance: 2400,
       groups: [], cards: [{ id: '100', branch_id: '1', branch_name: 'Центральный', status: 'client', needs_refresh: false, subscriptions: [], url: 'https://example.s20.online/customer/view?id=100' }] }] };
   const members = [{ user_id: 'test', display_name: 'Олег Иванов', email: 'demo@example.test', role },
-    { user_id: 'operator-1', display_name: 'Мария Петрова', email: 'operator@example.test', role: 'operator', sections: ['messages', 'security'] }];
+    { user_id: 'operator-1', display_name: 'Мария Петрова', email: 'operator@example.test', role: 'operator', sections: ['messages', 'tasks', 'security'] }];
   const branches = [{ id: '1', name: 'Центральный' }, { id: '2', name: 'Северный' }];
   const channels = [{ id: 'native', name: 'MAX через AlfaCRM', kind: 'alfa_max_browser', enabled: true, status: 'active' }];
   const metrics = { incoming: 268, previous_incoming: 240, waiting: 3, average_response_seconds: 240, new_leads: 18,
@@ -191,6 +191,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     else if (/\/(directory|chat-contacts)\/sync$/.test(p)) payload = { configured: true, state: 'idle', last_success_at: '2026-10-24T11:00:00Z', auto_refresh: false, interval_minutes: 30, stats: {} };
     else if (/\/(directory|chat-contacts)$/.test(p)) payload = { contacts, total: contacts.length, branches, snapshot: 'run-1', page: 0, has_more: false };
     else if (p.endsWith('/members')) payload = { members };
+    else if (/\/members\/.*\/sections$/.test(p)) { members.find(m => p.includes('/' + m.user_id + '/')).sections = entry.body.sections; payload = {}; }
     else if (/\/members\/.*\/role$/.test(p)) { members.find(m => p.includes('/' + m.user_id + '/')).role = entry.body.role; payload = {}; }
     else if (p.endsWith('/integrations/max')) payload = { vault_ready: true, channels: [{ id: 'bot', name: 'MAX-бот', kind: 'max_bot', bot_name: '@center_bot', enabled: true, verified: true, can_send: true }] };
     else if (/\/integrations\/max\/bot\/(check|disable|enable)$/.test(p)) payload = {};
