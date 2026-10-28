@@ -50,6 +50,9 @@ class MaxConnections:
     def hook_url(self, connection):
         return self.accounts.settings.public_url + f"/hooks/max/{connection}"
 
+    def legacy_hook_urls(self, connection):
+        return [origin + f"/hooks/max/{connection}" for origin in self.accounts.settings.legacy_origins]
+
     @staticmethod
     def public(row):
         return {
@@ -280,6 +283,13 @@ class MaxConnections:
                 self.signature(after, ours)
             ):
                 raise MaxError("subscription_changed")
+            # After a domain move: this connection's webhook on the former domain is ours too.
+            for old in self.legacy_hook_urls(connection):
+                if any(s["url"] == old for s in after):
+                    client.unsubscribe(old)
+                    after = client.subscriptions()
+                    if not self.subscriptions_ok(after, ours):
+                        raise MaxError("subscription_changed")
         except MaxError as error:
             return self._failure(actor, workspace, connection, snapshot, error)
         with self.transaction(actor, workspace, lock=True) as db:

@@ -23,7 +23,23 @@ ROOT = Path("/opt/center-messenger-github")
 EXPECTED_DB_VOLUME = "center-messenger_database"
 EXPECTED_DB_REVISION = "0023_member_tasks_section"
 READY_LOCAL = "http://127.0.0.1:8100/health/ready"
-READY_PUBLIC = "https://messenger.rastudio.org/health/ready"
+
+def public_url():
+    """The messenger's public origin: CM_PUBLIC_URL from the environment or the deploy .env."""
+    value = os.environ.get("CM_PUBLIC_URL", "")
+    env = ROOT / ".env"
+    if not value and env.exists():
+        for line in env.read_text().splitlines():
+            if line.strip().startswith("CM_PUBLIC_URL="):
+                value = line.split("=", 1)[1].strip().strip('"').strip("'")
+    value = (value or "https://messenger.rastudio.org").rstrip("/")
+    if not re.fullmatch(r"https://[a-z0-9.-]+", value):
+        raise RuntimeError("Unexpected CM_PUBLIC_URL")
+    return value
+
+
+READY_PUBLIC = public_url() + "/health/ready"
+
 
 def cmd(*argv, env=None, capture=True):
     r = subprocess.run(argv, check=True, text=True, stdout=subprocess.PIPE if capture else None, env=env)

@@ -1,0 +1,43 @@
+# center-messenger on rachat.ru (www redirects to the bare domain)
+server {
+    listen 80;
+    listen [::]:80;
+    server_name rachat.ru www.rachat.ru;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/center-messenger-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+    location / { return 301 https://rachat.ru$request_uri; }
+}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name www.rachat.ru;
+    ssl_certificate /etc/letsencrypt/live/rachat.ru/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/rachat.ru/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    return 301 https://rachat.ru$request_uri;
+}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name rachat.ru;
+    ssl_certificate /etc/letsencrypt/live/rachat.ru/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/rachat.ru/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 10m;
+    access_log /var/log/nginx/center-messenger.access.log;
+    error_log /var/log/nginx/center-messenger.error.log;
+    location / {
+        proxy_pass http://127.0.0.1:8100;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 30s;
+    }
+}

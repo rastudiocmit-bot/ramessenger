@@ -15,6 +15,19 @@ REPO="rastudiocmit-bot/ramessenger"
 STATE=ROOT/"local-build-state.json"
 COMPOSE=["docker","compose","-p","center-messenger","-f",str(ROOT/"compose.yaml")]
 
+def public_url():
+    """The messenger's public origin: CM_PUBLIC_URL from the environment or the deploy .env."""
+    value = os.environ.get("CM_PUBLIC_URL", "")
+    env = ROOT / ".env"
+    if not value and env.exists():
+        for line in env.read_text().splitlines():
+            if line.strip().startswith("CM_PUBLIC_URL="):
+                value = line.split("=", 1)[1].strip().strip('"').strip("'")
+    value = (value or "https://messenger.rastudio.org").rstrip("/")
+    if not re.fullmatch(r"https://[a-z0-9.-]+", value):
+        raise RuntimeError("Unexpected CM_PUBLIC_URL")
+    return value
+
 def run(*a, cwd=None, timeout=120):
     return subprocess.run(a,cwd=cwd,check=True,stdout=subprocess.PIPE,
                           text=True,timeout=timeout).stdout.strip()
@@ -55,7 +68,7 @@ def guard(src):
     if api["State"]["Status"]!="running" or api["State"].get("Health",{}).get("Status")!="healthy":
         raise RuntimeError("Current API unhealthy")
     import urllib.request
-    for u in ("http://127.0.0.1:8100/health/ready","https://messenger.rastudio.org/health/ready"):
+    for u in ("http://127.0.0.1:8100/health/ready",public_url()+"/health/ready"):
         with urllib.request.urlopen(u,timeout=10) as resp:
             if resp.status!=200 or json.load(resp).get("status")!="ready":
                 raise RuntimeError("Current API not ready")

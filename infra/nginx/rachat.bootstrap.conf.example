@@ -1,0 +1,12 @@
+# center-messenger: rachat.ru, before its certificate exists
+server {
+    listen 80;
+    listen [::]:80;
+    server_name rachat.ru www.rachat.ru;
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/center-messenger-acme;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+    location / { return 503; }
+}
