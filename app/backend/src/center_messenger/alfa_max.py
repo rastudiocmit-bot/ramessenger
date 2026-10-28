@@ -956,7 +956,9 @@ class AlfaMaxConnections:
                     existing = dict(existing) | {"conversation_id": conversation_id}
                 if (existing and same_source and not existing["payload"].get("possible_send_command_id")
                         and existing["payload"].get("crm_customer_ids") == sorted({r["customer_id"] for r in records if r})
-                        and existing["payload"].get("crm_family_contacts") == [str(c) for c in family_contacts]):
+                        and existing["payload"].get("crm_family_contacts") == [str(c) for c in family_contacts]
+                        and (not item.get("max_user_id")
+                             or existing["payload"].get("max_user_id") == item["max_user_id"])):
                     notify("checked")
                     continue
                 payload = {
@@ -976,6 +978,9 @@ class AlfaMaxConnections:
                     "actor_type": item["actor_type"],
                     "actor_id": item.get("actor_id"),
                     "actor_evidence": item.get("actor_evidence", {"reason": "source_classification"}),
+                    "max_user_id": item.get("max_user_id") or (
+                        existing["payload"].get("max_user_id") if existing and same_source else None
+                    ),
                     "failed": item["failed"],
                     "crm_status": customer.get("status") if customer else "unknown",
                 }
@@ -1001,6 +1006,7 @@ class AlfaMaxConnections:
                                 "AND s.state IN ('accepted','delivered','read','unknown','sending') "
                                 "AND m.text=:text AND m.payload->>'crm_branch'=:branch "
                                 "AND m.payload->>'customer_id'=:customer "
+                                "AND (:peer='' OR m.payload->>'max_user_id'=:peer) "
                                 "AND abs(extract(epoch FROM (m.occurred_at-:at)))<=300 "
                                 "AND NOT EXISTS (SELECT 1 FROM source_records x WHERE "
                                 "x.workspace_id=m.workspace_id AND x.connection_id=:c "
@@ -1015,6 +1021,7 @@ class AlfaMaxConnections:
                                 # of the preferred branch for future replies.
                                 "branch": str(branch),
                                 "customer": str(customer["customer_id"]),
+                                "peer": str(item.get("max_user_id") or ""),
                                 "at": item["occurred_at"],
                                 "c": channel,
                             },
@@ -1226,12 +1233,18 @@ class AlfaMaxConnections:
         ).scalar_one_or_none()
         if not target:
             raise AlfaBrowserError("history_unavailable")
+        peer = target.get("max_user_id")
+        if peer is not None and (
+            not isinstance(peer, str) or not re.fullmatch(r"[1-9][0-9]{0,18}", peer)
+        ):
+            raise AlfaBrowserError("invalid_recipient")
         session = self.vault.open_browser_state(workspace, connection, row["session_ciphertext"])
         return {
             "origin": row["crm_origin"],
             "state": session,
             "branch": int(target["customer_branch_id"]),
             "customer": int(target["customer_id"]),
+            "max_user_id": peer,
             "session_snapshot": dict(row),
         }
 
@@ -1249,6 +1262,7 @@ class AlfaMaxConnections:
                         self.sessions.renew(db, operation, force=True)
             try:
                 result = self.browser.send(target["origin"], target["state"], target["branch"], target["customer"], message,
+                    expected_peer=target.get("max_user_id"),
                     before_post=lambda: guard(before_post), on_accepted=on_accepted,
                     heartbeat=lambda: guard(heartbeat), stopping=stopping)
             except AlfaBrowserError as error:
