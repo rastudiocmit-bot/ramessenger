@@ -1233,10 +1233,10 @@ class AlfaMaxBrowser:
                 raw_id = item.get("data-id", "")
                 name_el = item.select_one(".sms-title small")
                 text_el = item.select_one(".sms-text small")
-                if not re.fullmatch(r"[1-9][0-9]{0,18}", raw_id) or name_el is None or text_el is None:
+                if not re.fullmatch(r"[1-9][0-9]{0,18}", raw_id) or name_el is None:
                     continue
                 name = re.sub(r"\s*\[ID\s+[0-9]+\]\s*$", "", name_el.get_text(" ", strip=True))
-                body = text_el.get_text("\n", strip=True)
+                body = text_el.get_text("\n", strip=True) if text_el else ""
                 templates.append({"id": int(raw_id), "name": name, "body": body})
             return templates
         except AlfaBrowserError:
