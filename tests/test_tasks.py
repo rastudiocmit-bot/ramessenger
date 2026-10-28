@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app/backend/src"))
 
-from center_messenger.tasks import STUDIO_DEFAULTS, _personal, _studio, presets  # noqa: E402
+from center_messenger.tasks import STUDIO_DEFAULTS, _json, _personal, _studio, presets  # noqa: E402
 from center_messenger.task_speech import link, parse  # noqa: E402
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -92,6 +92,16 @@ class SpeechTests(unittest.TestCase):
         promise = [{"direction": "out", "text": "Уточню у администратора"}, {"direction": "in", "text": "Спасибо"}]
         self.assertEqual(link(promise), [promise[0]])
         self.assertEqual(link([{"direction": "out", "text": "Хорошего дня"}]), [])
+        sent = [{"direction": "out", "text": "Хорошо, справку пришлю сегодня вечером"}]
+        self.assertEqual(link(sent), sent)
+
+    def test_bare_today_means_the_end_of_the_working_day(self):
+        self.assertEqual(parse("сегодня", self.now, MSK, _studio({}))["due_at"].hour, 20)
+
+    def test_model_json_with_thinking_or_fences(self):
+        self.assertEqual(_json('<think>{"a": 1}</think> Итог: {"title": "Перезвонить"}'), {"title": "Перезвонить"})
+        self.assertEqual(_json('```json\n{"title": "Записать"}\n```'), {"title": "Записать"})
+        self.assertIsNone(_json("не знаю"))
 
 
 if __name__ == "__main__":

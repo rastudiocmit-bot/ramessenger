@@ -14,7 +14,8 @@ WEEKDAYS = {"понедельник": 1, "вторник": 2, "сред": 3, "ч
 WORD_NUMBERS = {"один": 1, "одну": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5, "шесть": 6}
 KIND_WORDS = (("makeup", r"отработ"), ("subscription", r"абонемент|оплат|долг"), ("call", r"перезвон|позвон|созвон"),
               ("group", r"в\s+групп|групп[уы]|расписани|записать\s+на\s+(?:пробн|заняти)"))
-PROMISE = re.compile(r"уточн|провер|посмотр|сообщ|перезвон|вернусь|напиш|узна|отвеч", re.I)
+PROMISE = re.compile(r"уточн|провер|посмотр|сообщ|перезвон|позвон|вернусь|напиш|узна|отвеч|пришл|отправ|скин|"
+                     r"запиш|подготов|передам|выясн|оформ|заброниру|сделаю|разберусь", re.I)
 
 
 def _next_day(today, wanted, work_days):
@@ -90,7 +91,9 @@ def parse(text, now, zone, studio, people=()):
     elif day is not None or moment is not None:
         if day is None:
             day = today if datetime.combine(today, moment, zone) > local else today + timedelta(days=1)
-        due = datetime.combine(day, moment or start, zone)
+        if moment is None:
+            moment = end if day == today else start  # «сегодня» means within today's working day
+        due = datetime.combine(day, moment, zone)
         if due <= local:
             due = local + timedelta(hours=1)
 

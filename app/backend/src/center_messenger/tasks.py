@@ -126,14 +126,19 @@ AI_REPLY = ("Администратор детской студии выполн
 
 
 def _json(answer):
+    """The model's JSON object, also when it thinks aloud first or wraps the answer in ```json."""
     if not answer:
         return None
-    match = re.search(r"\{.*\}", answer, re.S)
-    try:
-        value = json.loads(match.group(0)) if match else None
-    except ValueError:
-        return None
-    return value if isinstance(value, dict) else None
+    text_ = re.sub(r"<think>.*?</think>", " ", str(answer), flags=re.S | re.I)
+    decoder, found = json.JSONDecoder(), None
+    for start in (m.start() for m in re.finditer(r"\{", text_)):
+        try:
+            value, _ = decoder.raw_decode(text_, start)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            found = value  # the last complete object wins: reasoning comes before the answer
+    return found
 
 
 class Tasks:
