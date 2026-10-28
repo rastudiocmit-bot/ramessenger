@@ -657,21 +657,42 @@ def _customer_card_compose_url(markup, *, origin, branch, customer):
     if _login_form(soup):
         raise AlfaBrowserError("reauth_required")
 
-    candidates = []
-    onclick_url = re.compile(r"""["']((?:https://[^"']+)?/company/\d+/max/bulk[^"']*)["']""")
+    values = []
     for node in soup.select("[href], [data-url], [data-href], [onclick]"):
-        values = [node.get(name) for name in ("href", "data-url", "data-href")]
-        handler = node.get("onclick", "")
-        values.extend(match.group(1) for match in onclick_url.finditer(handler))
-        for value in values:
-            if not value:
-                continue
-            try:
-                candidates.append(
-                    _validated_compose_url(value, origin=origin, branch=branch, customer=customer)
-                )
-            except AlfaBrowserError:
-                continue
+        values.extend(node.get(name) for name in ("href", "data-url", "data-href"))
+        values.extend(match.group(1) for match in ONCLICK_BULK_URL.finditer(node.get("onclick", "")))
+    return _compose_url_from_values(values, origin=origin, branch=branch, customer=customer)
+
+
+ONCLICK_BULK_URL = re.compile(r"""["']((?:https://[^"']+)?/company/\d+/max/bulk[^"']*)["']""")
+# A card with a long message feed serialises to several megabytes. Its compose links are
+# then collected inside the browser instead of shipping and parsing the whole page.
+CARD_LINKS_SCRIPT = r"""(limit) => {
+  const out = [], onclick = /["']((?:https:\/\/[^"']+)?\/company\/\d+\/max\/bulk[^"']*)["']/g;
+  for (const node of document.querySelectorAll('[href],[data-url],[data-href],[onclick]')) {
+    for (const name of ['href', 'data-url', 'data-href']) {
+      const value = node.getAttribute(name);
+      if (value && value.includes('/max/bulk') && value.length < 4096) out.push(value);
+    }
+    const handler = node.getAttribute('onclick') || '';
+    if (handler.includes('/max/bulk')) { onclick.lastIndex = 0; let m; while ((m = onclick.exec(handler))) out.push(m[1]); }
+    if (out.length >= limit) break;
+  }
+  return out;
+}"""
+
+
+def _compose_url_from_values(values, *, origin, branch, customer):
+    candidates = []
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            candidates.append(
+                _validated_compose_url(value, origin=origin, branch=branch, customer=customer)
+            )
+        except AlfaBrowserError:
+            continue
 
     unique = list(dict.fromkeys(candidates))
     if len(unique) == 1:
@@ -1231,9 +1252,15 @@ class AlfaMaxBrowser:
                     raise AlfaBrowserError("crm_customer_missing")
                 raise AlfaBrowserError("form_unavailable")
             card_markup = page.content()
-            form_url = _customer_card_compose_url(
-                card_markup, origin=origin, branch=branch, customer=customer
-            )
+            if len(card_markup.encode("utf-8", "ignore")) > MAX_HTML_BYTES:
+                links = page.evaluate(CARD_LINKS_SCRIPT, 500)
+                form_url = _compose_url_from_values(
+                    links if isinstance(links, list) else [], origin=origin, branch=branch, customer=customer
+                )
+            else:
+                form_url = _customer_card_compose_url(
+                    card_markup, origin=origin, branch=branch, customer=customer
+                )
             if not form_url:
                 form_url = fallback_url
 

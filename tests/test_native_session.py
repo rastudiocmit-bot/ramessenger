@@ -52,6 +52,14 @@ class SessionPolicyTests(unittest.TestCase):
         html += '<a href="/company/1/max/bulk?related_class=Customer&amp;related_ids%5B%5D=42&amp;maxUserId=77">MAX</a>'
         self.assertIn('maxUserId=77', _customer_card_compose_url(html, origin='https://test.s20.online', branch=1, customer=42))
 
+    def test_links_collected_in_the_browser_pick_the_one_compose_route(self):
+        # A long-feed card is too big to ship whole; the browser hands over its links instead.
+        from center_messenger.alfa_max_browser import _compose_url_from_values
+        links = ['/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42&maxUserId=77',
+                 '/company/1/max/bulk?related_ids%5B%5D=99', 'https://evil.example/company/1/max/bulk', None]
+        self.assertIn('maxUserId=77', _compose_url_from_values(links, origin='https://test.s20.online', branch=1, customer=42))
+        self.assertIsNone(_compose_url_from_values([], origin='https://test.s20.online', branch=1, customer=42))
+
     def test_pending_otp_page_is_distinct_from_password_login(self):
         html = '<form action="/auth/login"><input name="LoginForm[code]" autocomplete="one-time-code"></form>'
         with self.assertRaises(AlfaBrowserError) as raised:
