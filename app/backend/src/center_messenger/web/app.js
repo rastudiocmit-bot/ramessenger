@@ -18,7 +18,9 @@
   // this helper never creates a floating layer, timer or focus change.
   function feedback(message, error = false, target = null) {
     if (!message) return;
-    const dialog = [...document.querySelectorAll("dialog[open]")].at(-1);
+    // Only a modal dialog holds the operator's attention; the family card docked beside a
+    // chat (a non-modal dialog) is not where a voice or send error belongs.
+    const dialog = [...document.querySelectorAll("dialog[open]")].filter(d => { try { return d.matches(":modal"); } catch (_) { return true; } }).at(-1);
     // Errors outside an open dialog or a named form go to the notice capsule; an
     // error inside a dialog stays next to the fields the operator is looking at.
     if (error && !target && !dialog && notices?.notify({ type: "error", title: String(message) })) {

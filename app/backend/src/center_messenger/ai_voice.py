@@ -501,13 +501,25 @@ class AiVoice:
         try:
             answer = client.complete(raw, prompt=agent["prompt"], model=agent["model"],
                                      temperature=float(agent["temperature"]), api_key=key,
-                                     folder_id=creds["folder"], max_tokens=min(6000, max(200, len(raw) * 2)) if voice_task else 3000, **extra)
+                                     folder_id=creds["folder"], max_tokens=min(6000, max(2048, len(raw) * 3)) if voice_task else 3000, **extra)
         except YandexError as failure:
             return raw, (0, 0), 0.0, True, failure.code
         tokens = (answer["input_tokens"], answer["output_tokens"])
         cost = model_cost(agent["model"], *tokens)
-        normalized = None if answer["truncated"] else (accept_normalized(raw, answer["text"]) if voice_task else answer["text"].strip())
-        return (normalized, tokens, cost, False, None) if normalized else (raw, tokens, cost, True, "unusable")
+        if answer["truncated"]:
+            normalized, reason = None, "truncated"
+        elif voice_task:
+            normalized = accept_normalized(raw, answer["text"])
+            reason = None if normalized else ("empty" if not (answer["text"] or "").strip() else "too_long")
+        else:
+            normalized = answer["text"].strip()
+            reason = None if normalized else "empty"
+        if normalized:
+            return normalized, tokens, cost, False, None
+        # Which way the answer was unusable (never its text) for the server log.
+        logging.getLogger(__name__).warning("Voice polish rejected reason=%s model=%s input_chars=%d output_chars=%d output_tokens=%d",
+                                            reason, agent["model"], len(raw), len(answer["text"] or ""), tokens[1])
+        return raw, tokens, cost, True, reason
 
     def assist(self, actor, workspace, instruction, content, *, max_tokens=400, timeout=6):
         """One short model call for tasks (draft, promise hint, reply). None when no model is ready.
@@ -570,7 +582,7 @@ class AiVoice:
         if error != "not_connected":
             self._usage(actor, workspace, kind="test", tokens=tokens, cost=cost,
                         outcome="fallback" if fallback else "ok", error=error)
-        if fallback and error not in (None, "unusable"):
+        if fallback and error not in (None, "unusable", "truncated", "empty", "too_long"):
             raise _fail(error, provider_of(values["model"]))
         return {"text": normalized, "fallback": fallback, "cost_rub": round(cost, 4),
                 "billing": "subscription" if provider_of(values["model"]) == "mimo_plan" else "pay_as_you_go",
@@ -664,6 +676,9 @@ class AiVoice:
                     "model_unknown": "модель агента не поддерживается — выберите другую",
                     "content_filter": "модель отказалась обрабатывать этот текст",
                     "unusable": "агент вернул непригодный текст",
+                    "truncated": "ответ модели оборвался на лимите длины",
+                    "empty": "модель вернула пустой ответ",
+                    "too_long": "агент дописал лишнее: ответ намного длиннее сказанного",
                 }.get(error, "агент сейчас недоступен")
                 result["warning"] = f"Текст без обработки агентом «{agent['name']}»: {reason}."
         if not raw:
