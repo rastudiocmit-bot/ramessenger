@@ -486,7 +486,7 @@ class Tasks:
         content = self._transcript(rows, marked)
         if data.get("client_label"):
             content = f"Клиент: {data['client_label']}\n{content}"
-        answer = self._ai(actor, workspace, AI_DRAFT, content, max_tokens=700, timeout=8)
+        answer = self._ai(actor, workspace, AI_DRAFT, content, max_tokens=5000, timeout=15)
         raw, title, kind, due = self._fields(answer, now, zone, studio)
         if not title:
             return {"ai": False}
@@ -516,7 +516,7 @@ class Tasks:
                     "text": " ".join(str(row["text"] or "").split())[:QUOTE]}
                    for row in task_speech.link([r for r in before])]
         content = self._transcript(before) + f"\nАдминистратор: {spoken}"
-        answer = self._ai(actor, workspace, AI_HINT, content, max_tokens=300, timeout=6)
+        answer = self._ai(actor, workspace, AI_HINT, content, max_tokens=5000, timeout=10)
         data_ai, title, kind, due = self._fields(answer, now, zone, studio)
         if answer is not None and data_ai and data_ai.get("task") is False:
             return {"hint": None}
@@ -542,7 +542,7 @@ class Tasks:
             rows = self._dialog(db, workspace, row["conversation_id"], 8) if row["conversation_id"] else []
         content = (f"Задача: {row['title']}\nПодробности: {row['details'] or 'нет'}\nКлиент: {row['client_label'] or 'родитель'}\n"
                    f"Переписка:\n{self._transcript(rows)}")
-        answer = self._ai(actor, workspace, AI_REPLY, content, max_tokens=300, timeout=8)
+        answer = self._ai(actor, workspace, AI_REPLY, content, max_tokens=5000, timeout=10)
         reply = " ".join(str(answer or "").split()).strip('"«» ')
         return {"text": reply[:1000] or None}
 

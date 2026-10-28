@@ -383,7 +383,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     const initial = { title: form.elements.title.value, due: sheetDue, kind: sheet.dataset.kind, details: form.elements.details.value };
     badge.hidden = false; badge.textContent = "AI думает…"; badge.classList.add("busy");
     try {
-      const result = await api(`${base()}/tasks/draft`, { method: "POST", timeoutMs: 9000,
+      const result = await api(`${base()}/tasks/draft`, { method: "POST", timeoutMs: 18000,
         data: { conversation_id: draft.conversation_id, message_ids: draft.sources.map(source => source.id), client_label: draft.client_label } });
       if (seq !== suggestSeq || !sheet.open || sheetTask || sheetDraft?.conversation_id !== draft.conversation_id) return;
       if (!result.ai) { badge.hidden = true; return; }
@@ -671,7 +671,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     if (!doneSheet.open) doneSheet.showModal();
     placeSheet(doneSheet);
     try {
-      const result = await api(`${base()}/tasks/${task.id}/reply`, { method: "POST", timeoutMs: 12000 });
+      const result = await api(`${base()}/tasks/${task.id}/reply`, { method: "POST", timeoutMs: 13000 });
       if (seq !== doneSeq) return;
       if (result.text && !area.value.trim()) { area.value = result.text; label.textContent = "Ответ клиенту · черновик AI"; }
     } catch (_) { /* The operator writes the answer. */ }
@@ -793,7 +793,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     const seq = ++hintSeq;
     await new Promise(resolve => setTimeout(resolve, 900));
     try {
-      const result = await api(`${base()}/tasks/hint`, { method: "POST", timeoutMs: 12000, data: { conversation_id: conversation, text } });
+      const result = await api(`${base()}/tasks/hint`, { method: "POST", timeoutMs: 13000, data: { conversation_id: conversation, text } });
       if (seq !== hintSeq || conversation !== convId || !result.hint) return;
       hint = { ...result.hint, conversation_id: conversation, client_label: clientLabel() };
       hintBar.querySelector("small").textContent = `${hint.title} · ${dueText(hint)}`;
