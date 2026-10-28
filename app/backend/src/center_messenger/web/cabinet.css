@@ -1801,3 +1801,19 @@ body:has(#cabinet[hidden]){overflow:auto}
 .sys,.chat-bubble.system.sys{filter:none;box-shadow:var(--bub-shadow-box),inset 0 0 0 .5px rgba(255,255,255,.28)}
 .sys:hover,.chat-bubble.system.sys:hover{box-shadow:var(--bub-shadow-box),inset 0 0 0 1px rgba(255,255,255,.38)}
 :root[data-theme="dark"] .sys,:root[data-theme="dark"] .chat-bubble.system.sys{box-shadow:var(--bub-shadow-box),inset 0 0 0 .5px rgba(255,255,255,.08)}
+/* «Новая задача»: a round close button and one calm type scale —
+   17 heading · 15 the button · 14 what was written · 13 everything around it · 11 the badge. */
+#task-dialog .task-close{position:relative;width:36px;height:36px;min-width:36px;max-width:36px;min-height:36px;max-height:36px;aspect-ratio:1;padding:0;border-radius:50%}
+#task-dialog .task-close::after{content:"";position:absolute;inset:-4px}
+#task-dialog .task-head h2{font-size:17px}
+#task-dialog .task-ai-badge{font-size:11px}
+#task-dialog .task-actions .btn{font-size:15px;font-weight:650}
+#task-dialog :is(.task-title-box textarea,.task-details textarea,.task-quote-text,.task-pick-value){font-size:14px;line-height:1.4}
+#task-dialog .task-quote-short{font-size:14px}
+#task-dialog .task-quote-mark{font-size:16px}
+#task-dialog :is(.task-sheet-client,.task-field>span,.task-chip,.task-pick-label,.task-details-toggle,.task-details.open .task-details-toggle,.task-details-label,.task-details-preview,.task-quote-fold,.task-quote-more,.task-edit-done){font-size:13px}
+#task-dialog .task-pick-label{line-height:16px}
+#task-dialog .task-pick-value{line-height:18px}
+#task-dialog .task-actions .task-edit-done{font-size:15px}
+/* Phones force 16px into every field so iPhone does not zoom; here that holds only while typing. */
+@media (pointer:coarse){#task-dialog :is(.task-title-box,.task-details) textarea:not(:focus){font-size:14px!important}}
