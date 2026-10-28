@@ -31,7 +31,9 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     { id: 'm1', text: 'Здравствуйте! Подскажите, есть ли места на подготовку к школе для Миши?', direction: 'in', actor_type: 'contact', state: 'received' },
     { id: 'm2', text: 'Анна, добрый день! Да, места есть. Можем предложить вторник и четверг в 17:00.', direction: 'out', actor_type: 'human', state: 'read' },
     { id: 'm3', text: 'Напоминаем о занятии сегодня в 17:00. Будем рады видеть Мишу!', direction: 'out', actor_type: 'automation', template_name: 'Напоминание о занятии', state: 'accepted' },
-    { id: 'm4', text: 'Спасибо! Запишите нас, пожалуйста, на пробное занятие.', direction: 'in', actor_type: 'contact', state: 'received' }
+    { id: 'm4', text: 'Спасибо! Запишите нас, пожалуйста, на пробное занятие.', direction: 'in', actor_type: 'contact', state: 'received' },
+    ...(options.failedSend ? [{ id: 'm5', text: 'Записали Мишу на четверг в 17:00.', direction: 'out', actor_type: 'human', state: 'failed',
+      error: 'AlfaCRM не вернула форму отправки MAX для этой карточки.' }] : [])
   ].map((m, n) => ({ ...m, occurred_at: `2026-10-24T10:0${n}:00Z`, customer_branch_id: '1',
     sort_time: String(1792836000000000 + n * 60000000), crm_order: String(n + 1), version: 1, attachments: [] }));
   const contacts = conversations.slice(0, 9).map((c, n) => ({ id: c.contact_id, name: c.name, status: c.status,

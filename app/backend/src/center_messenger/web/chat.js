@@ -746,6 +746,15 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }
       content.append(meta); bubble.append(content);
       if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
+      // A definite failure (nothing reached the client) can be sent again as a new message.
+      if (message.direction === "out" && message.state === "failed" && !message.deleted && message.text && data.meta?.can_send) {
+        const actions = node("span", undefined, "chat-message-actions");
+        const again = node("button", "Отправить ещё раз", "chat-retry-send"); again.type = "button";
+        again.addEventListener("click", () => resendFailed(id, message.text, false));
+        const edit = node("button", "Изменить", "chat-retry-edit"); edit.type = "button";
+        edit.addEventListener("click", () => resendFailed(id, message.text, true));
+        actions.append(again, edit); bubble.append(actions);
+      }
       wanted.push(bubble);
     }
     patchChildren(history, wanted); history.dataset.conversation = id;
@@ -975,6 +984,18 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }).finally(() => { data.polling = false; }));
     }
     await Promise.all(tasks);
+  }
+  // The failed text goes through the ordinary send path: a new request, the same checks.
+  async function resendFailed(id, text, editFirst) {
+    if (selected !== id || historyBusy) return;
+    const input = $("#chat-input"), draft = input.value;
+    if (editFirst) {
+      input.value = draft.trim() ? `${draft}\n\n${text}` : text; resizeCompose(); renderHeader(); input.focus();
+      return;
+    }
+    input.value = text; resizeCompose();
+    await submit();
+    if (draft.trim() && selected === id && !input.value.trim()) { input.value = draft; const data = cache.get(id); if (data) data.draft = draft; resizeCompose(); renderHeader(); }
   }
   async function submit() {
     const id = selected, data = cache.get(id); if (!data || historyBusy || !data.meta?.can_send) return;

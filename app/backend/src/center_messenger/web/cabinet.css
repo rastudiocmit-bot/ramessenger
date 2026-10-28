@@ -1817,3 +1817,9 @@ body:has(#cabinet[hidden]){overflow:auto}
 #task-dialog .task-actions .task-edit-done{font-size:15px}
 /* Phones force 16px into every field so iPhone does not zoom; here that holds only while typing. */
 @media (pointer:coarse){#task-dialog :is(.task-title-box,.task-details) textarea:not(:focus){font-size:14px!important}}
+
+/* «Отправить ещё раз» under a message that did not go out. */
+.chat-message-actions{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
+.chat-message-actions button{height:32px;min-width:0;padding:0 14px;white-space:nowrap;border-radius:16px;border:1px solid color-mix(in srgb,var(--primary) 30%,var(--surface));
+  background:var(--surface);color:var(--primary);font-size:13px;font-weight:600;cursor:pointer}
+.chat-message-actions .chat-retry-send{background:var(--primary);border-color:var(--primary);color:var(--on-primary)}
