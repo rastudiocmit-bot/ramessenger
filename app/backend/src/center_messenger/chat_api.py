@@ -446,6 +446,7 @@ class ChatReader:
             "state": "failed" if payload.get("failed") else row["send_state"] or (
                       "accepted" if row["direction"] == "out" else "received"),
             "error": ERRORS.get(row["last_error_code"]),
+            "error_code": row["last_error_code"],
             "request_id": row["client_request_id"],
             "template_name": payload.get("template_name"),
         }

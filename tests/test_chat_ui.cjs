@@ -1501,6 +1501,20 @@ test("cancelled outgoing message shows a warning rather than a success check", a
   assert.match(ui.$("#chat-history .chat-message-error").textContent, /Отправка отменена/);
 });
 
+test("a missing or ambiguous MAX recipient cannot be resent into another failed bubble", async t => {
+  for (const code of ["recipient_missing", "multiple_recipients", "invalid_recipient"]) {
+    const ui = setup(t, url => url.pathname.endsWith("/messages") ? history(identifier(1), [message(42, {
+      direction: "out", actor_type: "human", state: "failed", text: "Сообщение",
+      error_code: code, error: "Не удалось определить получателя MAX."
+    })]) : undefined);
+    await ui.app.enter(); await flush();
+    assert.equal(ui.$("#chat-history .chat-retry-send"), null);
+    assert.equal(ui.$("#chat-history .chat-retry-edit"), null);
+    assert.match(ui.$("#chat-history .chat-message-error").textContent, /Проверьте адресата/);
+    assert.equal(ui.calls.filter(url => url.pathname.endsWith("/messages") && url.searchParams.has("request_id")).length, 0);
+  }
+});
+
 test('unknown CRM identity shows exact ID and retry reason without forcing manual linking', async t => {
   const items = [{ ...conversation(1), contact_id: null, status: 'unlinked',
     identity_resolution: {state:'queued', text:'Карточка ожидает загрузки из CRM', customer_id:'99'} }];

@@ -22,6 +22,30 @@ from pydantic import SecretStr
 
 
 class SessionPolicyTests(unittest.TestCase):
+    def test_sibling_peer_lookup_requires_explicit_family_evidence_and_rejects_conflicts(self):
+        from center_messenger.alfa_max import AlfaMaxConnections
+        service = object.__new__(AlfaMaxConnections)
+        service._row = lambda _db, _workspace: {
+            'connection_id': 'channel', 'state': 'active', 'current_crm_connection_id': 'crm',
+            'session_ciphertext': 'sealed', 'crm_origin': 'https://test.s20.online',
+        }
+        service.vault = Mock()
+        target = {'customer_id': 8, 'customer_branch_id': 1, 'max_user_id': None,
+                  'crm_family_contacts': ['verified-contact']}
+        db = Mock()
+        db.execute.side_effect = [Mock(scalar_one_or_none=Mock(return_value=target)),
+                                  Mock(scalars=Mock(return_value=['77']))]
+        resolved = service._send_target_in_transaction(db, 'workspace', 'channel', 'conversation')
+        self.assertEqual(resolved['max_user_id'], '77')
+        query, params = db.execute.call_args_list[1].args
+        self.assertEqual(params['family'], ['verified-contact'])
+        self.assertIn('jsonb_exists_any', str(query))
+        db.execute.side_effect = [Mock(scalar_one_or_none=Mock(return_value=target)),
+                                  Mock(scalars=Mock(return_value=['77', '78']))]
+        with self.assertRaises(AlfaBrowserError) as raised:
+            service._send_target_in_transaction(db, 'workspace', 'channel', 'conversation')
+        self.assertEqual(raised.exception.code, 'multiple_recipients')
+
     def test_operator_and_manager_need_messages_observer_never_sends(self):
         for role in ['operator', 'branch_manager']:
             self.assertTrue(can_send_messages(role, ['messages']))
@@ -500,6 +524,26 @@ class NativeSessionTests(unittest.TestCase):
 
         self.assertEqual((target['branch'], target['customer']), (1, 7))
         self.assertEqual(target['max_user_id'], '77')
+
+    def test_peerless_sibling_message_uses_only_proven_family_peer(self):
+        self.add_customer(self.contact, 1, 8)
+        proven = dict(self.row('1', customer=7, at=self.at), max_user_id='77')
+        latest = self.row('2', customer=8, at=self.at + timedelta(minutes=1))
+        self.project(proven, latest)
+        target = self.service.send_target(self.workspace, self.channel, self.conversation()['id'])
+        self.assertEqual(target['customer'], 8)
+        self.assertEqual(target['max_user_id'], '77')
+
+    def test_conflicting_family_peers_block_a_reply_to_another_sibling(self):
+        self.add_customer(self.contact, 1, 8)
+        self.add_customer(self.contact, 1, 9)
+        first = dict(self.row('1', customer=7, at=self.at), max_user_id='77')
+        second = dict(self.row('2', customer=8, at=self.at + timedelta(minutes=1)), max_user_id='78')
+        latest = self.row('3', customer=9, at=self.at + timedelta(minutes=2))
+        self.project(first, second, latest)
+        with self.assertRaises(AlfaBrowserError) as raised:
+            self.service.send_target(self.workspace, self.channel, self.conversation()['id'])
+        self.assertEqual(raised.exception.code, 'multiple_recipients')
 
     def test_peerless_latest_message_does_not_resolve_conflicting_dialog_peers(self):
         first = dict(self.row('1', at=self.at), max_user_id='77')

@@ -10,6 +10,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   ];
   const statuses = { client: "Клиент", lead: "Лид", archive: "Архивный", unlinked: "Связать с CRM" };
   const sendLabels = { queued: "В очереди", sending: "Отправляем…", accepted: "Принято MAX", delivered: "Доставлено", read: "Прочитано", failed: "Не отправлено", unknown: "Результат неизвестен", cancelled: "Отменено" };
+  const recipientErrors = new Set(["recipient_missing", "multiple_recipients", "invalid_recipient", "max_recipient_missing", "crm_customer_missing"]);
   let generation = 0, listSeq = 0, selectionSeq = 0, linkSeq = 0, cardSeq = 0, detailsSeq = 0;
   let family = null, familySelected = null, familyBusy = false, familyChildChoice = false;
   let familyTimer = null, familyRenderKey = "";
@@ -760,7 +761,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (failedOut && resent) {
         bubble.append(node("small", `Отправлено повторно в ${time(resent.occurred_at)}`, "chat-message-resent"));
       } else {
-        if (failedOut && message.text && data.meta?.can_send) {
+        if (failedOut && message.text && data.meta?.can_send && !recipientErrors.has(message.error_code)) {
           const actions = node("span", undefined, "chat-message-actions");
           actions.append(node("span", "Не отправлено", "chat-message-state"));
           const again = node("button", undefined, "chat-retry-send"); again.type = "button"; again.append(icon("retry"), node("span", "Повторить"));
@@ -769,6 +770,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
           edit.addEventListener("click", () => resendFailed(id, message.text, true));
           actions.append(again, edit); bubble.append(actions);
         }
+        if (failedOut && recipientErrors.has(message.error_code)) bubble.append(node("small", "Проверьте адресата в AlfaCRM. После исправления отправьте новое сообщение.", "chat-message-error"));
         if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
       }
       wanted.push(bubble);

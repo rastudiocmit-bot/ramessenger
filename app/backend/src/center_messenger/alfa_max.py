@@ -1240,16 +1240,23 @@ class AlfaMaxConnections:
             raise AlfaBrowserError("invalid_recipient")
         if peer is None:
             # AlfaCRM need not repeat explicit peer metadata in every journal
-            # row. Reuse it only when every proven incoming row for this exact
-            # conversation, customer and branch names the same MAX dialog.
+            # row. Siblings may have separate CRM Customer cards. Reuse only
+            # explicit incoming evidence from this card or the same proven CRM
+            # family contact; a matching phone number is never sufficient.
+            family = target.get("crm_family_contacts") or []
+            if not isinstance(family, list) or any(not isinstance(value, str) for value in family):
+                family = []
             peers = set(db.execute(
                 text(
                     "SELECT DISTINCT m.payload->>'max_user_id' "
                     "FROM conversations c JOIN messages m ON "
                     "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
                     "WHERE c.workspace_id=:w AND c.id=:conv AND m.direction='in' "
-                    "AND m.payload->>'customer_id'=:customer "
-                    "AND m.payload->>'customer_branch_id'=:branch "
+                    "AND ((m.payload->>'customer_id'=:customer "
+                    "AND m.payload->>'customer_branch_id'=:branch) "
+                    "OR (cardinality(CAST(:family AS text[]))>0 "
+                    "AND jsonb_typeof(m.payload->'crm_family_contacts')='array' "
+                    "AND jsonb_exists_any(m.payload->'crm_family_contacts',CAST(:family AS text[])))) "
                     "AND coalesce(m.payload->>'deleted','false')<>'true' "
                     "AND m.payload->>'max_user_id' IS NOT NULL"
                 ),
@@ -1258,6 +1265,7 @@ class AlfaMaxConnections:
                     "conv": conversation,
                     "customer": str(target["customer_id"]),
                     "branch": str(target["customer_branch_id"]),
+                    "family": family,
                 },
             ).scalars())
             if any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in peers):
