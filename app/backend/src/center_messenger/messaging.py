@@ -467,6 +467,7 @@ class Messaging:
                             "source": "center_messenger_alfa_max",
                             "crm_branch": target["branch"],
                             "customer_id": target["customer"],
+                            "max_user_id": target.get("max_user_id"),
                         }
                     ),
                 },
@@ -489,7 +490,8 @@ class Messaging:
                     from center_messenger.alfa_session import control
                     if control(latest['session_snapshot']).get('needs_check'):
                         raise AlfaBrowserError('session_check_pending')
-                    if (latest['branch'], latest['customer']) != (target['branch'], target['customer']):
+                    if ((latest['branch'], latest['customer'], latest.get('max_user_id'))
+                            != (target['branch'], target['customer'], target.get('max_user_id'))):
                         raise AlfaBrowserError('settings_changed')
                     self._native_phase(db, job, attempt, 'post_started')
                     # Correlate a delayed/unknown send with the source journal
