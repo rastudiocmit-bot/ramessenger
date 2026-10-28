@@ -185,7 +185,8 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     } else if (p.endsWith('/messages')) {
       const conversation = conversations.find(c => p.includes('/' + c.id + '/'));
       if (method === 'POST') {
-        messages.push({ ...messages[1], id: 'sent-' + messages.length, text: entry.body.text });
+        messages.push({ ...messages[1], id: 'sent-' + messages.length, text: entry.body.text, state: 'accepted', error: undefined,
+          occurred_at: '2026-10-24T10:30:00Z', sort_time: String(BigInt(messages.at(-1).sort_time) + 60000000n), crm_order: String(messages.length + 1) });
         payload = { request_id: entry.body.request_id, state: 'accepted' };
       } else payload = { conversation, messages, next_seq: messages.length, has_more: false, more_changes: false, total: messages.length };
     } else if (p.endsWith('/handled')) { const c = conversations.find(c => p.includes('/' + c.id + '/')); c.unread = false; c.unread_count = 0; c.revision = (c.revision || 1) + 1; payload = {conversation:c}; }

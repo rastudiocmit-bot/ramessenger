@@ -693,7 +693,10 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const next = messages[i + 1], previous = messages[i - 1];
       const grouped = Boolean(next && next.actor_type !== "automation" && next.direction === message.direction && next.actor_type === message.actor_type && dayKey(next.occurred_at) === messageDay);
       const first = !previous || previous.actor_type !== message.actor_type || previous.direction !== message.direction || dayKey(previous.occurred_at) !== messageDay;
-      const key = `message:${message.id}`, messageKey = JSON.stringify([message, todayKey, state.workspace?.timezone]);
+      // A failed message whose text later went out shows «sent again» instead of the actions.
+      const resent = message.direction === "out" && message.state === "failed" && message.text
+        ? messages.slice(i + 1).find(m => m.direction === "out" && m.text === message.text && !["failed", "cancelled"].includes(m.state)) : null;
+      const key = `message:${message.id}`, messageKey = JSON.stringify([message, todayKey, state.workspace?.timezone, resent?.id || null, Boolean(data.meta?.can_send)]);
       const retained = existing.get(key);
       if (retained?.messageKey === messageKey) {
         if (message.actor_type !== "automation") { retained.classList.toggle("first", first); retained.classList.toggle("last", !grouped); }
@@ -745,15 +748,21 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         status.append(icon(["delivered", "read"].includes(message.state) ? "checks" : ["queued", "sending", "unknown"].includes(message.state) ? "clock" : ["failed", "cancelled"].includes(message.state) ? "warn" : "check"), node("span", sendLabels[message.state] || "", "sr")); meta.append(status);
       }
       content.append(meta); bubble.append(content);
-      if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
-      // A definite failure (nothing reached the client) can be sent again as a new message.
-      if (message.direction === "out" && message.state === "failed" && !message.deleted && message.text && data.meta?.can_send) {
-        const actions = node("span", undefined, "chat-message-actions");
-        const again = node("button", "Отправить ещё раз", "chat-retry-send"); again.type = "button";
-        again.addEventListener("click", () => resendFailed(id, message.text, false));
-        const edit = node("button", "Изменить", "chat-retry-edit"); edit.type = "button";
-        edit.addEventListener("click", () => resendFailed(id, message.text, true));
-        actions.append(again, edit); bubble.append(actions);
+      // A definite failure (nothing reached the client): one quiet line «Не отправлено · Повторить · Изменить».
+      const failedOut = message.direction === "out" && message.state === "failed" && !message.deleted;
+      if (failedOut && resent) {
+        bubble.append(node("small", `Отправлено повторно в ${time(resent.occurred_at)}`, "chat-message-resent"));
+      } else {
+        if (failedOut && message.text && data.meta?.can_send) {
+          const actions = node("span", undefined, "chat-message-actions");
+          actions.append(node("span", "Не отправлено", "chat-message-state"));
+          const again = node("button", undefined, "chat-retry-send"); again.type = "button"; again.append(icon("retry"), node("span", "Повторить"));
+          again.addEventListener("click", () => resendFailed(id, message.text, false));
+          const edit = node("button", undefined, "chat-retry-edit"); edit.type = "button"; edit.append(icon("edit"), node("span", "Изменить"));
+          edit.addEventListener("click", () => resendFailed(id, message.text, true));
+          actions.append(again, edit); bubble.append(actions);
+        }
+        if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
       }
       wanted.push(bubble);
     }

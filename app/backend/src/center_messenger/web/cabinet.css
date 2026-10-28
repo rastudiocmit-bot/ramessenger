@@ -1818,8 +1818,17 @@ body:has(#cabinet[hidden]){overflow:auto}
 /* Phones force 16px into every field so iPhone does not zoom; here that holds only while typing. */
 @media (pointer:coarse){#task-dialog :is(.task-title-box,.task-details) textarea:not(:focus){font-size:14px!important}}
 
-/* «Отправить ещё раз» under a message that did not go out. */
-.chat-message-actions{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
-.chat-message-actions button{height:32px;min-width:0;padding:0 14px;white-space:nowrap;border-radius:16px;border:1px solid color-mix(in srgb,var(--primary) 30%,var(--surface));
-  background:var(--surface);color:var(--primary);font-size:13px;font-weight:600;cursor:pointer}
-.chat-message-actions .chat-retry-send{background:var(--primary);border-color:var(--primary);color:var(--on-primary)}
+/* A message that did not go out: one quiet line under it, links in the site's blue. */
+.chat-message-actions{display:flex;align-items:center;justify-content:flex-end;gap:14px;margin:5px 4px 0;flex-wrap:wrap}
+.chat-message-state{font-size:13px;font-weight:500;color:var(--muted)}
+.chat-message-actions button{display:inline-flex;align-items:center;gap:5px;height:24px;min-height:0;min-width:0;padding:0;margin:0;border:0;border-radius:6px;
+  background:none;box-shadow:none;color:var(--primary);font-size:13px;font-weight:600;white-space:nowrap;cursor:pointer;position:relative}
+.chat-message-actions button::after{content:"";position:absolute;inset:-10px -6px}
+.chat-message-actions button svg{width:15px;height:15px;stroke-width:2.2}
+.chat-message-actions button:hover span{text-decoration:underline}
+.chat-bubble .chat-message-error{display:block;margin:4px 4px 0;font-size:12px;line-height:1.4;color:var(--muted);text-align:right}
+.chat-bubble.in .chat-message-error,.chat-bubble.in .chat-message-actions{text-align:left;justify-content:flex-start}
+.chat-message-resent{display:block;margin:5px 4px 0;font-size:12px;color:var(--muted);text-align:right}
+/* Twice the air between messages: 6 px within one speaker's run, 24 px when the speaker changes. */
+.stream{gap:6px}
+.msg.first{margin-top:18px}
