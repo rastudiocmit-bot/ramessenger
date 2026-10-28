@@ -76,6 +76,46 @@ class SessionPolicyTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, expected)
             self.assertEqual(raised.exception.http_status, status)
 
+    def test_send_reuses_card_max_id_when_form_action_omits_it(self):
+        from center_messenger.alfa_max_browser import AlfaMaxBrowser
+        page, context = Mock(), Mock()
+        page.url = 'https://test.s20.online/company/1/customer/view?id=42'
+        card = 'https://test.s20.online/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42&maxUserId=77'
+        action = 'https://test.s20.online/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42'
+        form = ('<form action="' + action.replace('&', '&amp;') + '"><input name="_csrf" value="synthetic">'
+                '<input name="MaxComposeBulkForm[related_ids][]" value="42"><textarea name="MaxComposeBulkForm[text]"></textarea></form>')
+        page.goto.return_value = SimpleNamespace(status=200)
+        page.content.return_value = '<a href="' + card.replace('&', '&amp;') + '">MAX</a>'
+        page.evaluate.side_effect = [
+            {'status': 200, 'url': card, 'text': form},
+            {'status': 200, 'url': card, 'text': '{"success":true}'},
+        ]
+        context.storage_state.return_value = {'cookies': [], 'origins': []}
+        with patch.object(AlfaMaxBrowser, '_open', return_value=(Mock(), Mock(), context, page)):
+            result = AlfaMaxBrowser()._send_inline('https://test.s20.online', {'cookies': []}, 1, 42, 'Synthetic reply')
+        self.assertTrue(result['accepted'])
+        post = page.evaluate.call_args_list[1].args[1]
+        self.assertIn('maxUserId=77', post['url'])
+
+    def test_compose_form_rejects_conflicting_card_and_action_max_ids(self):
+        from center_messenger.alfa_max_browser import parse_compose_form
+        card = 'https://test.s20.online/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42&maxUserId=77'
+        action = '/company/1/max/bulk?related_class=Customer&amp;related_ids%5B%5D=42&amp;maxUserId=78'
+        html = ('<form action="' + action + '"><input name="_csrf" value="synthetic">'
+                '<input name="MaxComposeBulkForm[related_ids][]" value="42"><textarea name="MaxComposeBulkForm[text]"></textarea></form>')
+        with self.assertRaises(AlfaBrowserError) as raised:
+            parse_compose_form(html, origin='https://test.s20.online', branch=1, customer=42, compose_url=card)
+        self.assertEqual(raised.exception.code, 'invalid_recipient')
+
+    def test_compose_form_still_rejects_when_max_id_is_absent_everywhere(self):
+        from center_messenger.alfa_max_browser import parse_compose_form
+        card = 'https://test.s20.online/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42'
+        html = ('<form action="' + card.replace('&', '&amp;') + '"><input name="_csrf" value="synthetic">'
+                '<input name="MaxComposeBulkForm[related_ids][]" value="42"><textarea name="MaxComposeBulkForm[text]"></textarea></form>')
+        with self.assertRaises(AlfaBrowserError) as raised:
+            parse_compose_form(html, origin='https://test.s20.online', branch=1, customer=42, compose_url=card)
+        self.assertEqual(raised.exception.code, 'recipient_missing')
+
     def test_known_acceptance_survives_browser_cookie_export_failure(self):
         from center_messenger.alfa_max_browser import AlfaMaxBrowser
         page, context = Mock(), Mock()

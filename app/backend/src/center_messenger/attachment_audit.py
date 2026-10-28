@@ -227,7 +227,9 @@ class BrowserProbe:
                 if result.get('error'):
                     raise AlfaBrowserError('form_unavailable')
                 body = result.get('text', '')
-            parsed = parse_compose_form(body, origin=self.origin, branch=branch, customer=customer)
+            parsed = parse_compose_form(
+                body, origin=self.origin, branch=branch, customer=customer, compose_url=address,
+            )
             if 'compose_url' not in parsed:
                 return {'compose': compose_report(body), 'feed_initial_html_only': True,
                         'feed_candidates': len(feed)}, feed
