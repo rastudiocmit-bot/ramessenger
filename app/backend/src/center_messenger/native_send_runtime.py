@@ -159,7 +159,7 @@ def run_send(origin, state, branch, customer, message, *, before_post=None,
     os.set_blocking(process.stdin.fileno(), False)
     os.set_blocking(process.stdout.fileno(), False)
     selector.register(process.stdout, selectors.EVENT_READ)
-    buffer, post_started, accepted = b'', False, None
+    buffer, post_started, accepted, failure = b'', False, None, None
     next_heartbeat, next_discovery = start, start
     try:
         while True:
@@ -225,6 +225,10 @@ def run_send(origin, state, branch, customer, message, *, before_post=None,
                             code = 'send_unknown' if post_started else 'send_prepare_failed'
                         if post_started and code not in {'crm_rejected', 'max_recipient_missing'}:
                             code = 'send_unknown'
+                        # The child's stderr is discarded, so its bounded diagnostics travel here.
+                        for note in (event.get('diagnostics') or [])[:8]:
+                            if isinstance(note, str):
+                                logger.warning('Native send diagnostic: %s', ' '.join(note.split())[:2000])
                         error = AlfaBrowserError(code)
                         if isinstance(event.get('browser_state'), dict):
                             error.browser_state = event['browser_state']
@@ -234,16 +238,22 @@ def run_send(origin, state, branch, customer, message, *, before_post=None,
     except AlfaBrowserError as error:
         if accepted:
             return accepted
+        failure = error.code
         if post_started and error.code not in {'crm_rejected', 'max_recipient_missing', 'send_unknown'}:
+            failure = 'send_unknown'
             raise AlfaBrowserError('send_unknown') from None
         raise
     except Exception:
         if accepted:
             return accepted
-        raise AlfaBrowserError('send_unknown' if post_started else 'send_prepare_failed') from None
+        failure = 'send_unknown' if post_started else 'send_prepare_failed'
+        raise AlfaBrowserError(failure) from None
     finally:
         selector.close()
         tree.close()
+        if failure:
+            logger.warning('Native send failed code=%s post_started=%s duration_ms=%s',
+                           failure, post_started, round((time.monotonic() - start) * 1000))
         logger.info('Native send attempt finished duration_ms=%s post_started=%s accepted=%s',
                     round((time.monotonic() - start) * 1000), post_started, bool(accepted))
 
@@ -253,9 +263,25 @@ def _emit(value):
     sys.stdout.flush()
 
 
+class _Notes(logging.Handler):
+    """Keeps the child's own warnings (already free of URLs, text and secrets) for the parent's log."""
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.items = []
+
+    def emit(self, record):
+        if len(self.items) < 8 and record.name.startswith('center_messenger'):
+            try:
+                self.items.append(record.getMessage()[:2000])
+            except Exception:
+                pass
+
+
 def main():
     # No credentials in argv, environment overrides, temporary files or logs.
     from center_messenger.alfa_max_browser import AlfaMaxBrowser
+    notes = _Notes()
+    logging.getLogger('center_messenger').addHandler(notes)
     data = json.loads(sys.stdin.buffer.readline(MAX_PACKET + 1))
     def prepare():
         _emit({'event': 'before_post'})
@@ -270,12 +296,13 @@ def main():
             on_rejected=lambda code: _emit({'event': 'error', 'code': code}))
         _emit({'event': 'result', 'result': result})
     except AlfaBrowserError as error:
-        packet = {'event': 'error', 'code': error.code}
+        packet = {'event': 'error', 'code': error.code, 'diagnostics': notes.items}
         if isinstance(getattr(error, 'browser_state', None), dict):
             packet['browser_state'] = error.browser_state
         _emit(packet)
-    except Exception:
-        _emit({'event': 'error', 'code': 'send_prepare_failed'})
+    except Exception as error:
+        _emit({'event': 'error', 'code': 'send_prepare_failed',
+               'diagnostics': notes.items + [f'child_exception={type(error).__name__}']})
 
 
 if __name__ == '__main__':

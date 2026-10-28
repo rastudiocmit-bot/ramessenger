@@ -31,6 +31,16 @@ class NativeSendRuntimeTests(unittest.TestCase):
                         1, 42, 'Synthetic reply', command=[sys.executable, '-c', PREFIX + code],
                         budget=options.pop('budget', .8), **options)
 
+    def test_child_diagnostics_reach_the_server_log(self):
+        # The child's stderr is discarded; its sanitised notes ride on the error event.
+        note = 'AlfaCRM MAX compose form rejected phase=parse_compose_form reason=form_unavailable status=200'
+        with self.assertLogs('center_messenger.native_send_runtime', 'WARNING') as logs, self.assertRaises(AlfaBrowserError) as raised:
+            self.run_child("emit({'event':'error','code':'form_unavailable','diagnostics':[%r]})" % note)
+        self.assertEqual(raised.exception.code, 'form_unavailable')
+        joined = '\n'.join(logs.output)
+        self.assertIn('Native send diagnostic: ' + note, joined)
+        self.assertIn('Native send failed code=form_unavailable post_started=False', joined)
+
     def test_hung_preparation_is_bounded_and_never_requests_post(self):
         before = Mock()
         started = time.monotonic()
