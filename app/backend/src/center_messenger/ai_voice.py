@@ -501,7 +501,7 @@ class AiVoice:
         try:
             answer = client.complete(raw, prompt=agent["prompt"], model=agent["model"],
                                      temperature=float(agent["temperature"]), api_key=key,
-                                     folder_id=creds["folder"], max_tokens=min(6000, max(2048, len(raw) * 3)) if voice_task else 3000, **extra)
+                                     folder_id=creds["folder"], max_tokens=min(8000, max(5000, len(raw) * 3)) if voice_task else 3000, **extra)
         except YandexError as failure:
             return raw, (0, 0), 0.0, True, failure.code
         tokens = (answer["input_tokens"], answer["output_tokens"])
