@@ -46,6 +46,17 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       if (items.some(item => item.id === chosen)) select.value = chosen;
     };
     fill(agentForm.elements.task, settings.tasks);
+    if (!agentForm.dataset.taskPrompt) {
+      agentForm.dataset.taskPrompt = "1";
+      // A new agent for tasks starts from the studio's ready rules instead of the dictation prompt.
+      agentForm.elements.task.addEventListener("change", () => {
+        const f = agentForm.elements, ready = settings?.task_prompts?.[f.task.value];
+        if (!editing && ready && (!f.prompt.value.trim() || f.prompt.value === settings?.default_prompt)) {
+          f.prompt.value = ready;
+          if (f.name.value === "Чистовик голосового ответа") f.name.value = "Задачи из сообщений";
+        }
+      });
+    }
     renderModels(agentForm.elements.model.value || editing?.model || settings.default_model);
     for (const [selector, configured] of [["#ai-cloud-card", settings.configured], ["#ai-deepseek-card", ds.configured]]) {
       const details = $(selector).querySelector(".gateway-credentials"); if (details) details.open = !configured;

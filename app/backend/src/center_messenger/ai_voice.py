@@ -49,7 +49,17 @@ def provider_of(model):
 def model_cost(model, input_tokens, output_tokens):
     price = CATALOG.get(model, CATALOG[DEFAULT_MODEL])
     return (input_tokens * price["input"] + output_tokens * price["output"]) / 1000
-TASKS = {"voice_input": "Голосовой ввод", "text_processing": "Обработка текста"}
+TASKS = {"voice_input": "Голосовой ввод", "text_processing": "Обработка текста", "tasks": "Задачи из сообщений"}
+# The studio's own rules for tasks; the reply format itself is fixed by the task feature.
+TASK_AGENT_NAME = "Задачи из сообщений"
+TASK_AGENT_PROMPT = (
+    "Ты помогаешь администратору детской студии «Развивайся» ставить задачи по переписке с родителями.\n"
+    "— «Что сделать» начинай с глагола: «Записать…», «Отправить…», «Уточнить…», «Перезвонить…».\n"
+    "— Называй ребёнка по имени и конкретику из сообщений: занятие, группу, день, время, сумму, абонемент.\n"
+    "— Если сообщений несколько, перечисли все действия, ничего не теряй.\n"
+    "— Подробности — короткие пункты, каждый с новой строки через «— ».\n"
+    "— Не выдумывай того, чего нет в сообщениях; без приветствий, оценок и смайликов."
+)
 VOICE_PER_HOUR = 60
 # Uvicorn's configured INFO handler also captures successful/slow attempts;
 # the unconfigured application root logger otherwise drops INFO events.
@@ -188,6 +198,7 @@ class AiVoice:
             "models": [{"id": key, "title": value["title"], "provider": value["provider"],
                         "provider_title": PROVIDERS[value["provider"]]} for key, value in CATALOG.items()],
             "tasks": [{"id": key, "title": value} for key, value in TASKS.items()],
+            "task_prompts": {"tasks": TASK_AGENT_PROMPT},
             "default_model": DEFAULT_MODEL, "default_prompt": DEFAULT_PROMPT,
         }
 
@@ -356,9 +367,32 @@ class AiVoice:
             raise AuthError(404, "Агент не найден.")
         return row
 
+    def _ensure_task_agent(self, db, workspace, actor):
+        """Studios that already use AI get a ready agent for tasks once; a deleted one is not recreated."""
+        if db.execute(text("SELECT 1 FROM ai_agents WHERE workspace_id=:w AND task='tasks' LIMIT 1"),
+                      {"w": workspace}).first():
+            return
+        base = db.execute(text(
+            "SELECT model FROM ai_agents WHERE workspace_id=:w AND enabled AND deleted_at IS NULL "
+            "ORDER BY (task='text_processing') DESC, is_default DESC, updated_at DESC LIMIT 1"),
+            {"w": workspace}).mappings().one_or_none()
+        if base is None:
+            return
+        agent_id = uuid4()
+        values = {"name": TASK_AGENT_NAME, "prompt": TASK_AGENT_PROMPT, "task": "tasks", "model": base["model"],
+                  "temperature": 0.1, "enabled": True, "is_default": True}
+        db.execute(text(
+            "INSERT INTO ai_agents(workspace_id,id,name,task,model,prompt,temperature,enabled,is_default,updated_by) "
+            "VALUES (:w,:id,:n,'tasks',:m,:p,:t,true,true,:u)"),
+            {"w": workspace, "id": agent_id, "n": values["name"], "m": values["model"], "p": values["prompt"],
+             "t": values["temperature"], "u": actor.user_id})
+        self._version(db, workspace, agent_id, 1, values, actor)
+
     def agents(self, actor, workspace):
-        with self.accounts.transaction(actor, snapshot=True) as db:
+        with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
+            self._lock_workspace(db, workspace)
+            self._ensure_task_agent(db, workspace, actor)
             rows = db.execute(text(
                 "SELECT * FROM ai_agents WHERE workspace_id=:w AND deleted_at IS NULL "
                 "ORDER BY is_default DESC, created_at, id"
@@ -535,10 +569,13 @@ class AiVoice:
                 return None
             agent = db.execute(text(
                 "SELECT * FROM ai_agents WHERE workspace_id=:w AND enabled AND deleted_at IS NULL "
-                "ORDER BY (task='text_processing') DESC, is_default DESC, updated_at DESC LIMIT 1"),
+                "ORDER BY (task='tasks') DESC, (task='text_processing') DESC, is_default DESC, updated_at DESC LIMIT 1"),
                 {"w": workspace}).mappings().one_or_none()
             if agent is None:
                 return None
+            if agent["task"] == "tasks":
+                # The studio's agent adds its rules; the reply format stays the feature's own.
+                instruction = f"{instruction}\n\nПравила студии (агент «{agent['name']}»):\n{agent['prompt']}"
             provider = provider_of(agent["model"])
             creds = self._credentials(db, workspace, yandex=False, selected={provider})
         key = creds.get(provider)
@@ -555,7 +592,8 @@ class AiVoice:
             extra.pop("api_key")
             extra["protocol"] = creds.get("gateways", {}).get(provider, {}).get("protocol", "chat")
         try:
-            answer = client.complete(content, prompt=instruction, model=agent["model"], temperature=0.1, api_key=key,
+            temperature = float(agent["temperature"]) if agent["task"] == "tasks" else 0.1
+            answer = client.complete(content, prompt=instruction, model=agent["model"], temperature=temperature, api_key=key,
                                      folder_id=creds["folder"], max_tokens=max_tokens, **extra)
         except YandexError as failure:
             self._usage(actor, workspace, kind="task", agent=agent["id"], outcome="error", error=failure.code)
