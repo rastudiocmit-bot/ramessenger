@@ -33,6 +33,42 @@ class AccessTests(unittest.TestCase):
         self.addCleanup(self.scope.stop)
         self.queue = access.Queue(self.root / 'requests.sqlite')
 
+    def test_long_audit_emits_heartbeat_without_resending_stdin_or_restarting(self):
+        process = Mock(returncode=0)
+        process.communicate.side_effect = [subprocess.TimeoutExpired('docker', 10),
+                                           ('{"stage":"complete"}', None)]
+        context = Mock()
+        context.__enter__ = Mock(return_value=process)
+        context.__exit__ = Mock(return_value=False)
+        with patch.object(access.subprocess, 'Popen', return_value=context) as spawn, \
+             patch.object(access, 'print') as output:
+            access.run_audit('GET-only script')
+        spawn.assert_called_once()
+        self.assertEqual(process.communicate.call_args_list[0].kwargs['input'], 'GET-only script')
+        self.assertIsNone(process.communicate.call_args_list[1].kwargs['input'])
+        self.assertTrue(any('проверка выполняется' in str(call) for call in output.call_args_list))
+        process.kill.assert_not_called()
+
+    def test_audit_has_a_hard_process_deadline(self):
+        process = Mock()
+        context = Mock()
+        context.__enter__ = Mock(return_value=process)
+        context.__exit__ = Mock(return_value=False)
+        with patch.object(access.subprocess, 'Popen', return_value=context), \
+             patch.object(access.time, 'monotonic', side_effect=[0, 361]):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                access.run_audit('GET-only script')
+        process.kill.assert_called_once()
+        process.communicate.assert_called_once_with()
+
+    def test_duplicate_audit_does_not_start_a_second_browser(self):
+        (self.root / 'diagnose_max_recipients.py').write_text('GET-only script')
+        with access.worker_lock(self.root / 'audit.lock'), \
+             patch.object(access, 'run_audit') as run, patch.object(access, 'print') as output:
+            access.audit()
+        run.assert_not_called()
+        self.assertIn('audit_running', output.call_args.args[0])
+
     def test_only_exact_commands_and_full_sha_are_allowed(self):
         for command in ['status', 'logs', 'deploy-logs', 'audit', 'deploy ' + A]:
             self.assertTrue(access.parse_command(command))

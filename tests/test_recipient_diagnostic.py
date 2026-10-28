@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import Mock
+from contextlib import contextmanager
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'app/backend/src'))
@@ -17,6 +18,84 @@ BASE = '/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42'
 
 
 class RecipientDiagnosticTests(unittest.TestCase):
+    def wait_scope(self):
+        clock = [0.0]
+        self.enterContext(patch.object(audit.time, 'monotonic', side_effect=lambda: clock[0]))
+        self.enterContext(patch.object(audit.time, 'sleep', side_effect=lambda n: clock.__setitem__(0, clock[0] + n)))
+        status = {'state': 'active', 'needs_check': False, 'queued_sends': 0}
+        self.enterContext(patch.object(audit, 'browser_status', return_value=status))
+        return clock, status
+
+    def test_busy_browser_is_waited_for_without_restarting_the_probe(self):
+        clock, _ = self.wait_scope()
+        service, lease, report = Mock(), {'token': 'private-token'}, {}
+        service.sessions.claim.side_effect = [audit.AlfaBrowserError('browser_busy'),
+                                             audit.AlfaBrowserError('browser_busy'), lease]
+        with audit.wait_for_browser(service, 'w', 'c', report) as acquired:
+            self.assertIs(acquired, lease)
+        self.assertEqual(clock[0], 1)
+        service.sessions.release.assert_called_once_with(lease)
+        self.assertTrue(report['browser_wait']['acquired'])
+        self.assertNotIn('private-token', json.dumps(report))
+
+    def test_wait_timeout_does_not_release_or_replace_another_lease(self):
+        self.wait_scope()
+        service, report = Mock(), {}
+        service.sessions.claim.side_effect = audit.AlfaBrowserError('browser_busy')
+        with self.assertRaises(audit.AlfaBrowserError) as caught:
+            with audit.wait_for_browser(service, 'w', 'c', report, seconds=2):
+                self.fail('busy browser must never be entered')
+        self.assertEqual(caught.exception.code, 'browser_wait_timeout')
+        service.sessions.release.assert_not_called()
+        self.assertEqual(report['browser_wait']['waited_seconds'], 2)
+
+    def test_busy_status_reads_a_snapshot_and_does_not_expose_session_tokens(self):
+        service, db = Mock(), Mock()
+        @contextmanager
+        def transaction(**scope):
+            self.assertEqual(scope, {'workspace_id': 'w', 'snapshot': True})
+            yield db
+        service.accounts.transaction = transaction
+        service._row.return_value = {'connection_id': 'c', 'state': 'active', 'last_sync_at': None,
+            'session_ciphertext': 'encrypted-secret', 'history_cursor': {'session_control': {
+                'lease': 'lease-secret', 'until': '2999-01-01T00:00:00+00:00',
+                'recovery_password': 'password-secret'}}}
+        db.execute.return_value.scalar_one.side_effect = [True, 2]
+        report = audit.browser_status(service, 'w', 'c')
+        self.assertTrue(report['lease_active'])
+        self.assertTrue(report['sync_running'])
+        self.assertEqual(report['queued_sends'], 2)
+        self.assertNotIn('secret', json.dumps(report))
+
+    def test_auth_check_is_distinguished_from_occupied_browser(self):
+        _, status = self.wait_scope()
+        status['needs_check'] = True
+        service = Mock()
+        with self.assertRaises(audit.AlfaBrowserError) as caught:
+            with audit.wait_for_browser(service, 'w', 'c', {}):
+                self.fail('pending session recovery must not be entered')
+        self.assertEqual(caught.exception.code, 'session_check_pending')
+        service.sessions.claim.assert_not_called()
+
+    def test_actual_sends_are_allowed_to_finish_before_optional_audit(self):
+        clock, status = self.wait_scope()
+        status['queued_sends'] = 1
+        def finish_send(seconds):
+            clock[0] += seconds
+            status['queued_sends'] = 0
+        with patch.object(audit.time, 'sleep', side_effect=finish_send):
+            with audit.wait_for_browser(Mock(), 'w', 'c', {}):
+                self.assertGreater(clock[0], 0)
+
+    def test_error_inside_probe_is_not_retried_and_lease_is_released(self):
+        self.wait_scope()
+        service = Mock()
+        with self.assertRaises(audit.AlfaBrowserError):
+            with audit.wait_for_browser(service, 'w', 'c', {}):
+                raise audit.AlfaBrowserError('browser_busy')
+        service.sessions.claim.assert_called_once()
+        service.sessions.release.assert_called_once()
+
     def test_only_exact_customer_routes_are_reported_and_equivalent_links_collapse(self):
         html = (f'<a href="{BASE}&maxUserId=77">One</a>'
                 f'<a data-url="{ORIGIN}{BASE}&maxUserId=77">Two</a>'
