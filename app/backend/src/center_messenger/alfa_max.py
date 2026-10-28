@@ -1238,6 +1238,33 @@ class AlfaMaxConnections:
             not isinstance(peer, str) or not re.fullmatch(r"[1-9][0-9]{0,18}", peer)
         ):
             raise AlfaBrowserError("invalid_recipient")
+        if peer is None:
+            # AlfaCRM need not repeat explicit peer metadata in every journal
+            # row. Reuse it only when every proven incoming row for this exact
+            # conversation, customer and branch names the same MAX dialog.
+            peers = set(db.execute(
+                text(
+                    "SELECT DISTINCT m.payload->>'max_user_id' "
+                    "FROM conversations c JOIN messages m ON "
+                    "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
+                    "WHERE c.workspace_id=:w AND c.id=:conv AND m.direction='in' "
+                    "AND m.payload->>'customer_id'=:customer "
+                    "AND m.payload->>'customer_branch_id'=:branch "
+                    "AND coalesce(m.payload->>'deleted','false')<>'true' "
+                    "AND m.payload->>'max_user_id' IS NOT NULL"
+                ),
+                {
+                    "w": workspace,
+                    "conv": conversation,
+                    "customer": str(target["customer_id"]),
+                    "branch": str(target["customer_branch_id"]),
+                },
+            ).scalars())
+            if any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in peers):
+                raise AlfaBrowserError("invalid_recipient")
+            if len(peers) > 1:
+                raise AlfaBrowserError("multiple_recipients")
+            peer = next(iter(peers), None)
         session = self.vault.open_browser_state(workspace, connection, row["session_ciphertext"])
         return {
             "origin": row["crm_origin"],

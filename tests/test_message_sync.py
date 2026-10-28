@@ -2349,6 +2349,21 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(len(self.messages()),2)
         self.assertEqual(new_records(self.db,self.workspace,self.channel,1,[first,second]),[])
 
+    def test_proven_history_peer_backfills_the_saved_row_without_duplicating_it(self):
+        from center_messenger.history_receipts import new_records
+        original = self.row('100', body='Same text')
+        self.project(original)
+        self.assertIsNone(self.messages()[0]['payload'].get('max_user_id'))
+        proven = dict(original, max_user_id='77')
+        fresh = new_records(self.db, self.workspace, self.channel, 1, [proven])
+        self.assertEqual([row['record_id'] for row in fresh], ['100'])
+        self.project(*fresh)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.messages()[0]['payload']['max_user_id'], '77')
+        self.assertEqual(new_records(self.db, self.workspace, self.channel, 1, [proven]), [])
+        self.project(proven)
+        self.assertEqual(len(self.messages()), 1)
+
     def family_jobs(self):
         return list(self.db.execute(text("SELECT * FROM outbox_events WHERE workspace_id=:w AND topic='crm.card.refresh'"),
             {'w':self.workspace}).mappings())
@@ -3075,7 +3090,10 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(person['balance'],'4123.75')
         self.assertEqual(person['cards'][0]['paid_lesson_count'],5)
         self.assertEqual(person['cards'][0]['subscriptions'][0]['balance'],'2725.00')
-        self.assertEqual(person['cards'][0]['balance_updated_at'],(self.at+timedelta(hours=2)).isoformat())
+        # PostgreSQL returns timestamptz in UTC; the API may preserve an equivalent
+        # offset in other adapters. Compare the instant, not its spelling.
+        self.assertEqual(datetime.fromisoformat(person['cards'][0]['balance_updated_at']),
+                         self.at+timedelta(hours=2))
         # A newly published customer row supersedes an older detail-cache total.
         self.snapshot['finished_at']=self.at+timedelta(hours=3)
         person=reader.detail(None,self.workspace,self.contact)['students'][0]

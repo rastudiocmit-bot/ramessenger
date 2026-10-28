@@ -490,6 +490,28 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(payload['max_user_id'], '77')
         self.assertEqual(self.native_command(command)['state'], 'accepted')
 
+    def test_peerless_latest_message_keeps_the_only_proven_dialog_peer(self):
+        proven = dict(self.row('1', at=self.at), max_user_id='77')
+        latest = self.row('2', at=self.at + timedelta(minutes=1))
+        self.project(proven, latest)
+
+        target = self.service.send_target(
+            self.workspace, self.channel, self.conversation()['id'])
+
+        self.assertEqual((target['branch'], target['customer']), (1, 7))
+        self.assertEqual(target['max_user_id'], '77')
+
+    def test_peerless_latest_message_does_not_resolve_conflicting_dialog_peers(self):
+        first = dict(self.row('1', at=self.at), max_user_id='77')
+        second = dict(self.row('2', at=self.at + timedelta(minutes=1)), max_user_id='78')
+        latest = self.row('3', at=self.at + timedelta(minutes=2))
+        self.project(first, second, latest)
+
+        with self.assertRaises(AlfaBrowserError) as raised:
+            self.service.send_target(
+                self.workspace, self.channel, self.conversation()['id'])
+        self.assertEqual(raised.exception.code, 'multiple_recipients')
+
     def test_peer_change_during_form_preparation_prevents_post(self):
         messaging, command = self.queue_operator_reply(dict(self.row(), max_user_id='77'))
         posted = []
