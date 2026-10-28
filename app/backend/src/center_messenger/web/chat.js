@@ -680,6 +680,14 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const existing = new Map(history.dataset.conversation === id ? [...history.children].map(child => [child.dataset.key, child]) : []);
     const wanted = []; let day = "";
     const messages = [...data.messages.values()].sort(compareMessages);
+    // Each message that went out answers only the nearest earlier failed copy of its text.
+    const resentBy = new Map(), waiting = new Map();
+    for (const m of messages) {
+      if (m.direction !== "out" || !m.text || m.deleted) continue;
+      if (m.state === "failed") { (waiting.get(m.text) || waiting.set(m.text, []).get(m.text)).push(m); continue; }
+      if (m.state === "cancelled") continue;
+      const failed = waiting.get(m.text)?.pop(); if (failed) resentBy.set(failed.id, m);
+    }
     for (let i = 0; i < messages.length; i++) {
       const message = messages[i];
       const messageDay = dayKey(message.occurred_at);
@@ -694,8 +702,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const grouped = Boolean(next && next.actor_type !== "automation" && next.direction === message.direction && next.actor_type === message.actor_type && dayKey(next.occurred_at) === messageDay);
       const first = !previous || previous.actor_type !== message.actor_type || previous.direction !== message.direction || dayKey(previous.occurred_at) !== messageDay;
       // A failed message whose text later went out shows «sent again» instead of the actions.
-      const resent = message.direction === "out" && message.state === "failed" && message.text
-        ? messages.slice(i + 1).find(m => m.direction === "out" && m.text === message.text && !["failed", "cancelled"].includes(m.state)) : null;
+      const resent = resentBy.get(message.id) || null;
       const key = `message:${message.id}`, messageKey = JSON.stringify([message, todayKey, state.workspace?.timezone, resent?.id || null, Boolean(data.meta?.can_send)]);
       const retained = existing.get(key);
       if (retained?.messageKey === messageKey) {
