@@ -1,4 +1,5 @@
 """Real child-process failures; no CRM, browser, credentials or customer sends."""
+import io
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app/backend/src'))
 from center_messenger.alfa_max_browser import AlfaBrowserError, AlfaMaxBrowser
-from center_messenger.native_send_runtime import run_send, _processes, runtime_supported
+from center_messenger.native_send_runtime import run_send, _processes, runtime_supported, main as runtime_main
 
 PREFIX = '''import sys,json,time,subprocess,os
 data=json.loads(sys.stdin.readline())
@@ -183,6 +184,17 @@ class InlineSendTests(unittest.TestCase):
                    "const send=" + script + ";send({url:'https://example.test',fields:[],timeoutMs:5}).then(()=>process.exit(1),e=>{if(e.message!=='aborted')process.exit(2)});")
         result = subprocess.run(['node', '-e', program], timeout=3, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
+
+    def test_supervised_child_forwards_expected_dialog_peer(self):
+        from center_messenger import native_send_runtime
+        data = {'origin': 'https://test.s20.online', 'state': {'cookies': []},
+                'branch': 1, 'customer': 42, 'text': 'Synthetic',
+                'deadline': time.monotonic() + 30, 'expected_peer': '77'}
+        stdin = SimpleNamespace(buffer=io.BytesIO((json.dumps(data) + '\n').encode()))
+        with patch.object(sys, 'stdin', stdin), patch.object(sys, 'stdout', io.StringIO()), \
+                patch.object(AlfaMaxBrowser, '_send_inline', return_value={'accepted': True}) as send:
+            native_send_runtime.main()
+        self.assertEqual(send.call_args.kwargs['expected_peer'], '77')
 
     def test_mismatched_proc_namespace_fails_before_starting_browser(self):
         with patch('center_messenger.native_send_runtime.runtime_supported', return_value=False), \
