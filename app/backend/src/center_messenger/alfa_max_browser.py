@@ -305,6 +305,43 @@ def _outgoing_actor(author_cell, row, actor_name, message_text=""):
     return "unknown", actor_id
 
 
+def _history_conversation_peer(row, *, origin, branch, customers):
+    """Read a MAX peer only from explicit recipient metadata in this CRM row.
+
+    Names, phones and generic user/employee IDs are not recipient evidence. A
+    compose link must also name one of the CRM cards linked by the same row.
+    Conflicting explicit peers remain unresolved instead of being ordered by DOM.
+    """
+    if not customers:
+        return None
+    peers = set()
+
+    def add_compose(value):
+        if not isinstance(value, str) or "/max/bulk" not in value or "maxUserId" not in value:
+            return
+        for customer in customers:
+            try:
+                address = _validated_compose_url(
+                    value, origin=origin, branch=branch, customer=customer["customer_id"]
+                )
+            except (AlfaBrowserError, KeyError, TypeError):
+                continue
+            if peer := _compose_url_max_user_id(address):
+                peers.add(peer)
+            break
+
+    for node in [row, *row.find_all(True)]:
+        for name in ("data-max-user-id", "data-max-userid"):
+            value = node.get(name)
+            if isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,18}", value):
+                peers.add(value)
+        for name in ("href", "data-url", "data-href", "action"):
+            add_compose(node.get(name))
+        for match in ONCLICK_BULK_URL.finditer(node.get("onclick", "")):
+            add_compose(match.group(1))
+    return next(iter(peers)) if len(peers) == 1 else None
+
+
 def parse_history_html(html, *, origin, branch, direction, page=0):
     origin = normalize_origin(origin)
     if (
@@ -415,6 +452,9 @@ def parse_history_html(html, *, origin, branch, direction, page=0):
                 "actor_type": actor_type,
                 "actor_id": actor_id,
                 "actor_evidence": {"version": 1, "reason": "client_incoming" if direction == "receive" else {"human": "crm_employee", "automation": "crm_automation", "unknown": "unverified_sender"}[actor_type]},
+                "max_user_id": (_history_conversation_peer(
+                    row, origin=origin, branch=branch, customers=customers
+                ) if direction == "receive" else None),
                 "text": message_text,
                 "occurred_at": when,
                 "attachments": links[:20],
@@ -648,7 +688,7 @@ def _validated_compose_url(value, *, origin, branch, customer):
     return address
 
 
-def _customer_card_compose_url(markup, *, origin, branch, customer):
+def _customer_card_compose_url(markup, *, origin, branch, customer, expected_peer=None):
     """Find the exact native MAX compose route exposed by a customer card."""
     if not isinstance(markup, str) or len(markup.encode("utf-8", "ignore")) > MAX_HTML_BYTES:
         raise AlfaBrowserError("form_unavailable")
@@ -662,7 +702,9 @@ def _customer_card_compose_url(markup, *, origin, branch, customer):
     for node in soup.select("[href], [data-url], [data-href], [onclick]"):
         values.extend(node.get(name) for name in ("href", "data-url", "data-href"))
         values.extend(match.group(1) for match in ONCLICK_BULK_URL.finditer(node.get("onclick", "")))
-    return _compose_url_from_values(values, origin=origin, branch=branch, customer=customer)
+    return _compose_url_from_values(
+        values, origin=origin, branch=branch, customer=customer, expected_peer=expected_peer
+    )
 
 
 ONCLICK_BULK_URL = re.compile(r"""["']((?:https://[^"']+)?/company/\d+/max/bulk[^"']*)["']""")
@@ -694,7 +736,11 @@ def _compose_url_key(value):
     )
 
 
-def _compose_url_from_values(values, *, origin, branch, customer):
+def _compose_url_from_values(values, *, origin, branch, customer, expected_peer=None):
+    if expected_peer is not None and (
+        not isinstance(expected_peer, str) or not re.fullmatch(r"[1-9][0-9]{0,18}", expected_peer)
+    ):
+        raise AlfaBrowserError("invalid_recipient")
     candidates = {}
     for value in values:
         if not isinstance(value, str) or not value:
@@ -710,6 +756,25 @@ def _compose_url_from_values(values, *, origin, branch, customer):
     unique = list(candidates.values())
     if not unique:
         return None
+
+    if expected_peer is not None:
+        matching = [
+            address for address in unique
+            if _compose_url_max_user_id(address) == expected_peer
+        ]
+        if matching:
+            return matching[0]
+        peerless = [
+            address for address in unique
+            if "maxUserId" not in parse_qs(urlsplit(address).query, keep_blank_values=True)
+        ]
+        if len(peerless) == 1:
+            return _inherit_max_user_id(peerless[0], expected_peer)
+        if not peerless:
+            # The card still offers recipients, but none is the peer proved by
+            # this conversation. Never substitute another valid MAX account.
+            raise AlfaBrowserError("invalid_recipient")
+        raise AlfaBrowserError("multiple_recipients")
 
     # Every candidate already names the exact customer and branch. Distinct
     # validated MAX IDs are ambiguous; equivalent links and links carrying one
@@ -759,7 +824,8 @@ def parse_compose_form(html, *, origin, branch, customer, compose_url=None):
     envelope = _json_envelope(html)
     if envelope.get("modal_urls"):
         compose_url = _compose_url_from_values(
-            envelope["modal_urls"], origin=origin, branch=branch, customer=customer
+            envelope["modal_urls"], origin=origin, branch=branch, customer=customer,
+            expected_peer=expected_peer,
         )
         if compose_url:
             return {"compose_url": _inherit_max_user_id(compose_url, expected_peer)}
@@ -1167,10 +1233,10 @@ class AlfaMaxBrowser:
                 raw_id = item.get("data-id", "")
                 name_el = item.select_one(".sms-title small")
                 text_el = item.select_one(".sms-text small")
-                if not re.fullmatch(r"[1-9][0-9]{0,18}", raw_id) or name_el is None:
+                if not re.fullmatch(r"[1-9][0-9]{0,18}", raw_id) or name_el is None or text_el is None:
                     continue
                 name = re.sub(r"\s*\[ID\s+[0-9]+\]\s*$", "", name_el.get_text(" ", strip=True))
-                body = text_el.get_text("\n", strip=True) if text_el else ""
+                body = text_el.get_text("\n", strip=True)
                 templates.append({"id": int(raw_id), "name": name, "body": body})
             return templates
         except AlfaBrowserError:
@@ -1196,7 +1262,7 @@ class AlfaMaxBrowser:
         return run_send(origin, state, branch, customer, text, **options)
 
     def _send_inline(self, origin, state, branch, customer, text, *, deadline=None,
-                     before_post=None, on_accepted=None, on_rejected=None):
+                     expected_peer=None, before_post=None, on_accepted=None, on_rejected=None):
         # Only the supervised child calls this in production.
         deadline = deadline if deadline is not None else time.monotonic() + 90
 
@@ -1213,6 +1279,10 @@ class AlfaMaxBrowser:
             or not isinstance(text, str)
             or not text.strip()
             or len(text) > 8192
+            or (expected_peer is not None and (
+                not isinstance(expected_peer, str)
+                or not re.fullmatch(r"[1-9][0-9]{0,18}", expected_peer)
+            ))
         ):
             raise AlfaBrowserError("invalid_recipient")
 
@@ -1300,14 +1370,16 @@ class AlfaMaxBrowser:
             if len(card_markup.encode("utf-8", "ignore")) > MAX_HTML_BYTES:
                 links = page.evaluate(CARD_LINKS_SCRIPT, 500)
                 form_url = _compose_url_from_values(
-                    links if isinstance(links, list) else [], origin=origin, branch=branch, customer=customer
+                    links if isinstance(links, list) else [], origin=origin, branch=branch,
+                    customer=customer, expected_peer=expected_peer,
                 )
             else:
                 form_url = _customer_card_compose_url(
-                    card_markup, origin=origin, branch=branch, customer=customer
+                    card_markup, origin=origin, branch=branch, customer=customer,
+                    expected_peer=expected_peer,
                 )
             if not form_url:
-                form_url = fallback_url
+                form_url = _inherit_max_user_id(fallback_url, expected_peer)
 
             visited_forms = set()
             form = None
@@ -1349,6 +1421,8 @@ class AlfaMaxBrowser:
                 raise AlfaBrowserError("form_unavailable")
 
             if form["customer_id"] != int(customer) or form["branch_id"] != int(branch):
+                raise AlfaBrowserError("invalid_recipient")
+            if expected_peer is not None and form["max_user_id"] != expected_peer:
                 raise AlfaBrowserError("invalid_recipient")
             if len(text) > form["max_length"]:
                 raise AlfaBrowserError("message_too_long")
