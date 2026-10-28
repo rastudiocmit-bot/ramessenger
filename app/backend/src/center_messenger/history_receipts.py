@@ -59,13 +59,26 @@ def new_records(db, workspace, connection, branch, records):
         base = f"{message['direction']}:{branch}:{message['record_id']}"
         for key in [base, base + "|recipient|unlinked"] + [base + f"|recipient|{c['branch_id']}:{c['customer_id']}" for c in message.get("customers", []) if c]:
             keys[key] = f"{message['direction']}:{message['record_id']}"
-    rows = db.execute(text("SELECT s.external_record_id,m.direction,m.payload->>'crm_record_id' AS record "
+    rows = db.execute(text("SELECT s.external_record_id,m.direction,m.payload->>'crm_record_id' AS record,"
+        "m.payload->>'max_user_id' AS max_user_id "
         "FROM source_records s JOIN messages m ON m.workspace_id=s.workspace_id AND m.id=s.message_id "
         "WHERE s.workspace_id=:w AND s.connection_id=:c AND s.namespace='alfa_max' "
         "AND s.external_record_id=ANY(CAST(:ids AS text[])) "
         "AND m.payload->>'possible_send_command_id' IS NULL "
         "AND (m.payload->>'superseded_by' IS NULL OR m.payload->>'crm_mirror'='true')"),
         {"w": workspace, "c": connection, "ids": list(keys)}).mappings()
-    saved = {keys[r["external_record_id"]] for r in rows
-             if keys[r["external_record_id"]] == f"{r['direction']}:{r['record']}"}
+    incoming = {f"{m['direction']}:{m['record_id']}": m for m in records}
+    matched = {}
+    for row in rows:
+        identity = keys[row["external_record_id"]]
+        if identity == f"{row['direction']}:{row['record']}":
+            matched.setdefault(identity, []).append(row)
+    saved = set()
+    for identity, saved_rows in matched.items():
+        peer = incoming[identity].get("max_user_id")
+        # A later read may add explicit peer evidence to an already imported row.
+        # Reproject only for that new evidence; an attribute-less later read must
+        # not erase a peer which was proved previously.
+        if not peer or all(row["max_user_id"] == peer for row in saved_rows):
+            saved.add(identity)
     return [m for m in records if f"{m['direction']}:{m['record_id']}" not in saved]
