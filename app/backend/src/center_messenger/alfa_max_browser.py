@@ -8,7 +8,7 @@ import socket
 import threading
 import time
 from datetime import UTC, datetime
-from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
@@ -264,6 +264,7 @@ _SYSTEM_ACTOR_MARKERS = (
     "campaign",
     "маркетинг",
     "массов",
+    "broadcast",
 )
 
 
@@ -582,7 +583,7 @@ def _json_envelope(raw):
                 return {"html": value} if "<" in value else {"empty": True}
         break
     if not isinstance(value, dict):
-        return {"html": raw} if isinstance(value, str) else {"empty": True}
+        return {"html": raw} if isinstance(raw, str) else {"empty": True}
     error = (
         value.get("toastr_error")
         or value.get("errorMessage")
@@ -702,8 +703,32 @@ def _compose_url_from_values(values, *, origin, branch, customer):
     return None
 
 
-def parse_compose_form(html, *, origin, branch, customer):
+def _compose_url_max_user_id(value):
+    """Return one valid MAX recipient already trusted by the compose URL."""
+    if not value:
+        return None
+    peers = parse_qs(urlsplit(value).query, keep_blank_values=True).get("maxUserId", [])
+    peer = peers[0] if len(peers) == 1 else ""
+    return peer if re.fullmatch(r"[1-9][0-9]{0,18}", peer) else None
+
+
+def _inherit_max_user_id(value, peer):
+    """Keep a validated recipient across modal redirects and form actions."""
+    if not peer:
+        return value
+    parts = urlsplit(value)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    peers = [item for key, item in query if key == "maxUserId"]
+    if peers and peers != [peer]:
+        raise AlfaBrowserError("invalid_recipient")
+    if not peers:
+        query.append(("maxUserId", peer))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def parse_compose_form(html, *, origin, branch, customer, compose_url=None):
     origin = normalize_origin(origin)
+    expected_peer = _compose_url_max_user_id(compose_url)
     envelope = _json_envelope(html)
     if envelope.get("modal_urls"):
         valid = []
@@ -716,7 +741,7 @@ def parse_compose_form(html, *, origin, branch, customer):
                 continue
         valid = list(dict.fromkeys(valid))
         if len(valid) == 1:
-            return {"compose_url": valid[0]}
+            return {"compose_url": _inherit_max_user_id(valid[0], expected_peer)}
         if valid:
             raise AlfaBrowserError("multiple_recipients")
         raise AlfaBrowserError("form_unavailable")
@@ -732,6 +757,7 @@ def parse_compose_form(html, *, origin, branch, customer):
         action = _validated_bulk_url(
             form.get("action", ""), origin=origin, branch=branch, customer=customer
         )
+        action = _inherit_max_user_id(action, expected_peer)
         fields = []
         recipient_ids = []
         for item in form.select("input[name]"):
@@ -1279,7 +1305,8 @@ class AlfaMaxBrowser:
                 phase = "parse_compose_form"
                 try:
                     form = parse_compose_form(
-                        response_body, origin=origin, branch=branch, customer=customer
+                        response_body, origin=origin, branch=branch, customer=customer,
+                        compose_url=address,
                     )
                 except AlfaBrowserError as error:
                     envelope = _json_envelope(response_body)
@@ -1289,7 +1316,8 @@ class AlfaMaxBrowser:
                     response_status, response_body = get_form_response(page, address, ajax=False)
                     phase = "parse_compose_form_html"
                     form = parse_compose_form(
-                        response_body, origin=origin, branch=branch, customer=customer
+                        response_body, origin=origin, branch=branch, customer=customer,
+                        compose_url=address,
                     )
 
                 if "compose_url" not in form:
