@@ -14,14 +14,17 @@ import subprocess
 REPO = 'rastudiocmit-bot/ramessenger'
 FILES = (
     'app/backend/src/center_messenger/alfa_max_browser.py',
+    'app/backend/src/center_messenger/history_receipts.py',
+    'app/backend/src/center_messenger/alfa_shared_parent.py',
+    'app/backend/src/center_messenger/alfa_repair.py',
+    'app/backend/src/center_messenger/native_relink.py',
     'app/backend/src/center_messenger/alfa_max.py',
     'scripts/diagnose_max_recipients.py',
 )
 BOOTSTRAP = '''import json,sys,types
 import center_messenger
 data=json.load(sys.stdin)
-for path in ('app/backend/src/center_messenger/alfa_max_browser.py',
-             'app/backend/src/center_messenger/alfa_max.py'):
+for path in ''' + repr(FILES[:-1]) + ''':
     short=path.rsplit('/',1)[-1][:-3]
     name='center_messenger.'+short
     module=types.ModuleType(name)

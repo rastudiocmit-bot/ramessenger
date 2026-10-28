@@ -21,7 +21,7 @@ class PreviewTests(unittest.TestCase):
                     preview.download(value)
         run.assert_not_called()
 
-    def test_downloads_only_three_pinned_files_and_checks_python_before_execution(self):
+    def test_downloads_only_fixed_pinned_files_and_checks_python_before_execution(self):
         with patch.object(preview.subprocess, 'run', return_value=Mock(stdout='pass')) as run:
             packet = preview.download('a'*40)
         self.assertEqual(set(packet), set(preview.FILES))
@@ -39,11 +39,10 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(json.loads(run.call_args.kwargs['input']), {'code': 'data'})
 
     def test_bootstrap_loads_candidate_modules_only_in_child_in_dependency_order(self):
-        packet = {
-            preview.FILES[0]: 'candidate_value=42',
-            preview.FILES[1]: 'from center_messenger.alfa_max_browser import candidate_value\nassert candidate_value==42',
-            preview.FILES[2]: "import center_messenger.alfa_max_browser as candidate\nassert __name__=='__main__'\nprint(candidate.candidate_value)",
-        }
+        packet = {path: 'pass' for path in preview.FILES}
+        packet[preview.FILES[0]] = 'candidate_value=42'
+        packet[preview.FILES[-2]] = 'from center_messenger.alfa_max_browser import candidate_value\nassert candidate_value==42'
+        packet[preview.FILES[-1]] = "import center_messenger.alfa_max_browser as candidate\nassert __name__=='__main__'\nprint(candidate.candidate_value)"
         result = subprocess.run([sys.executable, '-c', preview.BOOTSTRAP], input=json.dumps(packet),
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)

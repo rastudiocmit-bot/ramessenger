@@ -2,7 +2,8 @@
 
 The shared phone is a consistency check, never evidence on its own. Only one
 incoming CRM journal row explicitly naming all the children can establish an
-alias. A sent bulk notification must never establish one.
+alias. A verified re-association of that exact incoming source row may also
+establish one. A sent bulk notification must never establish one.
 """
 
 import json
@@ -72,11 +73,11 @@ def canonical_alias(db, workspace, channel, snapshot, contact):
         "external": f"alfa-contact:{family[0]}"}).scalar_one_or_none()
 
 
-def prove(db, workspace, channel, snapshot, customers, *, source):
+def prove(db, workspace, channel, snapshot, customers, *, source, reply_card=None):
     """Save a peer only when the same incoming row names verified CRM cards."""
     contacts = {c["contact_id"] for c in customers if c and c.get("contact_id")}
     phones = {c.get("primary_phone") for c in customers if c and c.get("contact_id")}
-    if (len(contacts) < 2 or len(phones) != 1 or None in phones
+    if (not contacts or (len(contacts) < 2 and reply_card is None) or len(phones) != 1 or None in phones
             or any(not c.get("global_id_verified") for c in customers if c and c.get("contact_id"))):
         return None
     phone = next(iter(phones))
@@ -101,14 +102,37 @@ def prove(db, workspace, channel, snapshot, customers, *, source):
         "SELECT event_key,payload FROM outbox_events WHERE workspace_id=:w AND topic=:topic "
         "AND event_key=ANY(CAST(:keys AS text[])) AND state='published'"
     ), {"w": workspace, "topic": TOPIC, "keys": keys}).all())
+    old_cards = [value['reply_card'] for value in stored.values() if value.get('reply_card')]
+    if reply_card is not None:
+        if (not source.startswith('relink:in:') or not isinstance(reply_card.get('customer'), int)
+                or isinstance(reply_card['customer'], bool) or reply_card['customer'] <= 0
+                or not isinstance(reply_card.get('branch'), int) or isinstance(reply_card['branch'], bool)
+                or reply_card['branch'] <= 0 or not reply_card.get('from')
+                or any(not isinstance(value, int) or isinstance(value, bool) or value <= 0
+                       for value in reply_card['from'])):
+            return None
+        origins = set(reply_card['from'])
+        for card in old_cards:
+            if (card.get('crm_connection') != reply_card.get('crm_connection')
+                    or card.get('settings_version') != reply_card.get('settings_version')):
+                continue
+            origins.update(card.get('from', []))
+            origins.add(card['customer'])
+        origins.discard(reply_card['customer'])
+        reply_card = dict(reply_card, **{'from': sorted(origins), 'source': source})
+    elif old_cards and len({json.dumps(card, sort_keys=True) for card in old_cards}) == 1:
+        reply_card = old_cards[0]
     if len(stored) == len(current) and all(
         value.get("phone") == phone and value.get("contacts") == expected
-        and value.get("canonical") == str(canonical) for value in stored.values()
+        and value.get("canonical") == str(canonical) and value.get('reply_card') == reply_card
+        for value in stored.values()
     ):
-        return None
-    payload = json.dumps({"policy": REPAIR_VERSION, "phone": phone,
-                          "contacts": expected, "canonical": str(canonical),
-                          "source": source}, ensure_ascii=False)
+        return sorted(current) if reply_card is not None else None
+    record = {"policy": REPAIR_VERSION, "phone": phone, "contacts": expected,
+              "canonical": str(canonical), "source": source}
+    if reply_card is not None:
+        record['reply_card'] = reply_card
+    payload = json.dumps(record, ensure_ascii=False)
     for contact in current:
         db.execute(text(
             "INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) "

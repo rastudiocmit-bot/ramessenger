@@ -27,12 +27,12 @@ class SessionPolicyTests(unittest.TestCase):
         service = object.__new__(AlfaMaxConnections)
         service._row = lambda _db, _workspace: {
             'connection_id': 'channel', 'state': 'active', 'current_crm_connection_id': 'crm',
-            'session_ciphertext': 'sealed', 'crm_origin': 'https://test.s20.online'}
+            'crm_connection_id': 'crm', 'session_ciphertext': 'sealed', 'crm_origin': 'https://test.s20.online'}
         service.vault = Mock()
         payload = {'customer_id': 42, 'customer_branch_id': 1, 'max_user_id': None}
         db = Mock()
         db.execute.side_effect = [Mock(scalar_one_or_none=Mock(return_value=payload)),
-                                  Mock(scalars=Mock(return_value=[]))]
+                                  Mock(scalars=Mock(return_value=[])), Mock(scalar_one_or_none=Mock(return_value=None))]
         directory = {42: [{'branch_id': 1, 'external_id': 42, 'contact_id': 'contact',
                           'available': True, 'primary_phone': '+79161234567', 'status': 'client'}]}
         with patch('center_messenger.alfa_max.DirectoryReader._published', return_value={'connection_id': 'crm'}), \

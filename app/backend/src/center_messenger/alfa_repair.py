@@ -55,6 +55,7 @@ def resolve_customer(raw, directory):
 
 def reconcile_messages(service, db, workspace, channel, conversation):
     from center_messenger.chat_queue import materialize_legacy_handled
+    from center_messenger import native_relink
     materialize_legacy_handled(db, workspace, conversation)
     # crm_order has always been the numeric CRM row ID in the Alfa projector.
     # Recover that exact identity for rows imported before crm_record_id existed.
@@ -99,6 +100,8 @@ def reconcile_messages(service, db, workspace, channel, conversation):
                 changed(db, workspace, conversation, row["id"])
                 hidden.add(row["id"])
     groups = defaultdict(lambda: defaultdict(list))
+    relinked_customers = native_relink.mirror_customers(db, workspace, channel,
+        DirectoryReader._published(db, workspace), conversation)
     for row in records:
         payload = row["payload"]
         if (row["id"] in hidden or row["direction"] != "in" or row["send_command_id"]
@@ -110,7 +113,7 @@ def reconcile_messages(service, db, workspace, channel, conversation):
         # Only incoming branch fan-out for the same verified CRM customer(s).
         # Preserve multiplicity within each journal, including repeated text in
         # the same minute. Different customer IDs and outgoing sends stay apart.
-        key = (customers, row["occurred_at"], row["text"], row["actor_type"],
+        key = (native_relink.mirror_key(payload, relinked_customers), row["occurred_at"], row["text"], row["actor_type"],
                json.dumps(payload.get("attachments", []), sort_keys=True, ensure_ascii=False), bool(payload.get("failed")))
         groups[key][str(payload["branch_id"])].append(row)
     mirrors_updated = 0
