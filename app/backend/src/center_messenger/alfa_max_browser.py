@@ -683,24 +683,51 @@ CARD_LINKS_SCRIPT = r"""(limit) => {
 }"""
 
 
+def _compose_url_key(value):
+    """Compare compose routes by meaning, not query encoding or parameter order."""
+    parts = urlsplit(value)
+    return (
+        parts.scheme,
+        parts.netloc,
+        parts.path,
+        tuple(sorted(parse_qsl(parts.query, keep_blank_values=True))),
+    )
+
+
 def _compose_url_from_values(values, *, origin, branch, customer):
-    candidates = []
+    candidates = {}
     for value in values:
         if not isinstance(value, str) or not value:
             continue
         try:
-            candidates.append(
-                _validated_compose_url(value, origin=origin, branch=branch, customer=customer)
+            address = _validated_compose_url(
+                value, origin=origin, branch=branch, customer=customer
             )
         except AlfaBrowserError:
             continue
+        candidates.setdefault(_compose_url_key(address), address)
 
-    unique = list(dict.fromkeys(candidates))
+    unique = list(candidates.values())
+    if not unique:
+        return None
+
+    # Every candidate already names the exact customer and branch. Distinct
+    # validated MAX IDs are ambiguous; equivalent links and links carrying one
+    # shared ID are not. Genuinely different peerless links stay ambiguous below.
+    # Never use document order to choose between different recipient IDs.
+    identified = [
+        (peer, address)
+        for address in unique
+        if (peer := _compose_url_max_user_id(address)) is not None
+    ]
+    peers = {peer for peer, _address in identified}
+    if len(peers) > 1:
+        raise AlfaBrowserError("multiple_recipients")
+    if identified:
+        return identified[0][1]
     if len(unique) == 1:
         return unique[0]
-    if len(unique) > 1:
-        raise AlfaBrowserError("multiple_recipients")
-    return None
+    raise AlfaBrowserError("multiple_recipients")
 
 
 def _compose_url_max_user_id(value):
@@ -731,19 +758,11 @@ def parse_compose_form(html, *, origin, branch, customer, compose_url=None):
     expected_peer = _compose_url_max_user_id(compose_url)
     envelope = _json_envelope(html)
     if envelope.get("modal_urls"):
-        valid = []
-        for value in envelope["modal_urls"]:
-            try:
-                valid.append(
-                    _validated_compose_url(value, origin=origin, branch=branch, customer=customer)
-                )
-            except AlfaBrowserError:
-                continue
-        valid = list(dict.fromkeys(valid))
-        if len(valid) == 1:
-            return {"compose_url": _inherit_max_user_id(valid[0], expected_peer)}
-        if valid:
-            raise AlfaBrowserError("multiple_recipients")
+        compose_url = _compose_url_from_values(
+            envelope["modal_urls"], origin=origin, branch=branch, customer=customer
+        )
+        if compose_url:
+            return {"compose_url": _inherit_max_user_id(compose_url, expected_peer)}
         raise AlfaBrowserError("form_unavailable")
     markup = envelope.get("html")
     if not markup:
