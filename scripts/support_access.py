@@ -182,15 +182,38 @@ def authorize(actor, words):
 
 def audit():
     script = (SUPPORT / 'diagnose_max_recipients.py').read_text()
-    # Respect the existing browser lease. No killing browsers or deleting locks.
-    for attempt in range(6):
-        result = execute(['docker', 'exec', '-i', 'center-messenger-api-1',
-                          '/opt/venv/bin/python', '-'], stdin=script, timeout=180)
-        data = json.loads(result)
-        if data.get('error_code') != 'browser_busy' or attempt == 5:
-            print(result)
-            return
-        time.sleep(3)
+    try:
+        with worker_lock(SUPPORT / 'audit.lock'):
+            run_audit(script)
+    except BlockingIOError:
+        print(json.dumps({'stage': 'diagnostic_lock', 'error_code': 'audit_running'}))
+
+
+def run_audit(script):
+    # One process waits for the shared lease. Keep an interactive SSH client
+    # informed even while Docker/Chromium produces no final JSON yet.
+    started = time.monotonic()
+    with subprocess.Popen(['docker', 'exec', '-i', 'center-messenger-api-1',
+                           '/opt/venv/bin/python', '-'], stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True) as process:
+        pending_input = script
+        while True:
+            remaining = 360 - (time.monotonic() - started)
+            if remaining <= 0:
+                process.kill()
+                process.communicate()
+                raise subprocess.TimeoutExpired('recipient_audit', 360)
+            try:
+                result, _ = process.communicate(input=pending_input, timeout=min(10, remaining))
+                if process.returncode:
+                    raise subprocess.CalledProcessError(process.returncode, 'recipient_audit')
+                json.loads(result)
+                print(result, flush=True)
+                return
+            except subprocess.TimeoutExpired:
+                pending_input = None
+                print('MAX audit: проверка выполняется, прошло '
+                      + str(round(time.monotonic() - started)) + ' с', file=sys.stderr, flush=True)
 
 
 def dispatch(actor, command):

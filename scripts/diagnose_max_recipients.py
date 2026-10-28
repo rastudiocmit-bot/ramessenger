@@ -5,6 +5,8 @@ message texts, phone numbers, CSRF, credentials or raw MAX IDs in the report.
 Only the shared browser lease and refreshed session cookies may be saved.
 """
 import hashlib
+from contextlib import contextmanager
+from datetime import UTC, datetime
 import json
 import re
 import sys
@@ -22,7 +24,7 @@ from center_messenger.alfa_max_browser import (
     _otp_form, _validated_compose_url, parse_compose_form,
 )
 from center_messenger.alfa_service import AlfaConnections
-from center_messenger.alfa_session import control
+from center_messenger.alfa_session import control, stamp
 from center_messenger.attachment_audit import BrowserProbe, load_source
 from center_messenger.config import Settings
 from center_messenger.connector_vault import ConnectorVault
@@ -32,6 +34,63 @@ from center_messenger.message_order import message_order
 
 def peer_tag(peer):
     return hashlib.sha256(peer.encode()).hexdigest()[:12] if isinstance(peer, str) else None
+
+
+def browser_status(service, workspace, connection):
+    """Observe contention without exposing tokens, cookies or client text."""
+    with service.accounts.transaction(workspace_id=workspace, snapshot=True) as db:
+        row = service._row(db, workspace)
+        if not row or row['connection_id'] != connection:
+            raise AlfaBrowserError('settings_changed')
+        meta, now = control(row), datetime.now(UTC)
+        sync_running = db.execute(text('SELECT EXISTS (SELECT 1 FROM alfa_max_sync_queue '
+            'WHERE workspace_id=:w AND connection_id=:c AND lease_owner IS NOT NULL '
+            'AND lease_until>clock_timestamp())'), {'w': workspace, 'c': connection}).scalar_one()
+        pending_sends = db.execute(text("SELECT count(*) FROM send_commands s JOIN conversations c "
+            "ON c.workspace_id=s.workspace_id AND c.id=s.conversation_id "
+            "WHERE s.workspace_id=:w AND c.connection_id=:c AND s.state='queued'"),
+            {'w': workspace, 'c': connection}).scalar_one()
+        return {'state': row['state'], 'needs_check': bool(meta.get('needs_check')),
+                'lease_active': bool(meta.get('lease') and stamp(meta.get('until')) > now),
+                'lease_remaining_seconds': max(0, round((stamp(meta.get('until')) - now).total_seconds())),
+                'sync_running': sync_running, 'queued_sends': pending_sends,
+                'last_sync_at': row['last_sync_at'].isoformat() if row.get('last_sync_at') else None}
+
+
+@contextmanager
+def wait_for_browser(service, workspace, connection, report, *, seconds=120):
+    """Retry only lease acquisition; never rerun forms or override another lease."""
+    started, next_status = time.monotonic(), 0
+    while True:
+        elapsed = time.monotonic() - started
+        if elapsed >= next_status:
+            status = browser_status(service, workspace, connection)
+            report['browser_wait'] = status | {'waited_seconds': round(elapsed, 1)}
+            print('MAX audit: ' + json.dumps(report['browser_wait']), file=sys.stderr, flush=True)
+            next_status = elapsed + 5
+        report['browser_wait']['waited_seconds'] = round(elapsed, 1)
+        if elapsed >= seconds:
+            raise AlfaBrowserError('browser_wait_timeout')
+        if status['state'] != 'active':
+            raise AlfaBrowserError('connection_not_active')
+        if status['needs_check']:
+            raise AlfaBrowserError('session_check_pending')
+        # Yield when queued sends are observed. This probe does not change the
+        # production scheduler or reserve a place in its durable queue.
+        if not status['queued_sends']:
+            try:
+                lease = service.sessions.claim(workspace, connection)
+                break
+            except AlfaBrowserError as error:
+                if error.code != 'browser_busy':
+                    raise
+        time.sleep(min(.5, max(0, seconds - (time.monotonic() - started))))
+    report['browser_wait']['waited_seconds'] = round(time.monotonic() - started, 1)
+    report['browser_wait']['acquired'] = True
+    try:
+        yield lease
+    finally:
+        service.sessions.release(lease)
 
 
 def routes(markup, origin, branch, customer):
@@ -191,10 +250,15 @@ def main():
                 targets.append((case, peer))
         if targets:
             report['stage'] = 'browser_lease'
-            with service.sessions.operation(workspace, source['connection_id']) as operation:
+            with wait_for_browser(service, workspace, source['connection_id'], report) as operation:
                 current = operation['row']
-                if current['state'] != 'active' or control(current).get('needs_check'):
-                    raise AlfaBrowserError('browser_busy')
+                if (current['crm_connection_id'] != source['crm_connection_id']
+                        or current['crm_origin'] != source['origin']):
+                    raise AlfaBrowserError('settings_changed')
+                if current['state'] != 'active':
+                    raise AlfaBrowserError('connection_not_active')
+                if control(current).get('needs_check'):
+                    raise AlfaBrowserError('session_check_pending')
                 state = vault.open_browser_state(workspace, source['connection_id'], current['session_ciphertext'])
                 started = time.monotonic()
                 def renew():
