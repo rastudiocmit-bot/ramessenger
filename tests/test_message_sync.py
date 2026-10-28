@@ -2359,10 +2359,58 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual([row['record_id'] for row in fresh], ['100'])
         self.project(*fresh)
         self.assertEqual(len(self.messages()), 1)
+
         self.assertEqual(self.messages()[0]['payload']['max_user_id'], '77')
         self.assertEqual(new_records(self.db, self.workspace, self.channel, 1, [proven]), [])
         self.project(proven)
         self.assertEqual(len(self.messages()), 1)
+
+    def test_same_incoming_source_relinked_to_active_customer_keeps_body_and_history(self):
+        from center_messenger.history_receipts import new_records
+        self.snapshot['version'] = 1
+        second = uuid4()
+        self.add_customer(second, 1, 8)
+        self.customer_phone(7, parent='Old spelling', status='lead')
+        self.customer_phone(8, parent='Current parent', status='client')
+        old = self.row('52289', customer=7, body='Original body')
+        self.project(old)
+        identifier, happened = self.messages()[0]['id'], self.messages()[0]['occurred_at']
+        source = self.row('52289', customer=8, body='Upstream edit must not replace body')
+        fresh = new_records(self.db, self.workspace, self.channel, 1, [source])
+        self.assertTrue(fresh[0]['source_metadata_refresh'])
+        self.project(*fresh)
+        self.assertEqual(len(self.messages()), 1)
+        message = self.messages()[0]
+        self.assertEqual((message['id'], message['text'], message['occurred_at']),
+                         (identifier, 'Original body', happened))
+        self.assertEqual(message['payload']['customer_id'], 8)
+        self.assertEqual(self.reader.listing(None, self.workspace)['total'], 1)
+        target = self.service.send_target(self.workspace, self.channel, message['conversation_id'])
+        self.assertEqual((target['branch'], target['customer']), (1, 8))
+        self.assertEqual(new_records(self.db, self.workspace, self.channel, 1, [source]), [])
+
+    def test_relink_witness_routes_reply_while_another_branch_still_has_old_card(self):
+        from center_messenger.history_receipts import new_records
+        self.snapshot['version'] = 1
+        second = uuid4()
+        self.add_customer(second, 1, 8)
+        self.customer_phone(7, parent='Old spelling', status='lead')
+        self.customer_phone(8, parent='Current parent', status='client')
+        old = self.row('52289', customer=7)
+        self.project(old)
+        self.project(old, branch=2)
+        fresh = new_records(self.db, self.workspace, self.channel, 2, [self.row('52289', customer=8)])
+        self.project(*fresh, branch=2)
+        self.assertEqual(len(self.messages()), 1)
+        conversation = self.db.execute(text("SELECT id FROM conversations WHERE workspace_id=:w "
+            "AND external_chat_id=:external"), {'w': self.workspace,
+            'external': 'alfa-contact:' + str(min(self.contact, second))}).scalar_one()
+        target = self.service.send_target(self.workspace, self.channel, conversation)
+        self.assertEqual((target['branch'], target['customer']), (1, 8))
+        refreshed = new_records(self.db, self.workspace, self.channel, 1, [self.row('52289', customer=8)])
+        self.project(*refreshed)
+        self.assertEqual(len(self.messages()), 1)
+        self.assertEqual(self.messages()[0]['payload']['customer_id'], 8)
 
     def family_jobs(self):
         return list(self.db.execute(text("SELECT * FROM outbox_events WHERE workspace_id=:w AND topic='crm.card.refresh'"),

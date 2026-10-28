@@ -23,6 +23,8 @@ from center_messenger.alfa_history import (
 from center_messenger.history_receipts import record_pages, finish_pages, new_records
 from center_messenger import active_review, family_cache
 from center_messenger import alfa_shared_parent
+from center_messenger import native_relink
+from center_messenger.history_receipts import observed_customers
 from center_messenger.auth_security import AuthError
 from center_messenger.chat_store import changed, refresh_unread
 from center_messenger.crm_api import DirectoryReader
@@ -757,8 +759,10 @@ class AlfaMaxConnections:
 
     def _project_page(self, db, workspace, channel, crm_connection, branch, rows, *, on_progress=None):
         snapshot = DirectoryReader._published(db, workspace)
+        previous = native_relink.previous_rows(db, workspace, channel, branch, rows)
         directory = customer_directory(db, workspace, snapshot, [
-            customer["customer_id"] for item in rows for customer in item.get("customers", []) if customer])
+            customer["customer_id"] for item in rows for customer in item.get("customers", []) if customer] + [
+            int(row['payload']['customer_id']) for row in previous.values() if row['payload'].get('customer_id')])
         touched = set()
         verified_conversations = set()
         merged_contacts = set()
@@ -782,9 +786,12 @@ class AlfaMaxConnections:
                     from center_messenger.customer_lookup import enqueue
                     enqueue(db, workspace, crm_connection, customer["customer_id"], customer["branch_id"])
             if item["direction"] == "in" and item["actor_type"] == "contact":
-                proven = alfa_shared_parent.prove(
-                    db, workspace, channel, snapshot, resolved,
-                    source=_source_record_id(item, branch))
+                proven = native_relink.prove(db, workspace, channel, snapshot, branch, item,
+                    previous.get(str(item['record_id'])), resolved, directory)
+                if not proven:
+                    proven = alfa_shared_parent.prove(
+                        db, workspace, channel, snapshot, resolved,
+                        source=_source_record_id(item, branch))
                 if proven:
                     refreshed_families.add(proven[0])
                     peer_cache.clear()
@@ -955,7 +962,9 @@ class AlfaMaxConnections:
                         )
                     existing = dict(existing) | {"conversation_id": conversation_id}
                 if (existing and same_source and not existing["payload"].get("possible_send_command_id")
+                        and not existing['payload'].get('crm_recipient_stale')
                         and existing["payload"].get("crm_customer_ids") == sorted({r["customer_id"] for r in records if r})
+                        and existing['payload'].get('crm_observed_customers') == [list(p) for p in observed_customers(item)]
                         and existing["payload"].get("crm_family_contacts") == [str(c) for c in family_contacts]
                         and (not item.get("max_user_id")
                              or existing["payload"].get("max_user_id") == item["max_user_id"])):
@@ -971,6 +980,8 @@ class AlfaMaxConnections:
                     "customer_id": customer["customer_id"] if customer else None,
                     "crm_global_verified": bool(customer) and all(r.get("global_id_verified", False) for r in records if r),
                     "crm_customer_ids": sorted({r["customer_id"] for r in records if r}),
+                    "crm_observed_customers": [list(pair) for pair in observed_customers(item)],
+                    "crm_recipient_stale": False,
                     "crm_family_contacts": [str(c) for c in family_contacts],
                     "crm_primary_branch": min((r["branch_id"] for r in records if r), default=None),
                     "attachments": item["attachments"],
@@ -1096,6 +1107,8 @@ class AlfaMaxConnections:
                             continue
                 if existing:
                     merged = dict(existing["payload"]) | payload
+                    saved_text = existing['text'] if item.get('source_metadata_refresh') else item['text']
+                    saved_at = existing['occurred_at'] if item.get('source_metadata_refresh') else item['occurred_at']
                     if merged.get("crm_mirror") and not payload["crm_global_verified"]:
                         merged.pop("crm_mirror", None)
                         merged.pop("superseded_by", None)
@@ -1105,10 +1118,10 @@ class AlfaMaxConnections:
                         actor = merged["actor_type"] = "human"
                         merged["actor_evidence"] = {"version": 1, "reason": "authorized_send"}
                     if (
-                        existing["text"] != item["text"]
+                        existing["text"] != saved_text
                         or existing["payload"] != merged
                         or existing["actor_type"] != actor
-                        or existing["occurred_at"] != item["occurred_at"]
+                        or existing["occurred_at"] != saved_at
                     ):
                         db.execute(
                             text(
@@ -1119,10 +1132,10 @@ class AlfaMaxConnections:
                             {
                                 "w": workspace,
                                 "id": existing["id"],
-                                "text": item["text"],
+                                "text": saved_text,
                                 "actor": actor,
                                 "payload": json.dumps(merged, ensure_ascii=False),
-                                "at": item["occurred_at"],
+                                "at": saved_at,
                             },
                         )
                         changed(db, workspace, conversation_id, existing["id"])
@@ -1224,12 +1237,14 @@ class AlfaMaxConnections:
                 "SELECT m.payload FROM conversations c JOIN messages m ON "
                 "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
                 "WHERE c.workspace_id=:w AND c.id=:conv AND m.direction='in' "
+                "AND c.connection_id=:connection AND m.actor_type='contact' "
                 "AND m.payload->>'customer_id' IS NOT NULL "
                 "AND m.payload->>'customer_branch_id' IS NOT NULL "
-                "AND coalesce(m.payload->>'deleted','false')<>'true' "
+                "AND " + visible_message('m') + " "
+                "AND coalesce(m.payload->>'crm_mirror','false')<>'true' "
                 "ORDER BY " + message_order(descending=True) + " LIMIT 1"
             ),
-            {"w": workspace, "conv": conversation},
+            {"w": workspace, "conv": conversation, "connection": connection},
         ).scalar_one_or_none()
         if not target:
             raise AlfaBrowserError("history_unavailable")
@@ -1251,13 +1266,15 @@ class AlfaMaxConnections:
                     "SELECT DISTINCT m.payload->>'max_user_id' "
                     "FROM conversations c JOIN messages m ON "
                     "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
-                    "WHERE c.workspace_id=:w AND c.id=:conv AND m.direction='in' "
+                    "WHERE c.workspace_id=:w AND c.id=:conv AND c.connection_id=:connection "
+                    "AND m.direction='in' AND m.actor_type='contact' "
                     "AND ((m.payload->>'customer_id'=:customer "
                     "AND m.payload->>'customer_branch_id'=:branch) "
                     "OR (cardinality(CAST(:family AS text[]))>0 "
                     "AND jsonb_typeof(m.payload->'crm_family_contacts')='array' "
                     "AND jsonb_exists_any(m.payload->'crm_family_contacts',CAST(:family AS text[])))) "
-                    "AND coalesce(m.payload->>'deleted','false')<>'true' "
+                    "AND " + visible_message('m') + " "
+                    "AND coalesce(m.payload->>'crm_mirror','false')<>'true' "
                     "AND m.payload->>'max_user_id' IS NOT NULL"
                 ),
                 {
@@ -1266,6 +1283,7 @@ class AlfaMaxConnections:
                     "customer": str(target["customer_id"]),
                     "branch": str(target["customer_branch_id"]),
                     "family": family,
+                    "connection": connection,
                 },
             ).scalars())
             if any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in peers):
@@ -1273,6 +1291,26 @@ class AlfaMaxConnections:
             if len(peers) > 1:
                 raise AlfaBrowserError("multiple_recipients")
             peer = next(iter(peers), None)
+        phone = None
+        snapshot = DirectoryReader._published(db, workspace) if row.get('crm_connection_id') else None
+        if snapshot and snapshot['connection_id'] == row['current_crm_connection_id']:
+            directory = customer_directory(db, workspace, snapshot, [int(target['customer_id'])])
+            original_id = target['customer_id']
+            target = native_relink.reply_target(db, workspace, connection, snapshot, target, directory)
+            if target['customer_id'] != original_id:
+                directory = customer_directory(db, workspace, snapshot, [int(target['customer_id'])])
+            if peer is None:
+                # Use this exact CRM contact's native phone row. A different
+                # Customer ID is allowed only by an exact-source relink witness
+                # above; a display preference or matching phone is insufficient.
+                resolved = resolve_customer({'customer_id': int(target['customer_id']),
+                    'branch_id': int(target['customer_branch_id'])}, directory)
+                family = target.get('crm_family_contacts') or []
+                if (resolved.get('contact_id') and resolved['branch_id'] == int(target['customer_branch_id'])
+                        and (resolved.get('global_id_verified') or str(resolved['contact_id']) in family)):
+                    phone = resolved.get('primary_phone')
+        if target.get('crm_recipient_stale'):
+            raise AlfaBrowserError('invalid_recipient')
         session = self.vault.open_browser_state(workspace, connection, row["session_ciphertext"])
         return {
             "origin": row["crm_origin"],
@@ -1280,6 +1318,7 @@ class AlfaMaxConnections:
             "branch": int(target["customer_branch_id"]),
             "customer": int(target["customer_id"]),
             "max_user_id": peer,
+            "contact_phone": phone,
             "session_snapshot": dict(row),
         }
 
@@ -1298,6 +1337,7 @@ class AlfaMaxConnections:
             try:
                 result = self.browser.send(target["origin"], target["state"], target["branch"], target["customer"], message,
                     expected_peer=target.get("max_user_id"),
+                    expected_phone=target.get('contact_phone'),
                     before_post=lambda: guard(before_post), on_accepted=on_accepted,
                     heartbeat=lambda: guard(heartbeat), stopping=stopping)
             except AlfaBrowserError as error:

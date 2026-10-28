@@ -22,6 +22,26 @@ from pydantic import SecretStr
 
 
 class SessionPolicyTests(unittest.TestCase):
+    def test_primary_phone_is_loaded_only_from_the_exact_current_crm_customer(self):
+        from center_messenger.alfa_max import AlfaMaxConnections
+        service = object.__new__(AlfaMaxConnections)
+        service._row = lambda _db, _workspace: {
+            'connection_id': 'channel', 'state': 'active', 'current_crm_connection_id': 'crm',
+            'crm_connection_id': 'crm', 'session_ciphertext': 'sealed', 'crm_origin': 'https://test.s20.online'}
+        service.vault = Mock()
+        payload = {'customer_id': 42, 'customer_branch_id': 1, 'max_user_id': None}
+        db = Mock()
+        db.execute.side_effect = [Mock(scalar_one_or_none=Mock(return_value=payload)),
+                                  Mock(scalars=Mock(return_value=[])), Mock(scalar_one_or_none=Mock(return_value=None))]
+        directory = {42: [{'branch_id': 1, 'external_id': 42, 'contact_id': 'contact',
+                          'available': True, 'primary_phone': '+79161234567', 'status': 'client'}]}
+        with patch('center_messenger.alfa_max.DirectoryReader._published', return_value={'connection_id': 'crm'}), \
+             patch('center_messenger.alfa_max.customer_directory', return_value=directory) as lookup:
+            result = service._send_target_in_transaction(db, 'w', 'channel', 'conversation')
+        lookup.assert_called_once_with(db, 'w', {'connection_id': 'crm'}, [42])
+        self.assertEqual(result['contact_phone'], '+79161234567')
+        self.assertEqual((result['branch'], result['customer']), (1, 42))
+
     def test_sibling_peer_lookup_requires_explicit_family_evidence_and_rejects_conflicts(self):
         from center_messenger.alfa_max import AlfaMaxConnections
         service = object.__new__(AlfaMaxConnections)
@@ -524,6 +544,17 @@ class NativeSessionTests(unittest.TestCase):
 
         self.assertEqual((target['branch'], target['customer']), (1, 7))
         self.assertEqual(target['max_user_id'], '77')
+
+    def test_hidden_branch_mirror_cannot_choose_an_old_crm_card_or_conflicting_peer(self):
+        self.add_customer(self.contact, 1, 8)
+        self.project(self.row('1', customer=7, at=self.at), self.row('2', customer=8, at=self.at + timedelta(minutes=1)))
+        visible = self.db.execute(text("SELECT id FROM messages WHERE payload->>'crm_record_id'='1'")).scalar_one()
+        self.db.execute(text("UPDATE messages SET payload=payload||CAST(:hidden AS jsonb) "
+            "WHERE payload->>'crm_record_id'='2'"), {'hidden': json.dumps({'superseded_by': str(visible),
+                'crm_mirror': True, 'max_user_id': '78'})})
+        result = self.service.send_target(self.workspace, self.channel, self.conversation()['id'])
+        self.assertEqual((result['branch'], result['customer']), (1, 7))
+        self.assertIsNone(result['max_user_id'])
 
     def test_peerless_sibling_message_uses_only_proven_family_peer(self):
         self.add_customer(self.contact, 1, 8)

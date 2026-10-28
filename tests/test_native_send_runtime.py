@@ -189,12 +189,13 @@ class InlineSendTests(unittest.TestCase):
         from center_messenger import native_send_runtime
         data = {'origin': 'https://test.s20.online', 'state': {'cookies': []},
                 'branch': 1, 'customer': 42, 'text': 'Synthetic',
-                'deadline': time.monotonic() + 30, 'expected_peer': '77'}
+                'deadline': time.monotonic() + 30, 'expected_peer': '77', 'expected_phone': '+79161234567'}
         stdin = SimpleNamespace(buffer=io.BytesIO((json.dumps(data) + '\n').encode()))
         with patch.object(sys, 'stdin', stdin), patch.object(sys, 'stdout', io.StringIO()), \
                 patch.object(AlfaMaxBrowser, '_send_inline', return_value={'accepted': True}) as send:
             native_send_runtime.main()
         self.assertEqual(send.call_args.kwargs['expected_peer'], '77')
+        self.assertEqual(send.call_args.kwargs['expected_phone'], '+79161234567')
 
     def test_mismatched_proc_namespace_fails_before_starting_browser(self):
         with patch('center_messenger.native_send_runtime.runtime_supported', return_value=False), \

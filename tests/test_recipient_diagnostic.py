@@ -127,6 +127,20 @@ class RecipientDiagnosticTests(unittest.TestCase):
         self.assertEqual(probe.method_calls[0][0], 'navigate')
         self.assertEqual([call[0] for call in probe.method_calls], ['navigate', 'fetch', 'fetch'])
 
+    def test_dry_run_uses_production_contact_row_selection_without_sending(self):
+        probe = Mock(origin=ORIGIN)
+        probe.navigate.return_value = (
+            '<div class="col-xs-7 m-b-xs text-right word-break">+7(916)123-45-67'
+            f'<a href="{BASE}&maxUserId=77">MAX</a></div>'
+            '<div class="col-xs-7 m-b-xs text-right word-break">+7(985)123-45-67'
+            f'<a href="{BASE}&maxUserId=78">MAX</a></div>')
+        probe.fetch.return_value = {'status': 200, 'text': '<form action="' + BASE + '">'
+            '<input name="_csrf" value="synthetic"><input name="MaxComposeBulkForm[related_ids][]" value="42">'
+            '<textarea name="MaxComposeBulkForm[text]"></textarea></form>'}
+        result = audit.inspect_card(probe, 1, 42, None, Mock(), '+79161234567')
+        self.assertEqual(result['sender_resolution']['selected_peer_tag'], audit.peer_tag('77'))
+        self.assertNotIn('123-45-67', json.dumps(result))
+
     def test_peerless_form_reports_real_failure_and_schema(self):
         probe = Mock(origin=ORIGIN)
         probe.navigate.return_value = '<html>No native links</html>'

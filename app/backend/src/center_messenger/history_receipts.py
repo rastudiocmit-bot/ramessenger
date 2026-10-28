@@ -7,6 +7,14 @@ from sqlalchemy import text
 TOPIC = "crm.history.page"
 
 
+def customer_ids(record):
+    return sorted({int(c['customer_id']) for c in record.get('customers', []) if c})
+
+
+def observed_customers(record):
+    return sorted({(int(c['branch_id']), int(c['customer_id'])) for c in record.get('customers', []) if c})
+
+
 def record_pages(db, workspace, connection, original, cursor, requests, results):
     if cursor.get("archive_paused"):
         return
@@ -51,7 +59,7 @@ def finish_pages(db, workspace, connection, original, cursor):
 
 
 def new_records(db, workspace, connection, branch, records):
-    """Filter stored immutable source rows; pending send echoes still need reconciliation."""
+    """Keep stored bodies, but refresh changed customer/peer metadata and send echoes."""
     if not records:
         return []
     keys = {}
@@ -60,7 +68,9 @@ def new_records(db, workspace, connection, branch, records):
         for key in [base, base + "|recipient|unlinked"] + [base + f"|recipient|{c['branch_id']}:{c['customer_id']}" for c in message.get("customers", []) if c]:
             keys[key] = f"{message['direction']}:{message['record_id']}"
     rows = db.execute(text("SELECT s.external_record_id,m.direction,m.payload->>'crm_record_id' AS record,"
-        "m.payload->>'max_user_id' AS max_user_id "
+        "m.payload->>'max_user_id' AS max_user_id,m.payload->'crm_customer_ids' AS customer_ids,"
+        "m.payload->>'customer_id' AS customer_id,m.payload->'crm_observed_customers' AS observed_customers,"
+        "m.payload->>'crm_recipient_stale' AS recipient_stale "
         "FROM source_records s JOIN messages m ON m.workspace_id=s.workspace_id AND m.id=s.message_id "
         "WHERE s.workspace_id=:w AND s.connection_id=:c AND s.namespace='alfa_max' "
         "AND s.external_record_id=ANY(CAST(:ids AS text[])) "
@@ -75,10 +85,30 @@ def new_records(db, workspace, connection, branch, records):
             matched.setdefault(identity, []).append(row)
     saved = set()
     for identity, saved_rows in matched.items():
-        peer = incoming[identity].get("max_user_id")
+        record = incoming[identity]
+        peer = record.get("max_user_id")
+        # Bodies are immutable after import; CRM's customer association is not.
+        # The journal may relink the SAME MAX row after an operator adds a
+        # parent's phone to the active pupil card. Check metadata on pages we
+        # already poll, without rescanning history or comparing old text.
+        if record['direction'] == 'in':
+            wanted = customer_ids(record)
+            observed = [list(pair) for pair in observed_customers(record)]
+            hints = [row['observed_customers'] for row in saved_rows if row['observed_customers'] is not None]
+            # crm_customer_ids belongs to one projected family. The observed
+            # signature belongs to the WHOLE source row, including other
+            # recipients, so legitimate fan-out does not reproject every poll.
+            legacy_ids = sorted({int(value) for row in saved_rows for value in
+                (row['customer_ids'] or ([row['customer_id']] if row['customer_id'] else []))})
+            changed = (any(hint != observed for hint in hints) if hints
+                       else legacy_ids != wanted or len(wanted) > 1)
+            changed = changed or any(row['recipient_stale'] == 'true' for row in saved_rows)
+            if changed:
+                continue
         # A later read may add explicit peer evidence to an already imported row.
         # Reproject only for that new evidence; an attribute-less later read must
         # not erase a peer which was proved previously.
         if not peer or all(row["max_user_id"] == peer for row in saved_rows):
             saved.add(identity)
-    return [m for m in records if f"{m['direction']}:{m['record_id']}" not in saved]
+    return [dict(m, source_metadata_refresh=True) if f"{m['direction']}:{m['record_id']}" in matched else m
+            for m in records if f"{m['direction']}:{m['record_id']}" not in saved]
