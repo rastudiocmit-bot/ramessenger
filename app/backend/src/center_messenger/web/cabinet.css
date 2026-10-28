@@ -1794,3 +1794,10 @@ body:has(#cabinet[hidden]){overflow:auto}
 @media (max-width:719px){#task-dialog.live-sheet{padding:8px 16px calc(16px + env(safe-area-inset-bottom,0px));transition:bottom .2s ease,max-height .2s ease}
   #task-dialog .sheet-body{margin:0 -16px;padding:2px 16px 0}#task-dialog .task-actions{margin:0 -16px;padding:10px 16px 0}
   #task-dialog.live-sheet::before{content:"";display:block;width:40px;height:5px;border-radius:3px;background:var(--line);margin:0 auto 12px}}
+/* Service notices are see-through, so a drop-shadow filter (it follows the alpha) came out
+   almost invisible. The same shadow as on messages, drawn as a box shadow under the glass. */
+:root{--bub-shadow-box:0 1px 1.5px rgba(16,27,35,.16)}
+:root[data-theme="dark"]{--bub-shadow-box:0 1px 1.5px rgba(0,0,0,.4)}
+.sys,.chat-bubble.system.sys{filter:none;box-shadow:var(--bub-shadow-box),inset 0 0 0 .5px rgba(255,255,255,.28)}
+.sys:hover,.chat-bubble.system.sys:hover{box-shadow:var(--bub-shadow-box),inset 0 0 0 1px rgba(255,255,255,.38)}
+:root[data-theme="dark"] .sys,:root[data-theme="dark"] .chat-bubble.system.sys{box-shadow:var(--bub-shadow-box),inset 0 0 0 .5px rgba(255,255,255,.08)}
