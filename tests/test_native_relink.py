@@ -60,6 +60,23 @@ class MetadataFilterTests(unittest.TestCase):
         self.assertEqual(self.filter(incoming, observed_customers=[[4, 7], [4, 8]]), [])
         self.assertTrue(self.filter(incoming)[0]['source_metadata_refresh'])
 
+    def test_selected_recipient_outside_source_is_refreshed_even_when_signature_matches(self):
+        for hint in (None, [[4, 8]]):
+            with self.subTest(hint=hint):
+                result = self.filter(self.record(8), customer_ids=[8], customer_id='7',
+                                     observed_customers=hint)
+                self.assertTrue(result[0]['source_metadata_refresh'])
+
+    def test_selected_recipient_must_belong_to_its_projected_family(self):
+        incoming = self.record()
+        incoming['customers'].append({'branch_id': 4, 'customer_id': 8})
+        result = self.filter(incoming, customer_ids=[7], customer_id='8',
+                             observed_customers=[[4, 7], [4, 8]])
+        self.assertTrue(result[0]['source_metadata_refresh'])
+
+    def test_known_unlinked_source_without_a_recipient_does_not_reload_each_poll(self):
+        self.assertEqual(self.filter(self.record(customers=[]), customer_ids=[], customer_id=None), [])
+
 
 class RelinkTests(unittest.TestCase):
     def setUp(self):
@@ -88,6 +105,16 @@ class RelinkTests(unittest.TestCase):
         for customers in [[{'branch_id': 4, 'customer_id': 7}],
                           [{'branch_id': 4, 'customer_id': 8}, {'branch_id': 4, 'customer_id': 9}]]:
             self.assertIsNone(relink.relink_pair(self.old, self.item | {'customers': customers}, 4))
+
+    def test_stale_selected_card_is_relinked_when_recipient_list_was_already_refreshed(self):
+        self.old['payload'].update(crm_customer_ids=[8], crm_observed_customers=[[4, 8]])
+        self.assertEqual(relink.relink_pair(self.old, self.item, 4), (7, 8))
+
+    def test_conflicting_or_bulk_legacy_metadata_cannot_create_a_single_recipient_alias(self):
+        for ids, observed in [([7, 8], None), ([9], None), ([8], [[4, 8], [4, 9]])]:
+            with self.subTest(ids=ids, observed=observed):
+                self.old['payload'].update(crm_customer_ids=ids, crm_observed_customers=observed)
+                self.assertIsNone(relink.relink_pair(self.old, self.item, 4))
 
     def test_proven_relink_carries_current_crm_fence_and_source_witness(self):
         db = Mock(); db.execute.return_value.scalars.return_value = []

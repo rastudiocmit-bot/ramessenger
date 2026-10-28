@@ -36,12 +36,20 @@ def association_pair(previous, item, branch):
     old = previous['payload']
     if str(old.get('branch_id')) != str(branch) or str(old.get('crm_record_id')) != str(item['record_id']):
         return None
-    old_ids = sorted({int(value) for value in (old.get('crm_customer_ids') or
-                      ([old['customer_id']] if old.get('customer_id') else []))})
+    selected = int(old['customer_id']) if old.get('customer_id') else None
+    old_ids = {int(value) for value in (old.get('crm_customer_ids') or
+               ([selected] if selected else []))}
     new_ids = customer_ids(item)
-    if len(old_ids) != 1 or len(new_ids) != 1 or old_ids == new_ids:
+    if not selected or len(old_ids) != 1 or len(new_ids) != 1 or selected == new_ids[0]:
         return None
-    return old_ids[0], new_ids[0]
+    # The chosen card is the stale address, even if a previous partial repair
+    # already changed the source's customer list. Unrelated IDs and old bulk
+    # associations are ambiguous and must not manufacture a family alias.
+    observed_ids = {int(pair[1]) for pair in old.get('crm_observed_customers') or []}
+    if not old_ids <= {selected, new_ids[0]} or (observed_ids and (
+            len(observed_ids) != 1 or not observed_ids <= {selected, new_ids[0]})):
+        return None
+    return selected, new_ids[0]
 
 
 def relink_pair(previous, item, branch):

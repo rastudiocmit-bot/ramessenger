@@ -2412,6 +2412,45 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(len(self.messages()), 1)
         self.assertEqual(self.messages()[0]['payload']['customer_id'], 8)
 
+    def test_stale_valeria_selected_card_is_repaired_after_list_already_changed(self):
+        from center_messenger.history_receipts import new_records
+        self.snapshot['version'] = 1
+        old_contact, current_contact = uuid4(), uuid4()
+        self.add_customer(old_contact, 2, 9805)
+        self.add_customer(current_contact, 1, 9751)
+        self.customer_phone(9805, parent='Valeria', status='lead')
+        self.customer_phone(9751, parent='Current parent', status='client')
+        old = self.row('52289', customer=9805, branch=4, body='Original incoming')
+        self.project(old, branch=4)
+        message = self.messages()[0]
+        # A partially repaired legacy projection may already list the current
+        # source customer while the sender still points to the old lead.
+        self.db.execute(text("UPDATE messages SET payload=payload||CAST(:p AS jsonb) "
+            "WHERE workspace_id=:w AND id=:id"), {'w': self.workspace, 'id': message['id'],
+            'p': json.dumps({'crm_customer_ids': [9751], 'crm_observed_customers': [[4, 9751]]})})
+        current = self.row('52289', customer=9751, branch=4, body='Upstream changed text')
+        fresh = new_records(self.db, self.workspace, self.channel, 4, [current])
+        self.assertEqual(len(fresh), 1)
+        self.project(*fresh, branch=4)
+        saved = self.messages()
+        self.assertEqual(len(saved), 1)
+        self.assertEqual((saved[0]['id'], saved[0]['text'], saved[0]['occurred_at']),
+                         (message['id'], message['text'], message['occurred_at']))
+        self.assertEqual(saved[0]['payload']['customer_id'], 9751)
+        self.assertEqual(self.reader.listing(None, self.workspace)['total'], 1)
+        target = self.service.send_target(self.workspace, self.channel, saved[0]['conversation_id'])
+        self.assertEqual((target['branch'], target['customer']), (1, 9751))
+        self.assertEqual(new_records(self.db, self.workspace, self.channel, 4, [current]), [])
+
+    def test_projector_rechecks_selected_branch_even_when_source_signature_matches(self):
+        original = self.row('52289')
+        self.project(original)
+        message = self.messages()[0]
+        self.db.execute(text("UPDATE messages SET payload=jsonb_set(payload,'{customer_branch_id}','2') "
+            "WHERE workspace_id=:w AND id=:id"), {'w': self.workspace, 'id': message['id']})
+        self.project(dict(original, source_metadata_refresh=True))
+        self.assertEqual(self.messages()[0]['payload']['customer_branch_id'], 1)
+
     def family_jobs(self):
         return list(self.db.execute(text("SELECT * FROM outbox_events WHERE workspace_id=:w AND topic='crm.card.refresh'"),
             {'w':self.workspace}).mappings())

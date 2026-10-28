@@ -963,6 +963,8 @@ class AlfaMaxConnections:
                     existing = dict(existing) | {"conversation_id": conversation_id}
                 if (existing and same_source and not existing["payload"].get("possible_send_command_id")
                         and not existing['payload'].get('crm_recipient_stale')
+                        and existing['payload'].get('customer_id') == (customer['customer_id'] if customer else None)
+                        and existing['payload'].get('customer_branch_id') == (customer['branch_id'] if customer else None)
                         and existing["payload"].get("crm_customer_ids") == sorted({r["customer_id"] for r in records if r})
                         and existing['payload'].get('crm_observed_customers') == [list(p) for p in observed_customers(item)]
                         and existing["payload"].get("crm_family_contacts") == [str(c) for c in family_contacts]

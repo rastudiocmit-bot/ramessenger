@@ -30,7 +30,7 @@ from center_messenger.attachment_audit import BrowserProbe, load_source
 from center_messenger.config import Settings
 from center_messenger.connector_vault import ConnectorVault
 from center_messenger.database import make_engine
-from center_messenger.message_order import message_order
+from center_messenger.message_order import message_order, visible_message
 
 
 def peer_tag(peer):
@@ -214,6 +214,38 @@ def inspect_card(probe, branch, customer, expected_peer, renew, contact_phone=No
     return report
 
 
+def current_target(service, db, workspace, connection, case):
+    """Read the visible source and production reply target in one snapshot."""
+    payload = db.execute(text("SELECT m.payload FROM messages m JOIN conversations c "
+        "ON c.workspace_id=m.workspace_id AND c.id=m.conversation_id "
+        "WHERE m.workspace_id=:w AND c.id=:conv AND c.connection_id=:conn "
+        "AND m.direction='in' AND m.actor_type='contact' AND " + visible_message('m') +
+        " AND coalesce(m.payload->>'crm_mirror','false')<>'true' "
+        "AND m.payload->>'customer_id' IS NOT NULL AND m.payload->>'customer_branch_id' IS NOT NULL "
+        "ORDER BY " + message_order(descending=True) + " LIMIT 1"),
+        {'w': workspace, 'conv': case['conversation_id'], 'conn': connection}).scalar_one_or_none()
+    for name in ('target_error_code', 'error_code', 'stored_incoming',
+                 'expected_peer_tag', 'contact_phone_tag'):
+        case.pop(name, None)
+    if payload:
+        # Whitelist metadata: never include message bodies, raw MAX IDs,
+        # phones, names, credentials or the encrypted browser session.
+        case['stored_incoming'] = {key: payload.get(key) for key in (
+            'crm_record_id', 'branch_id', 'customer_id', 'customer_branch_id',
+            'crm_customer_ids', 'crm_observed_customers', 'crm_recipient_stale')}
+        case.update(branch=int(payload['customer_branch_id']), customer=int(payload['customer_id']))
+    try:
+        target = service._send_target_in_transaction(db, workspace, connection, case['conversation_id'])
+    except AlfaBrowserError as error:
+        case['target_error_code'] = error.code
+        return None
+    peer, phone = target.get('max_user_id'), target.get('contact_phone')
+    case.update(branch=target['branch'], customer=target['customer'],
+                expected_peer_tag=peer_tag(peer),
+                contact_phone_tag=peer_tag('phone:' + phone) if phone else None)
+    return peer, phone
+
+
 def main():
     config = Settings()
     engine = make_engine(config)
@@ -238,25 +270,7 @@ def main():
             for failure in failed:
                 case = {'conversation_id': str(failure['conversation_id']), 'last_error': failure['last_error_code']}
                 report['cases'].append(case)
-                payload = db.execute(text("SELECT m.payload FROM messages m WHERE m.workspace_id=:w AND m.conversation_id=:c "
-                    "AND m.direction='in' AND m.payload->>'customer_id' IS NOT NULL "
-                    "AND m.payload->>'customer_branch_id' IS NOT NULL ORDER BY " + message_order(descending=True) + " LIMIT 1"),
-                    {'w': workspace, 'c': failure['conversation_id']}).scalar_one_or_none()
-                if not payload:
-                    case['error_code'] = 'no_incoming_target'
-                    continue
-                case.update(branch=int(payload['customer_branch_id']), customer=int(payload['customer_id']))
-                peer, phone = None, None
-                try:
-                    target = service._send_target_in_transaction(db, workspace, source['connection_id'], failure['conversation_id'])
-                    peer = target.get('max_user_id')
-                    phone = target.get('contact_phone')
-                    case.update(branch=target['branch'], customer=target['customer'])
-                except AlfaBrowserError as error:
-                    case['target_error_code'] = error.code
-                case['expected_peer_tag'] = peer_tag(peer)
-                case['contact_phone_tag'] = peer_tag('phone:' + phone) if phone else None
-                targets.append((case, peer, phone))
+                targets.append(case)
         if targets:
             report['stage'] = 'browser_lease'
             with wait_for_browser(service, workspace, source['connection_id'], report) as operation:
@@ -277,7 +291,15 @@ def main():
                         service.sessions.renew(db, operation)
                 with RecipientProbe(source['origin'], state) as probe:
                     report['stage'] = 'source_forms'
-                    for case, peer, phone in targets:
+                    for case in targets:
+                        # The loader can repair a binding while this probe
+                        # waits for Chromium. Inspect the current target, not
+                        # a stale address captured before lease acquisition.
+                        with service.accounts.transaction(workspace_id=workspace, snapshot=True) as db:
+                            selected = current_target(service, db, workspace, source['connection_id'], case)
+                        if selected is None:
+                            continue
+                        peer, phone = selected
                         print(f"Проверяем MAX: branch={case['branch']} customer={case['customer']}",
                               file=sys.stderr, flush=True)
                         try:
@@ -285,6 +307,7 @@ def main():
                         except AlfaBrowserError as error:
                             case['error_code'] = error.code
                     errors = [case.get('error_code') for case in report['cases']]
+                    errors += [case.get('target_error_code') for case in report['cases']]
                     errors += [item.get('error_code') for case in report['cases']
                                for item in case.get('source', {}).get('forms', [])]
                     if not any(code in {'reauth_required', 'otp_required'} for code in errors):
