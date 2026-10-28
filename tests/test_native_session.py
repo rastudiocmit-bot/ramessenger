@@ -450,8 +450,8 @@ class NativeSessionTests(unittest.TestCase):
         self.assertIsNone(self.db.execute(text('SELECT revoked_at FROM auth_sessions WHERE id=:id'), {'id': owner_session}).scalar_one())
         self.assertEqual(self.db.execute(text("SELECT role FROM workspace_memberships m JOIN auth_users u ON u.id=m.user_id WHERE u.email='new-operator@example.com'")).scalar_one(), 'operator')
 
-    def queue_operator_reply(self):
-        self.project(self.row())
+    def queue_operator_reply(self, row=None):
+        self.project(row or self.row())
         self.membership.update(role='operator', sections=['messages'])
         self.db.execute(text("INSERT INTO workspace_memberships(workspace_id,user_id,role,sections) VALUES(:w,:u,'operator',ARRAY['messages'])"),
                         {'w': self.workspace, 'u': self.user})
@@ -479,6 +479,46 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(state, 'accepted')
         messaging.run_next('send', 'alfa_max_browser')
         self.service.browser.send.assert_called_once()
+
+    def test_proven_dialog_peer_reaches_browser_and_outgoing_receipt(self):
+        incoming = dict(self.row(), max_user_id='77')
+        messaging, command = self.queue_operator_reply(incoming)
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(self.service.browser.send.call_args.kwargs['expected_peer'], '77')
+        payload = self.db.execute(text('SELECT payload FROM messages WHERE send_command_id=:id'),
+                                  {'id': command['command_id']}).scalar_one()
+        self.assertEqual(payload['max_user_id'], '77')
+        self.assertEqual(self.native_command(command)['state'], 'accepted')
+
+    def test_peer_change_during_form_preparation_prevents_post(self):
+        messaging, command = self.queue_operator_reply(dict(self.row(), max_user_id='77'))
+        posted = []
+        def send(*args, **options):
+            self.db.execute(text("UPDATE messages SET payload=jsonb_set(payload,'{max_user_id}','\"78\"'::jsonb) "
+                                 'WHERE workspace_id=:w AND direction=:direction'),
+                            {'w': self.workspace, 'direction': 'in'})
+            options['before_post']()
+            posted.append(True)
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(posted, [])
+        self.assertEqual(self.native_command(command)['state'], 'queued')
+        self.assertEqual(self.native_command(command)['last_error_code'], 'settings_changed')
+
+    def test_loss_of_proven_peer_during_form_preparation_prevents_post(self):
+        messaging, command = self.queue_operator_reply(dict(self.row(), max_user_id='77'))
+        posted = []
+        def send(*args, **options):
+            self.db.execute(text("UPDATE messages SET payload=payload-'max_user_id' "
+                                 'WHERE workspace_id=:w AND direction=:direction'),
+                            {'w': self.workspace, 'direction': 'in'})
+            options['before_post']()
+            posted.append(True)
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(posted, [])
+        self.assertEqual(self.native_command(command)['state'], 'queued')
+        self.assertEqual(self.native_command(command)['last_error_code'], 'settings_changed')
 
     def test_revoked_operator_is_cancelled_without_touching_crm_session(self):
         messaging, command = self.queue_operator_reply()
