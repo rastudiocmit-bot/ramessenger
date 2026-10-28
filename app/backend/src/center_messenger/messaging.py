@@ -3,6 +3,7 @@
 import hmac
 import json
 import logging
+import re
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -390,6 +391,18 @@ class Messaging:
                 return False
             identifier = self._state(db, job, command, 'accepted')
             self._native_phase(db, job, attempt, 'accepted')
+            peer = receipt.get('max_user_id')
+            if (isinstance(peer, str) and re.fullmatch(r'[1-9][0-9]{0,18}', peer)
+                    and isinstance(receipt.get('branch_id'), int) and not isinstance(receipt['branch_id'], bool)
+                    and isinstance(receipt.get('customer_id'), int) and not isinstance(receipt['customer_id'], bool)):
+                # The supervised browser returns the actually submitted form's
+                # peer before exporting cookies. Preserve it for reconciliation.
+                db.execute(text("UPDATE messages SET payload=payload||jsonb_build_object('max_user_id',CAST(:peer AS text)) "
+                    "WHERE workspace_id=:w AND id=:id AND payload->>'crm_branch'=:branch "
+                    "AND payload->>'customer_id'=:customer "
+                    "AND (payload->>'max_user_id' IS NULL OR payload->>'max_user_id'=:peer)"),
+                    {'w': job['workspace_id'], 'id': identifier,
+                    'peer': peer, 'branch': str(receipt['branch_id']), 'customer': str(receipt['customer_id'])})
             db.execute(text('UPDATE messages SET occurred_at=clock_timestamp(),version=version+1 '
                             'WHERE workspace_id=:w AND id=:id'), {'w': job['workspace_id'], 'id': identifier})
             changed(db, job['workspace_id'], command['conversation_id'], identifier)
@@ -490,8 +503,8 @@ class Messaging:
                     from center_messenger.alfa_session import control
                     if control(latest['session_snapshot']).get('needs_check'):
                         raise AlfaBrowserError('session_check_pending')
-                    if ((latest['branch'], latest['customer'], latest.get('max_user_id'))
-                            != (target['branch'], target['customer'], target.get('max_user_id'))):
+                    if ((latest['branch'], latest['customer'], latest.get('max_user_id'), latest.get('contact_phone'))
+                            != (target['branch'], target['customer'], target.get('max_user_id'), target.get('contact_phone'))):
                         raise AlfaBrowserError('settings_changed')
                     self._native_phase(db, job, attempt, 'post_started')
                     # Correlate a delayed/unknown send with the source journal

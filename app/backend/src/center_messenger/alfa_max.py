@@ -1224,12 +1224,14 @@ class AlfaMaxConnections:
                 "SELECT m.payload FROM conversations c JOIN messages m ON "
                 "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
                 "WHERE c.workspace_id=:w AND c.id=:conv AND m.direction='in' "
+                "AND c.connection_id=:connection AND m.actor_type='contact' "
                 "AND m.payload->>'customer_id' IS NOT NULL "
                 "AND m.payload->>'customer_branch_id' IS NOT NULL "
-                "AND coalesce(m.payload->>'deleted','false')<>'true' "
+                "AND " + visible_message('m') + " "
+                "AND coalesce(m.payload->>'crm_mirror','false')<>'true' "
                 "ORDER BY " + message_order(descending=True) + " LIMIT 1"
             ),
-            {"w": workspace, "conv": conversation},
+            {"w": workspace, "conv": conversation, "connection": connection},
         ).scalar_one_or_none()
         if not target:
             raise AlfaBrowserError("history_unavailable")
@@ -1251,13 +1253,15 @@ class AlfaMaxConnections:
                     "SELECT DISTINCT m.payload->>'max_user_id' "
                     "FROM conversations c JOIN messages m ON "
                     "m.workspace_id=c.workspace_id AND m.conversation_id=c.id "
-                    "WHERE c.workspace_id=:w AND c.id=:conv AND m.direction='in' "
+                    "WHERE c.workspace_id=:w AND c.id=:conv AND c.connection_id=:connection "
+                    "AND m.direction='in' AND m.actor_type='contact' "
                     "AND ((m.payload->>'customer_id'=:customer "
                     "AND m.payload->>'customer_branch_id'=:branch) "
                     "OR (cardinality(CAST(:family AS text[]))>0 "
                     "AND jsonb_typeof(m.payload->'crm_family_contacts')='array' "
                     "AND jsonb_exists_any(m.payload->'crm_family_contacts',CAST(:family AS text[])))) "
-                    "AND coalesce(m.payload->>'deleted','false')<>'true' "
+                    "AND " + visible_message('m') + " "
+                    "AND coalesce(m.payload->>'crm_mirror','false')<>'true' "
                     "AND m.payload->>'max_user_id' IS NOT NULL"
                 ),
                 {
@@ -1266,6 +1270,7 @@ class AlfaMaxConnections:
                     "customer": str(target["customer_id"]),
                     "branch": str(target["customer_branch_id"]),
                     "family": family,
+                    "connection": connection,
                 },
             ).scalars())
             if any(not re.fullmatch(r"[1-9][0-9]{0,18}", value) for value in peers):
@@ -1273,6 +1278,21 @@ class AlfaMaxConnections:
             if len(peers) > 1:
                 raise AlfaBrowserError("multiple_recipients")
             peer = next(iter(peers), None)
+        phone = None
+        if peer is None:
+            # The dialogue represents the directory's primary CRM contact. A
+            # native phone-row link may disambiguate its account on THIS exact
+            # Customer card. Display-card preferences and phone aliases never
+            # change the Customer ID used for sending.
+            snapshot = DirectoryReader._published(db, workspace)
+            if snapshot and snapshot['connection_id'] == row['current_crm_connection_id']:
+                directory = customer_directory(db, workspace, snapshot, [int(target['customer_id'])])
+                resolved = resolve_customer({'customer_id': int(target['customer_id']),
+                    'branch_id': int(target['customer_branch_id'])}, directory)
+                family = target.get('crm_family_contacts') or []
+                if (resolved.get('contact_id') and resolved['branch_id'] == int(target['customer_branch_id'])
+                        and (resolved.get('global_id_verified') or str(resolved['contact_id']) in family)):
+                    phone = resolved.get('primary_phone')
         session = self.vault.open_browser_state(workspace, connection, row["session_ciphertext"])
         return {
             "origin": row["crm_origin"],
@@ -1280,6 +1300,7 @@ class AlfaMaxConnections:
             "branch": int(target["customer_branch_id"]),
             "customer": int(target["customer_id"]),
             "max_user_id": peer,
+            "contact_phone": phone,
             "session_snapshot": dict(row),
         }
 
@@ -1298,6 +1319,7 @@ class AlfaMaxConnections:
             try:
                 result = self.browser.send(target["origin"], target["state"], target["branch"], target["customer"], message,
                     expected_peer=target.get("max_user_id"),
+                    expected_phone=target.get('contact_phone'),
                     before_post=lambda: guard(before_post), on_accepted=on_accepted,
                     heartbeat=lambda: guard(heartbeat), stopping=stopping)
             except AlfaBrowserError as error:

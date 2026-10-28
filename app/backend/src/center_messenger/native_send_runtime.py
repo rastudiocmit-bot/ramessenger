@@ -129,7 +129,7 @@ class ProcessTree:
                 pipe.close()
 
 
-def run_send(origin, state, branch, customer, message, *, expected_peer=None, before_post=None,
+def run_send(origin, state, branch, customer, message, *, expected_peer=None, expected_phone=None, before_post=None,
              on_accepted=None, heartbeat=None, stopping=None, budget=BUDGET,
              command=None):
     if not runtime_supported():
@@ -140,7 +140,7 @@ def run_send(origin, state, branch, customer, message, *, expected_peer=None, be
     work_until = deadline - min(2, budget / 10)
     payload = {'origin': origin, 'state': {k: state[k] for k in ('cookies', 'origins') if k in state},
                'branch': branch, 'customer': customer, 'text': message, 'deadline': work_until,
-               'expected_peer': expected_peer}
+               'expected_peer': expected_peer, 'expected_phone': expected_phone}
     pending = json.dumps(payload, ensure_ascii=False).encode() + b'\n'
     if len(pending) > MAX_PACKET:
         raise AlfaBrowserError('form_unavailable')
@@ -292,7 +292,8 @@ def main():
         return answer['timeout_ms']
     try:
         result = AlfaMaxBrowser()._send_inline(data['origin'], data['state'], data['branch'], data['customer'],
-            data['text'], deadline=data['deadline'], expected_peer=data.get('expected_peer'), before_post=prepare,
+            data['text'], deadline=data['deadline'], expected_peer=data.get('expected_peer'),
+            expected_phone=data.get('expected_phone'), before_post=prepare,
             on_accepted=lambda receipt: _emit({'event': 'accepted', 'result': receipt}),
             on_rejected=lambda code: _emit({'event': 'error', 'code': code}))
         _emit({'event': 'result', 'result': result})

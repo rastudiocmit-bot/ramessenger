@@ -688,7 +688,7 @@ def _validated_compose_url(value, *, origin, branch, customer):
     return address
 
 
-def _customer_card_compose_url(markup, *, origin, branch, customer, expected_peer=None):
+def _customer_card_compose_url(markup, *, origin, branch, customer, expected_peer=None, expected_phone=None):
     """Find the exact native MAX compose route exposed by a customer card."""
     if not isinstance(markup, str) or len(markup.encode("utf-8", "ignore")) > MAX_HTML_BYTES:
         raise AlfaBrowserError("form_unavailable")
@@ -702,9 +702,57 @@ def _customer_card_compose_url(markup, *, origin, branch, customer, expected_pee
     for node in soup.select("[href], [data-url], [data-href], [onclick]"):
         values.extend(node.get(name) for name in ("href", "data-url", "data-href"))
         values.extend(match.group(1) for match in ONCLICK_BULK_URL.finditer(node.get("onclick", "")))
-    return _compose_url_from_values(
-        values, origin=origin, branch=branch, customer=customer, expected_peer=expected_peer
-    )
+    try:
+        return _compose_url_from_values(
+            values, origin=origin, branch=branch, customer=customer, expected_peer=expected_peer
+        )
+    except AlfaBrowserError as error:
+        if error.code != 'multiple_recipients' or expected_peer is not None or not expected_phone:
+            raise
+        return _contact_phone_compose_url(soup, origin=origin, branch=branch,
+                                         customer=customer, expected_phone=expected_phone)
+
+
+def _contact_phone_compose_url(soup, *, origin, branch, customer, expected_phone):
+    """Use an explicit native MAX link on the current CRM contact's phone row.
+
+    A phone is never a MAX ID and never changes the CRM Customer ID. Only the
+    observed contact-row layout may connect this contact to one native link;
+    message-feed text, secondary phones and broad card ancestors prove nothing.
+    """
+    from center_messenger.crm_directory import phone_number
+    wanted = phone_number(expected_phone)
+    if not wanted or wanted != expected_phone:
+        raise AlfaBrowserError('invalid_recipient')
+    choices = []
+    for row in soup.select('div.col-xs-7.m-b-xs.text-right.word-break'):
+        if row.find_parent(class_='feed-element') or row.select_one('.feed-element'):
+            continue
+        # Actual CRM contact rows contain one phone and its messenger buttons.
+        value = row.get_text(' ', strip=True)
+        if len(value) > 2000:
+            continue
+        phones = {phone_number(match.group()) for match in re.finditer(
+            r'(?<!\d)(?:\+7|7|8)(?:[\s().-]*\d){10}(?!\d)', value)} - {None}
+        for node in row.select('a[href^="tel:"]'):
+            phone = phone_number(node.get('href', '')[4:])
+            if phone:
+                phones.add(phone)
+        if phones != {wanted}:
+            continue
+        for node in row.select('[href],[data-url],[data-href],[onclick]'):
+            candidates = [node.get(name) for name in ('href', 'data-url', 'data-href')]
+            candidates += [m.group(1) for m in ONCLICK_BULK_URL.finditer(node.get('onclick', ''))]
+            for candidate in candidates:
+                try:
+                    address = _validated_compose_url(candidate, origin=origin, branch=branch, customer=customer)
+                except AlfaBrowserError:
+                    continue
+                if _compose_url_max_user_id(address):
+                    choices.append(address)
+    if not choices:
+        raise AlfaBrowserError('multiple_recipients')
+    return _compose_url_from_values(choices, origin=origin, branch=branch, customer=customer)
 
 
 ONCLICK_BULK_URL = re.compile(r"""["']((?:https://[^"']+)?/company/\d+/max/bulk[^"']*)["']""")
@@ -723,6 +771,12 @@ CARD_LINKS_SCRIPT = r"""(limit) => {
   }
   return out;
 }"""
+
+CARD_CONTACT_ROWS_SCRIPT = r"""() => Array.from(
+  document.querySelectorAll('div.col-xs-7.m-b-xs.text-right.word-break')
+).filter(row => !row.closest('.feed-element') && !row.querySelector('.feed-element'))
+ .slice(0, 100).map(row => row.outerHTML).filter(html => html.length <= 16384)
+ .join('')"""
 
 
 def _compose_url_key(value):
@@ -1262,7 +1316,7 @@ class AlfaMaxBrowser:
         return run_send(origin, state, branch, customer, text, **options)
 
     def _send_inline(self, origin, state, branch, customer, text, *, deadline=None,
-                     expected_peer=None, before_post=None, on_accepted=None, on_rejected=None):
+                     expected_peer=None, expected_phone=None, before_post=None, on_accepted=None, on_rejected=None):
         # Only the supervised child calls this in production.
         deadline = deadline if deadline is not None else time.monotonic() + 90
 
@@ -1369,14 +1423,23 @@ class AlfaMaxBrowser:
             card_markup = page.content()
             if len(card_markup.encode("utf-8", "ignore")) > MAX_HTML_BYTES:
                 links = page.evaluate(CARD_LINKS_SCRIPT, 500)
-                form_url = _compose_url_from_values(
-                    links if isinstance(links, list) else [], origin=origin, branch=branch,
-                    customer=customer, expected_peer=expected_peer,
-                )
+                try:
+                    form_url = _compose_url_from_values(
+                        links if isinstance(links, list) else [], origin=origin, branch=branch,
+                        customer=customer, expected_peer=expected_peer,
+                    )
+                except AlfaBrowserError as error:
+                    if error.code != 'multiple_recipients' or expected_peer is not None or not expected_phone:
+                        raise
+                    fragments = page.evaluate(CARD_CONTACT_ROWS_SCRIPT)
+                    if not isinstance(fragments, str) or len(fragments.encode('utf-8')) > MAX_HTML_BYTES:
+                        raise AlfaBrowserError('form_unavailable')
+                    form_url = _contact_phone_compose_url(BeautifulSoup(fragments, 'html.parser'),
+                        origin=origin, branch=branch, customer=customer, expected_phone=expected_phone)
             else:
                 form_url = _customer_card_compose_url(
                     card_markup, origin=origin, branch=branch, customer=customer,
-                    expected_peer=expected_peer,
+                    expected_peer=expected_peer, expected_phone=expected_phone,
                 )
             if not form_url:
                 form_url = _inherit_max_user_id(fallback_url, expected_peer)
@@ -1490,7 +1553,8 @@ class AlfaMaxBrowser:
                 data.get("toastr_success") or data.get("success") is True
             ):
                 raise AlfaBrowserError("send_unknown")
-            accepted = {"accepted": True, "branch_id": int(branch), "text_length": len(text)}
+            accepted = {"accepted": True, "branch_id": int(branch), "customer_id": int(customer),
+                        "max_user_id": form['max_user_id'], "text_length": len(text)}
             if on_accepted:
                 on_accepted(dict(accepted))
             try:

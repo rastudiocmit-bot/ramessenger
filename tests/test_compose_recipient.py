@@ -8,6 +8,7 @@ from center_messenger.alfa_max_browser import (
     AlfaBrowserError,
     AlfaMaxBrowser,
     _compose_url_from_values,
+    _customer_card_compose_url,
     parse_compose_form,
     parse_history_html,
 )
@@ -18,6 +19,81 @@ BASE = '/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42'
 
 
 class ComposeRecipientTests(unittest.TestCase):
+    def phone_row(self, phone, peer, *, base=BASE):
+        return ('<div class="col-xs-7 m-b-xs text-right word-break">' + phone
+                + f'<a href="{base}&maxUserId={peer}">MAX</a></div>')
+
+    def test_multiple_native_accounts_select_the_verified_contact_phone_link(self):
+        html = self.phone_row('+7(916)123-45-67', '77') + self.phone_row('+7(985)123-45-67', '78')
+        for markup in [html, self.phone_row('+7(985)123-45-67', '78') + self.phone_row('8 (916) 123-45-67', '77')]:
+            selected = _customer_card_compose_url(markup, origin=ORIGIN, branch=1, customer=42,
+                                                  expected_phone='+79161234567')
+            self.assertIn('maxUserId=77', selected)
+
+    def test_explicit_source_peer_wins_over_contact_phone(self):
+        html = self.phone_row('+7(916)123-45-67', '77') + self.phone_row('+7(985)123-45-67', '78')
+        selected = _customer_card_compose_url(html, origin=ORIGIN, branch=1, customer=42,
+                                              expected_peer='78', expected_phone='+79161234567')
+        self.assertIn('maxUserId=78', selected)
+
+    def test_phone_does_not_turn_feed_text_a_broad_container_or_another_card_into_evidence(self):
+        valid = self.phone_row('+7(985)123-45-67', '78')
+        other = self.phone_row('+7(916)123-45-67', '77')
+        rejected = ['<div class="feed-element">' + other + '</div>',
+                    '<section>+7(916)123-45-67<a href="' + BASE + '&maxUserId=77">MAX</a></section>',
+                    self.phone_row('+7(916)123-45-67', '77', base=BASE.replace('42', '99')),
+                    self.phone_row('+7(916)123-45-67 +7(985)123-45-67', '77')]
+        # A second legitimate contact forces disambiguation; a foreign card's
+        # link cannot resolve it and never becomes the requested recipient.
+        second = self.phone_row('+7(999)123-45-67', '79')
+        for markup in rejected:
+            with self.subTest(markup=markup), self.assertRaises(AlfaBrowserError) as caught:
+                _customer_card_compose_url(valid + second + markup, origin=ORIGIN, branch=1,
+                                           customer=42, expected_phone='+79161234567')
+            self.assertEqual(caught.exception.code, 'multiple_recipients')
+
+    def test_same_phone_with_two_native_max_ids_stays_ambiguous(self):
+        html = self.phone_row('+7(916)123-45-67', '77') + self.phone_row('+7(916)123-45-67', '78')
+        with self.assertRaises(AlfaBrowserError) as caught:
+            _customer_card_compose_url(html, origin=ORIGIN, branch=1, customer=42, expected_phone='+79161234567')
+        self.assertEqual(caught.exception.code, 'multiple_recipients')
+
+    def test_native_send_uses_contact_route_and_reports_actual_peer(self):
+        page, context = Mock(), Mock()
+        page.url = ORIGIN + '/company/1/customer/view?id=42'
+        page.goto.return_value = SimpleNamespace(status=200)
+        page.content.return_value = self.phone_row('+7(985)123-45-67', '78') + self.phone_row('+7(916)123-45-67', '77')
+        form = ('<form action="' + BASE + '&maxUserId=77"><input name="_csrf" value="synthetic">'
+                '<input name="MaxComposeBulkForm[related_ids][]" value="42">'
+                '<textarea name="MaxComposeBulkForm[text]"></textarea></form>')
+        page.evaluate.side_effect = [{'status': 200, 'url': ORIGIN + BASE, 'text': form},
+                                    {'status': 200, 'url': ORIGIN + BASE, 'text': '{"success":true}'}]
+        context.storage_state.return_value = {'cookies': [], 'origins': []}
+        with patch.object(AlfaMaxBrowser, '_open', return_value=(Mock(), Mock(), context, page)):
+            result = AlfaMaxBrowser()._send_inline(ORIGIN, {}, 1, 42, 'Synthetic', expected_phone='+79161234567')
+        self.assertEqual(result['max_user_id'], '77')
+        self.assertEqual(result['customer_id'], 42)
+        self.assertIn('maxUserId=77', page.evaluate.call_args.args[1]['url'])
+
+    def test_long_card_collects_only_native_contact_rows_for_disambiguation(self):
+        from center_messenger.alfa_max_browser import MAX_HTML_BYTES
+        page, context = Mock(), Mock()
+        page.url = ORIGIN + '/company/1/customer/view?id=42'
+        page.goto.return_value = SimpleNamespace(status=200)
+        page.content.return_value = 'x' * (MAX_HTML_BYTES + 1)
+        contacts = self.phone_row('+7(985)123-45-67', '78') + self.phone_row('+7(916)123-45-67', '77')
+        form = ('<form action="' + BASE + '&maxUserId=77"><input name="_csrf" value="synthetic">'
+                '<input name="MaxComposeBulkForm[related_ids][]" value="42">'
+                '<textarea name="MaxComposeBulkForm[text]"></textarea></form>')
+        page.evaluate.side_effect = [[BASE + '&maxUserId=78', BASE + '&maxUserId=77'], contacts,
+            {'status': 200, 'url': ORIGIN + BASE, 'text': form},
+            {'status': 200, 'url': ORIGIN + BASE, 'text': '{"success":true}'}]
+        context.storage_state.return_value = {'cookies': [], 'origins': []}
+        with patch.object(AlfaMaxBrowser, '_open', return_value=(Mock(), Mock(), context, page)):
+            result = AlfaMaxBrowser()._send_inline(ORIGIN, {}, 1, 42, 'Synthetic', expected_phone='+79161234567')
+        self.assertEqual(result['max_user_id'], '77')
+        self.assertIn('maxUserId=77', page.evaluate.call_args.args[1]['url'])
+
     def select(self, links, **options):
         return _compose_url_from_values(links, origin=ORIGIN, branch=1, customer=42, **options)
 

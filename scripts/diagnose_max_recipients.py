@@ -22,6 +22,7 @@ from center_messenger.alfa_max_browser import (
     AlfaBrowserError, MAX_HTML_BYTES, ONCLICK_BULK_URL, _compose_url_key,
     _compose_url_max_user_id, _inherit_max_user_id, _json_envelope, _login_form,
     _otp_form, _validated_compose_url, parse_compose_form,
+    _customer_card_compose_url,
 )
 from center_messenger.alfa_service import AlfaConnections
 from center_messenger.alfa_session import control, stamp
@@ -156,13 +157,19 @@ class RecipientProbe(BrowserProbe):
             raise AlfaBrowserError('crm_unavailable')
 
 
-def inspect_card(probe, branch, customer, expected_peer, renew):
+def inspect_card(probe, branch, customer, expected_peer, renew, contact_phone=None):
     renew()
     markup = probe.navigate(f'{probe.origin}/company/{branch}/customer/view?' + urlencode({'id': customer}))
     choices = routes(markup, probe.origin, branch, customer)
     report = {'compose_routes': len(choices), 'routes_truncated': len(choices) > 4,
               'card_peer_tags': sorted({peer_tag(peer) for address in choices
                                        if (peer := _compose_url_max_user_id(address))}), 'forms': []}
+    try:
+        selected = _customer_card_compose_url(markup, origin=probe.origin, branch=branch,
+            customer=customer, expected_peer=expected_peer, expected_phone=contact_phone)
+        report['sender_resolution'] = {'selected_peer_tag': peer_tag(_compose_url_max_user_id(selected))}
+    except AlfaBrowserError as error:
+        report['sender_resolution'] = {'error_code': error.code}
     if not choices:
         choices = [f'{probe.origin}/company/{branch}/max/bulk?' + urlencode([
             ('related_class', 'Customer'), ('related_ids[]', customer)])]
@@ -239,15 +246,17 @@ def main():
                     case['error_code'] = 'no_incoming_target'
                     continue
                 case.update(branch=int(payload['customer_branch_id']), customer=int(payload['customer_id']))
-                peer = None
+                peer, phone = None, None
                 try:
                     target = service._send_target_in_transaction(db, workspace, source['connection_id'], failure['conversation_id'])
                     peer = target.get('max_user_id')
+                    phone = target.get('contact_phone')
                     case.update(branch=target['branch'], customer=target['customer'])
                 except AlfaBrowserError as error:
                     case['target_error_code'] = error.code
                 case['expected_peer_tag'] = peer_tag(peer)
-                targets.append((case, peer))
+                case['contact_phone_tag'] = peer_tag('phone:' + phone) if phone else None
+                targets.append((case, peer, phone))
         if targets:
             report['stage'] = 'browser_lease'
             with wait_for_browser(service, workspace, source['connection_id'], report) as operation:
@@ -268,11 +277,11 @@ def main():
                         service.sessions.renew(db, operation)
                 with RecipientProbe(source['origin'], state) as probe:
                     report['stage'] = 'source_forms'
-                    for case, peer in targets:
+                    for case, peer, phone in targets:
                         print(f"Проверяем MAX: branch={case['branch']} customer={case['customer']}",
                               file=sys.stderr, flush=True)
                         try:
-                            case['source'] = inspect_card(probe, case['branch'], case['customer'], peer, renew)
+                            case['source'] = inspect_card(probe, case['branch'], case['customer'], peer, renew, phone)
                         except AlfaBrowserError as error:
                             case['error_code'] = error.code
                     errors = [case.get('error_code') for case in report['cases']]
