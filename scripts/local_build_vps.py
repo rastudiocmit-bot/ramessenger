@@ -15,6 +15,35 @@ REPO="rastudiocmit-bot/ramessenger"
 STATE=ROOT/"local-build-state.json"
 COMPOSE=["docker","compose","-p","center-messenger","-f",str(ROOT/"compose.yaml")]
 
+def main_sha():
+    value=run("gh","api",f"repos/{REPO}/commits/main","--jq",".sha",timeout=60)
+    if not re.fullmatch(r"[a-f0-9]{40}",value):
+        raise RuntimeError("Invalid Git commit")
+    return value
+
+def promotion_fresh(sha, old_image):
+    """fresh_source_before_promotion: fence stale builds before any DB/API write."""
+    if main_sha()!=sha:
+        announce("SUPERSEDED: main advanced during build; live API unchanged")
+        return False
+    if inspect("center-messenger-api-1")["Config"]["Image"]!=old_image:
+        raise RuntimeError("Active image changed outside the project deploy lock")
+    return True
+
+def require_forward(state, current_image, sha):
+    """A reset/force-pushed main must not silently downgrade the live release."""
+    tag=re.fullmatch(r"center-messenger:(?:local|github)-([a-f0-9]{12})",current_image)
+    if not tag:
+        raise RuntimeError("Unknown current image provenance")
+    previous=state.get("last_deployed_sha","")
+    if not re.fullmatch(r"[a-f0-9]{40}",previous) or not previous.startswith(tag[1]):
+        previous=run("gh","api",f"repos/{REPO}/commits/{tag[1]}","--jq",".sha",timeout=60)
+    if not re.fullmatch(r"[a-f0-9]{40}",previous) or not previous.startswith(tag[1]):
+        raise RuntimeError("Cannot verify current source commit")
+    relation=run("gh","api",f"repos/{REPO}/compare/{previous}...{sha}","--jq",".status",timeout=60)
+    if relation not in {"ahead","identical"}:
+        raise RuntimeError("Main is not a descendant of the live release; manual review required")
+
 def public_url():
     """The messenger's public origin: CM_PUBLIC_URL from the environment or the deploy .env."""
     value = os.environ.get("CM_PUBLIC_URL", "")
@@ -145,15 +174,17 @@ def main(preview):
     if not preview and s.get("enabled") is not True:
         announce("DISABLED: local-build-state enabled is not true")
         return
-    sha=run("gh","api",f"repos/{REPO}/commits/main","--jq",".sha",timeout=60)
-    if not re.fullmatch(r"[a-f0-9]{40}",sha):
-        raise RuntimeError("Invalid Git commit")
+    sha=main_sha()
     current=inspect("center-messenger-api-1")["Config"]["Image"]
     target="center-messenger:local-"+sha[:12]
     announce("MAIN",sha,"CURRENT",current,"TARGET",target)
     if preview:
         announce("PREVIEW: no clone, build or changes")
         return
+    if current!=target:
+        # Validate before self-update too: otherwise a reset of main could
+        # replace this protection with an older runner before it is checked.
+        require_forward(s,current,sha)
     self_update(sha)
     if current==target:
         s["last_deployed_sha"]=sha
@@ -174,6 +205,8 @@ def main(preview):
             "scripts",cwd=src,timeout=120)
         run("python3","-m","unittest","discover","-s","tests",
             "-p","test_github_deploy_rollback.py",cwd=src,timeout=120)
+        run("python3","-m","unittest","discover","-s","tests",
+            "-p","test_support_access.py",cwd=src,timeout=120)
         announce("BUILD",target)
         subprocess.run(["docker","build","--platform","linux/amd64","--build-arg","CM_BUILD_SHA="+sha,"-t",target,"."],
                        cwd=src,check=True,timeout=1500)
@@ -195,9 +228,18 @@ def main(preview):
             history=alembic(target,"history","-r",db_rev+":head")
             if not history or db_rev not in history:
                 raise RuntimeError("Database revision "+db_rev+" is not in the image history")
-        _,db_rev=guard(src)
+        current_image,current_rev=guard(src)
+        if current_image!=old or current_rev!=db_rev:
+            raise RuntimeError("API or schema changed during build")
+        if not promotion_fresh(sha,old):
+            return
         dest=backup()
         announce("BACKUP VERIFIED",dest)
+        # A second agent can publish while pg_dump runs. Once this check passes,
+        # the serialized promotion is pinned to sha through migration/readiness/
+        # rollback; a newer request is processed on the next service run.
+        if not promotion_fresh(sha,old):
+            return
         sys.path.insert(0,str(ROOT))
         from github_promote_vps import deploy_api_with_rollback
         migrated=False
