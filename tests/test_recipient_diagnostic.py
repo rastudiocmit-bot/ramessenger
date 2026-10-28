@@ -18,6 +18,38 @@ BASE = '/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42'
 
 
 class RecipientDiagnosticTests(unittest.TestCase):
+    def test_current_target_reports_visible_source_metadata_and_actual_routed_card(self):
+        service, db = Mock(), Mock()
+        payload = {'customer_id': 9805, 'customer_branch_id': 2, 'crm_record_id': '52289',
+            'branch_id': 4, 'crm_customer_ids': [9751], 'crm_observed_customers': [[4, 9751]],
+            'crm_recipient_stale': True, 'max_user_id': '777777', 'text': 'private text',
+            'actor_name': 'private name'}
+        db.execute.return_value.scalar_one_or_none.return_value = payload
+        service._send_target_in_transaction.return_value = {'branch': 1, 'customer': 9751,
+            'max_user_id': '888888', 'contact_phone': '+79161234567', 'state': 'secret cookies'}
+        case = {'conversation_id': 'conversation', 'target_error_code': 'old_error'}
+        self.assertEqual(audit.current_target(service, db, 'w', 'channel', case), ('888888', '+79161234567'))
+        self.assertEqual((case['branch'], case['customer']), (1, 9751))
+        self.assertEqual(case['stored_incoming']['customer_id'], 9805)
+        self.assertNotIn('target_error_code', case)
+        rendered = json.dumps(case)
+        for secret in ('777777', '888888', '+79161234567', 'private', 'cookies'):
+            self.assertNotIn(secret, rendered)
+        query, parameters = db.execute.call_args.args
+        self.assertEqual(set(query._bindparams), set(parameters))
+        for fence in ('connection_id=:conn', 'crm_mirror', 'superseded_by', "actor_type='contact'"):
+            self.assertIn(fence, str(query))
+
+    def test_blocked_current_target_never_falls_back_to_a_stored_address(self):
+        service, db = Mock(), Mock()
+        db.execute.return_value.scalar_one_or_none.return_value = {'customer_id': 9805, 'customer_branch_id': 2}
+        service._send_target_in_transaction.side_effect = audit.AlfaBrowserError('invalid_recipient')
+        case = {'conversation_id': 'conversation', 'expected_peer_tag': 'stale', 'contact_phone_tag': 'stale'}
+        self.assertIsNone(audit.current_target(service, db, 'w', 'channel', case))
+        self.assertEqual(case['target_error_code'], 'invalid_recipient')
+        self.assertNotIn('expected_peer_tag', case)
+        self.assertNotIn('contact_phone_tag', case)
+
     def wait_scope(self):
         clock = [0.0]
         self.enterContext(patch.object(audit.time, 'monotonic', side_effect=lambda: clock[0]))

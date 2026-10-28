@@ -102,6 +102,15 @@ def new_records(db, workspace, connection, branch, records):
                 (row['customer_ids'] or ([row['customer_id']] if row['customer_id'] else []))})
             changed = (any(hint != observed for hint in hints) if hints
                        else legacy_ids != wanted or len(wanted) > 1)
+            # A source signature and its chosen reply address can disagree in
+            # legacy/partially repaired projections. Matching the signature
+            # alone must not keep an address outside this source/family alive.
+            for row in saved_rows:
+                selected = int(row['customer_id']) if row['customer_id'] else None
+                projected = row['customer_ids'] or ([selected] if selected else [])
+                if ((selected is not None and (selected not in wanted or selected not in projected))
+                        or (selected is None and wanted)):
+                    changed = True
             changed = changed or any(row['recipient_stale'] == 'true' for row in saved_rows)
             if changed:
                 continue
