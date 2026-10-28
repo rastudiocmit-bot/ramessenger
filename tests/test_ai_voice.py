@@ -345,6 +345,18 @@ class SettingsTest(unittest.TestCase):
 
 
 class AgentRulesTest(unittest.TestCase):
+    def test_task_agent_is_tested_like_the_task_sheet(self):
+        voice, _ = service(role="admin", deepseek=True, ds_client=FakeClient(
+            normalized='<think>{"title": "черновик"}</think>{"title": "Записать Мишу на пробное", "details": "— суббота"}'))
+        answer = voice.test_agent(ACTOR, WS, {"text": "Запишите Мишу на пробное в субботу", "task": "tasks",
+                                              "model": "deepseek-v4-pro", "prompt": "Правила"})
+        self.assertEqual(answer["text"], "Что сделать: Записать Мишу на пробное\nПодробности:\n— суббота")
+        self.assertFalse(answer["fallback"])
+
+    def test_reasoning_block_is_not_part_of_the_answer(self):
+        self.assertEqual(v.visible("<think>план</think> Готово."), "Готово.")
+        self.assertEqual(v.visible("<think>оборвалось"), "")
+
     def test_agent_fields_are_checked(self):
         ok = v._clean_agent({"name": "  Чистовик   ответа ", "model": "yandexgpt-5.1", "prompt": " Убери паразитов ",
                              "temperature": 0.25})

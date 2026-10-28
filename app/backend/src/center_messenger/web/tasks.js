@@ -536,8 +536,9 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   }
   async function openSheet({ task = null, draft = null }) {
     sheet ||= buildSheet();
+    // A failed refresh keeps the sheet usable with the options already loaded.
     try { await context(!ctx || Date.now() - ctxAt > 30000); }
-    catch (error) { toast(error.message, true); return; }
+    catch (error) { if (!ctx) { toast(error.message, true); return; } }
     sheetTask = task; sheetDraft = draft ? { ...draft, sources: [...(draft.sources || [])] } : null;
     const editing = Boolean(task), form = sheet.querySelector("form");
     suggestSeq += 1;

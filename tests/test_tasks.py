@@ -102,6 +102,7 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(_json('<think>{"a": 1}</think> Итог: {"title": "Перезвонить"}'), {"title": "Перезвонить"})
         self.assertEqual(_json('```json\n{"title": "Записать"}\n```'), {"title": "Записать"})
         self.assertIsNone(_json("не знаю"))
+        self.assertEqual(_json('{"title": "Отработка", "meta": {"a": 1}}'), {"title": "Отработка", "meta": {"a": 1}})
 
 
 if __name__ == "__main__":

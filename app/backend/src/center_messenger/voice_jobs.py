@@ -54,6 +54,8 @@ class VoiceJobs:
     def run(self, key, actor, workspace, audio, agent_id):
         started = monotonic()
         with self.lock:
+            if key not in self.jobs:
+                return  # cancelled while it waited for a worker
             queued_at = self.jobs[key]["queued_at"]
             attempt_id = self.jobs[key]["attempt_id"]
             self.jobs[key]["status"] = "processing"

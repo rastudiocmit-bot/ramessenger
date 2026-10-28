@@ -33,7 +33,7 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    assert.equal(await page.locator('[data-gateway="mimo"] .gateway-status').getAttribute('data-state'),'active');
    if(process.env.CM_TEST_SCREENSHOTS){fs.mkdirSync(process.env.CM_TEST_SCREENSHOTS,{recursive:true});await page.locator('#gateway-providers-title').scrollIntoViewIfNeeded();await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`ai-gateway-providers-${width}.png`)});await card.scrollIntoViewIfNeeded();await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`ai-gateway-status-${width}.png`)});}
    await page.locator('#ai-routes-form [name=recognition_provider]').selectOption('mimo_plan');
-   assert.equal(await page.locator('#ai-routes-form [name=recognition_language]').inputValue(),'auto');
+   assert.equal(await page.locator('#ai-routes-form [name=recognition_language]').inputValue(),'ru');
    await page.locator('#ai-routes-form [name=recognition_language]').selectOption('en');
    await page.locator('#ai-routes-form button[type=submit]').click();
    await page.waitForFunction(()=>document.querySelector('#voice-active-summary').textContent.includes('MiMo Token Plan'));

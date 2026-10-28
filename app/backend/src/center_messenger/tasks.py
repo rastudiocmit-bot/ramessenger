@@ -10,6 +10,7 @@ join the message history; nothing here sends anything to a client.
 """
 
 import json
+import logging
 import re
 from datetime import datetime, time, timedelta
 from uuid import UUID, uuid4
@@ -130,14 +131,16 @@ def _json(answer):
     if not answer:
         return None
     text_ = re.sub(r"<think>.*?</think>", " ", str(answer), flags=re.S | re.I)
-    decoder, found = json.JSONDecoder(), None
-    for start in (m.start() for m in re.finditer(r"\{", text_)):
+    decoder, found, start = json.JSONDecoder(), None, text_.find("{")
+    while start != -1:
         try:
-            value, _ = decoder.raw_decode(text_, start)
+            value, end = decoder.raw_decode(text_, start)
         except ValueError:
+            start = text_.find("{", start + 1)
             continue
         if isinstance(value, dict):
             found = value  # the last complete object wins: reasoning comes before the answer
+        start = text_.find("{", end)  # never a nested object of the one just read
     return found
 
 
@@ -465,6 +468,9 @@ class Tasks:
             return self.ai.assist(actor, workspace, instruction, content, **options)
         except AuthError:
             return None
+        except Exception as failure:  # the sheet works without the model
+            logging.getLogger(__name__).warning("Task AI failed workspace=%s cause=%s", workspace, type(failure).__name__)
+            return None
 
     def _fields(self, answer, now, zone, studio):
         data = _json(answer) or {}
@@ -523,7 +529,7 @@ class Tasks:
         content = self._transcript(before) + f"\nАдминистратор: {spoken}"
         answer = self._ai(actor, workspace, AI_HINT, content, max_tokens=5000, timeout=10)
         data_ai, title, kind, due = self._fields(answer, now, zone, studio)
-        if answer is not None and data_ai and data_ai.get("task") is False:
+        if answer is not None and data_ai and str(data_ai.get("task")).lower() in ("false", "0", "no", "нет"):
             return {"hint": None}
         if not title:
             # No model: the client's latest question is what was promised.

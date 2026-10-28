@@ -10,6 +10,7 @@ only who, when, which agent, seconds, tokens, cost and the outcome.
 """
 
 import logging
+import re
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import text
@@ -94,6 +95,16 @@ def _fail(code, provider="yandex"):
 
 def _iso(value):
     return value.isoformat() if value else None
+
+
+def visible(answer):
+    """The model's answer without a reasoning block («<think>…</think>») some models put first."""
+    return re.sub(r"<think>.*?(?:</think>|$)", " ", str(answer or ""), flags=re.S | re.I).strip()
+
+
+def task_instruction(instruction, rules, name=None):
+    """A task feature's own instruction plus the studio's rules from its «Задачи» agent."""
+    return f"{instruction}\n\nПравила студии{f' (агент «{name}»)' if name else ''}:\n{rules}"
 
 
 def _agent_public(row):
@@ -488,6 +499,7 @@ class AiVoice:
     def delete_agent(self, actor, workspace, agent_id):
         with self.accounts.transaction(actor) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
+            self._lock_workspace(db, workspace)
             old = self._agent(db, workspace, agent_id, lock=True)
             db.execute(text(
                 "UPDATE ai_agents SET deleted_at=now(),is_default=false,enabled=false,updated_at=now(),updated_by=:u "
@@ -540,6 +552,7 @@ class AiVoice:
             return raw, (0, 0), 0.0, True, failure.code
         tokens = (answer["input_tokens"], answer["output_tokens"])
         cost = model_cost(agent["model"], *tokens)
+        answer = answer | {"text": visible(answer["text"])}
         if answer["truncated"]:
             normalized, reason = None, "truncated"
         elif voice_task:
@@ -575,7 +588,7 @@ class AiVoice:
                 return None
             if agent["task"] == "tasks":
                 # The studio's agent adds its rules; the reply format stays the feature's own.
-                instruction = f"{instruction}\n\nПравила студии (агент «{agent['name']}»):\n{agent['prompt']}"
+                instruction = task_instruction(instruction, agent["prompt"], agent["name"])
             provider = provider_of(agent["model"])
             creds = self._credentials(db, workspace, yandex=False, selected={provider})
         key = creds.get(provider)
@@ -599,10 +612,17 @@ class AiVoice:
             self._usage(actor, workspace, kind="task", agent=agent["id"], outcome="error", error=failure.code)
             logging.getLogger(__name__).warning("Task assist failed workspace=%s code=%s", workspace, failure.code)
             return None
+        except Exception as failure:  # a task sheet never fails because of the model
+            logging.getLogger(__name__).warning("Task assist failed workspace=%s cause=%s", workspace, type(failure).__name__)
+            return None
         tokens = (answer["input_tokens"], answer["output_tokens"])
         self._usage(actor, workspace, kind="task", agent=agent["id"], tokens=tokens,
                     cost=model_cost(agent["model"], *tokens), outcome="ok")
-        return None if answer["truncated"] else answer["text"].strip()
+        if answer["truncated"]:
+            logging.getLogger(__name__).warning("Task assist truncated workspace=%s model=%s output_tokens=%d",
+                                                workspace, agent["model"], tokens[1])
+            return None
+        return visible(answer["text"]) or None
 
     def test_agent(self, actor, workspace, data):
         values = _clean_agent(data | {"name": data.get("name") or "Проверка"})
@@ -616,7 +636,21 @@ class AiVoice:
                 raise AuthError(429, "Месячный лимит исчерпан.")
             creds = self._credentials(db, workspace, yandex=False, selected={provider_of(values["model"])})
         self.accounts.throttle(f"ai-test:{workspace}:{actor.user_id}", limit=20, minutes=1)
-        normalized, tokens, cost, fallback, error = self._normalize(sample, values, creds)
+        if values["task"] == "tasks":
+            # Checked the way the task sheet uses it: the sample is the client's message.
+            from center_messenger.tasks import AI_DRAFT, _json
+            agent = values | {"prompt": task_instruction(AI_DRAFT, values["prompt"])}
+            normalized, tokens, cost, fallback, error = self._normalize(f"→ Родитель: {sample}", agent, creds)
+            if not fallback:
+                data = _json(normalized) or {}
+                title = " ".join(str(data.get("title") or "").split())
+                details = str(data.get("details") or "").strip()
+                if title:
+                    normalized = f"Что сделать: {title}" + (f"\nПодробности:\n{details}" if details else "")
+                else:
+                    normalized, fallback, error = sample, True, "unusable"
+        else:
+            normalized, tokens, cost, fallback, error = self._normalize(sample, values, creds)
         if error != "not_connected":
             self._usage(actor, workspace, kind="test", tokens=tokens, cost=cost,
                         outcome="fallback" if fallback else "ok", error=error)

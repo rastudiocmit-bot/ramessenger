@@ -110,7 +110,11 @@
     } finally { if (timeout !== null) clearTimeout(timeout); signal?.removeEventListener("abort", abort); }
     if (signal?.aborted || (track && epoch !== state.epoch)) throw new DOMException("Устаревший запрос", "AbortError");
     if (!response.ok) {
-      const error = new Error(typeof payload?.detail === "string" ? payload.detail : "Не удалось выполнить действие. Попробуйте позже.");
+      // Without a readable reason: a server restart (502–504), a server fault (500) or rejected data (422).
+      const fallback = [502, 503, 504].includes(response.status) ? "Сервис перезапускается. Повторите через минуту."
+        : response.status === 422 ? "Сервис не принял данные. Обновите страницу и попробуйте ещё раз."
+        : `Не удалось выполнить действие (ошибка ${response.status}). Попробуйте позже.`;
+      const error = new Error(typeof payload?.detail === "string" ? payload.detail : fallback);
       error.status = response.status;
       if (response.status === 401 && state.user) clearSession("Сессия завершена. Войдите снова.");
       throw error;
