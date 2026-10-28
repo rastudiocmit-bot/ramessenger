@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover durable Center Messenger deploy requests after a missed wakeup
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=20s
+AccuracySec=5s
+Unit=ramessenger-support-queue.service
+
+[Install]
+WantedBy=timers.target

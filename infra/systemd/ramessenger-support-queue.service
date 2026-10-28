@@ -1,0 +1,14 @@
+[Unit]
+Description=Serialized requests for the existing Center Messenger deploy service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/center-messenger-github
+ExecStart=/usr/local/sbin/cm-support-control --drain
+TimeoutStartSec=5400
+UMask=0077
+Nice=10
+

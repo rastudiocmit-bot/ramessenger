@@ -1,0 +1,229 @@
+"""Bounded GET-only diagnosis of recent failed native MAX recipients.
+
+Run inside the API container. No sends, client/history changes, raw forms,
+message texts, phone numbers, CSRF, credentials or raw MAX IDs in the report.
+Only the shared browser lease and refreshed session cookies may be saved.
+"""
+import hashlib
+import json
+import re
+import sys
+import time
+from urllib.parse import parse_qs, urlencode, urlsplit
+
+from bs4 import BeautifulSoup
+from sqlalchemy import text
+
+from center_messenger.accounts import Accounts
+from center_messenger.alfa_max import AlfaMaxConnections
+from center_messenger.alfa_max_browser import (
+    AlfaBrowserError, MAX_HTML_BYTES, ONCLICK_BULK_URL, _compose_url_key,
+    _compose_url_max_user_id, _inherit_max_user_id, _json_envelope, _login_form,
+    _otp_form, _validated_compose_url, parse_compose_form,
+)
+from center_messenger.alfa_service import AlfaConnections
+from center_messenger.alfa_session import control
+from center_messenger.attachment_audit import BrowserProbe, load_source
+from center_messenger.config import Settings
+from center_messenger.connector_vault import ConnectorVault
+from center_messenger.database import make_engine
+from center_messenger.message_order import message_order
+
+
+def peer_tag(peer):
+    return hashlib.sha256(peer.encode()).hexdigest()[:12] if isinstance(peer, str) else None
+
+
+def routes(markup, origin, branch, customer):
+    soup = BeautifulSoup(markup, 'html.parser')
+    candidates = {}
+    for node in soup.select('[href],[data-url],[data-href],[onclick]'):
+        values = [node.get(name) for name in ('href', 'data-url', 'data-href')]
+        values += [match.group(1) for match in ONCLICK_BULK_URL.finditer(node.get('onclick', ''))]
+        for value in values:
+            if not isinstance(value, str) or '/max/bulk' not in value:
+                continue
+            try:
+                address = _validated_compose_url(value, origin=origin, branch=branch, customer=customer)
+            except AlfaBrowserError:
+                continue
+            candidates.setdefault(_compose_url_key(address), address)
+    return list(candidates.values())
+
+
+def form_report(raw):
+    envelope = _json_envelope(raw)
+    soup = BeautifulSoup(envelope.get('html') or '', 'html.parser')
+    forms = []
+    for form in soup.select('form[action]')[:4]:
+        query = parse_qs(urlsplit(form.get('action', '')).query, keep_blank_values=True)
+        fields = []
+        for item in form.select('input[name],select[name]'):
+            name = item.get('name', '')
+            if re.search(r'max.?user|recipient|peer', name, re.I):
+                fields.append({'name': re.sub(r'[^A-Za-z0-9_\[\]-]', '?', name)[:100],
+                               'has_value': bool(item.get('value')),
+                               'type': item.get('type', item.name)[:20]})
+        forms.append({'action_query_keys': sorted(re.sub(r'[^A-Za-z0-9_\[\]-]', '?', key)[:100] for key in query),
+                      'action_peer_tag': peer_tag(_compose_url_max_user_id(form.get('action', ''))),
+                      'recipient_fields': fields[:12]})
+    return {'forms': forms, 'modal_urls': len(envelope.get('modal_urls') or []),
+            'empty': envelope.get('empty', False)}
+
+
+class RecipientProbe(BrowserProbe):
+    def navigate(self, address):
+        # Same login detection and card size limit as the production sender.
+        self.allowed = {address}
+        try:
+            response = self.page.goto(address, wait_until='domcontentloaded', timeout=15000)
+            self._check_response(response)
+            markup = response.text()
+            if len(markup.encode('utf-8')) > MAX_HTML_BYTES:
+                raise AlfaBrowserError('form_unavailable')
+            soup = BeautifulSoup(markup, 'html.parser')
+            if _otp_form(soup):
+                raise AlfaBrowserError('otp_required')
+            if _login_form(soup):
+                raise AlfaBrowserError('reauth_required')
+            return markup
+        finally:
+            self.allowed.clear()
+
+    def _check_response(self, response):
+        from center_messenger.alfa_max_browser import AlfaMaxBrowser
+        AlfaMaxBrowser._check_origin(self.page, self.origin)
+        if response is None or response.status != 200:
+            raise AlfaBrowserError('crm_unavailable')
+
+
+def inspect_card(probe, branch, customer, expected_peer, renew):
+    renew()
+    markup = probe.navigate(f'{probe.origin}/company/{branch}/customer/view?' + urlencode({'id': customer}))
+    choices = routes(markup, probe.origin, branch, customer)
+    report = {'compose_routes': len(choices), 'routes_truncated': len(choices) > 4,
+              'card_peer_tags': sorted({peer_tag(peer) for address in choices
+                                       if (peer := _compose_url_max_user_id(address))}), 'forms': []}
+    if not choices:
+        choices = [f'{probe.origin}/company/{branch}/max/bulk?' + urlencode([
+            ('related_class', 'Customer'), ('related_ids[]', customer)])]
+    for address in choices[:4]:
+        item = {'route_peer_tag': peer_tag(_compose_url_max_user_id(address))}
+        report['forms'].append(item)
+        try:
+            if expected_peer:
+                address = _inherit_max_user_id(address, expected_peer)
+            visited = set()
+            for _ in range(4):
+                address = _validated_compose_url(address, origin=probe.origin, branch=branch, customer=customer)
+                if address in visited:
+                    raise AlfaBrowserError('form_unavailable')
+                visited.add(address)
+                renew()
+                response = probe.fetch(address, html=True, ajax=True)
+                item['http_status'] = response.get('status')
+                if response.get('error'):
+                    item['error_code'] = response['error']
+                    break
+                raw = response.get('text', '')
+                if _json_envelope(raw).get('empty'):
+                    renew()
+                    response = probe.fetch(address, html=True)
+                    if response.get('error'):
+                        item['error_code'] = response['error']
+                        break
+                    raw = response.get('text', '')
+                item['schema'] = form_report(raw)
+                parsed = parse_compose_form(raw, origin=probe.origin, branch=branch,
+                                            customer=customer, compose_url=address)
+                if 'compose_url' not in parsed:
+                    item['status'] = 'recipient_verified_no_send'
+                    item['form_peer_tag'] = peer_tag(parsed.get('max_user_id'))
+                    break
+                address = parsed['compose_url']
+            else:
+                item['error_code'] = 'modal_limit'
+        except AlfaBrowserError as error:
+            item['error_code'] = error.code
+    return report
+
+
+def main():
+    config = Settings()
+    engine = make_engine(config)
+    report = {'message_writes': 0, 'message_posts': 0, 'stage': 'load_source', 'cases': []}
+    try:
+        workspace, source, _ = load_source(engine)
+        vault = ConnectorVault(config.connection_master_key_file)
+        service = AlfaMaxConnections(AlfaConnections(Accounts(engine, config), vault))
+        report['stage'] = 'stored_targets'
+        with engine.begin() as db:
+            db.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'))
+            db.execute(text("SELECT set_config('app.workspace_id',:w,true)"), {'w': str(workspace)})
+            failed = db.execute(text(
+                "SELECT * FROM (SELECT DISTINCT ON (s.conversation_id) s.conversation_id,s.last_error_code,"
+                "m.occurred_at FROM send_commands s JOIN messages m ON m.workspace_id=s.workspace_id "
+                "AND m.send_command_id=s.id JOIN conversations c ON c.workspace_id=s.workspace_id "
+                "AND c.id=s.conversation_id WHERE s.workspace_id=:w AND s.state='failed' "
+                "AND c.connection_id=:conn AND s.last_error_code IN ('recipient_missing','multiple_recipients') "
+                "ORDER BY s.conversation_id,m.occurred_at DESC) recent ORDER BY occurred_at DESC LIMIT 2"
+            ), {'w': workspace, 'conn': source['connection_id']}).mappings().all()
+            targets = []
+            for failure in failed:
+                case = {'conversation_id': str(failure['conversation_id']), 'last_error': failure['last_error_code']}
+                report['cases'].append(case)
+                payload = db.execute(text("SELECT m.payload FROM messages m WHERE m.workspace_id=:w AND m.conversation_id=:c "
+                    "AND m.direction='in' AND m.payload->>'customer_id' IS NOT NULL "
+                    "AND m.payload->>'customer_branch_id' IS NOT NULL ORDER BY " + message_order(descending=True) + " LIMIT 1"),
+                    {'w': workspace, 'c': failure['conversation_id']}).scalar_one_or_none()
+                if not payload:
+                    case['error_code'] = 'no_incoming_target'
+                    continue
+                case.update(branch=int(payload['customer_branch_id']), customer=int(payload['customer_id']))
+                peer = None
+                try:
+                    target = service._send_target_in_transaction(db, workspace, source['connection_id'], failure['conversation_id'])
+                    peer = target.get('max_user_id')
+                    case.update(branch=target['branch'], customer=target['customer'])
+                except AlfaBrowserError as error:
+                    case['target_error_code'] = error.code
+                case['expected_peer_tag'] = peer_tag(peer)
+                targets.append((case, peer))
+        if targets:
+            report['stage'] = 'browser_lease'
+            with service.sessions.operation(workspace, source['connection_id']) as operation:
+                current = operation['row']
+                if current['state'] != 'active' or control(current).get('needs_check'):
+                    raise AlfaBrowserError('browser_busy')
+                state = vault.open_browser_state(workspace, source['connection_id'], current['session_ciphertext'])
+                started = time.monotonic()
+                def renew():
+                    if time.monotonic() - started > 120:
+                        raise AlfaBrowserError('audit_time_limit')
+                    with service.accounts.transaction(workspace_id=workspace) as db:
+                        service.sessions.renew(db, operation)
+                with RecipientProbe(source['origin'], state) as probe:
+                    report['stage'] = 'source_forms'
+                    for case, peer in targets:
+                        print(f"Проверяем MAX: branch={case['branch']} customer={case['customer']}",
+                              file=sys.stderr, flush=True)
+                        try:
+                            case['source'] = inspect_card(probe, case['branch'], case['customer'], peer, renew)
+                        except AlfaBrowserError as error:
+                            case['error_code'] = error.code
+                    errors = [case.get('error_code') for case in report['cases']]
+                    errors += [item.get('error_code') for case in report['cases']
+                               for item in case.get('source', {}).get('forms', [])]
+                    if not any(code in {'reauth_required', 'otp_required'} for code in errors):
+                        service.sessions.finish(operation, probe.context.storage_state(), state='active')
+        report['stage'] = 'complete'
+    except Exception as error:
+        # Exception messages and raw HTTP responses can contain private data.
+        report['error_code'] = error.code if isinstance(error, AlfaBrowserError) else type(error).__name__
+    finally:
+        engine.dispose()
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+if __name__ == '__main__':
+    main()
