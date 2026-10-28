@@ -2309,7 +2309,7 @@ class MessageSyncTests(unittest.TestCase):
         worker.process(self.workspace,worker.claim(self.workspace))
         self.assertEqual([c.args[1]['status'] for c in client.call.call_args_list],[3,1])
         self.assertEqual(self.family_facts()['lessons'],[])
-        self.assertEqual(self.family_facts()['lessons_history_through'],today+timedelta(days=90))
+        self.assertEqual(self.family_facts()['lessons_history_through'],today+timedelta(days=30))
 
     def test_late_yearly_result_preserves_a_newer_recent_cancellation(self):
         from center_messenger.family_cache import enqueue,HISTORY

@@ -302,7 +302,7 @@ class FamilyBalanceTests(unittest.TestCase):
         recent = fetch_family_lessons(client,1,7,today=today)
         self.assertEqual((len(recent),len(calls)),(40,2))
         self.assertEqual(calls[0]['date_from'],'2026-09-25')
-        self.assertEqual(calls[1]['date_to'],'2027-01-23')
+        self.assertEqual(calls[1]['date_to'],'2026-11-24')
 
     def test_short_window_replaces_cancellations_and_preserves_older_branch_proof(self):
         old = {**self.lesson(), 'id':1, 'date':'2026-03-01', 'status':3}

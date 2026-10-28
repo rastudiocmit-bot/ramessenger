@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from center_messenger.alfa_client import AlfaError
-from center_messenger.alfa_family import fetch_family_finance, fetch_family_lessons, merge_family_lessons
+from center_messenger.alfa_family import FUTURE_DAYS, fetch_family_finance, fetch_family_lessons, merge_family_lessons
 from center_messenger.auth_security import AuthError
 from center_messenger import group_links, card_preference, card_jobs
 
@@ -462,7 +462,7 @@ class FamilyCacheWorker:
                                 "lessons_history_through=CASE WHEN :full THEN CAST(:through AS date) ELSE lessons_history_through END "
                                 "WHERE workspace_id=:w AND connection_id=:conn AND branch_id=:b AND customer_id=:id AND settings_version=:v"),
                                 params | {"data": json.dumps(lessons), "full": job["topic"] == HISTORY,
-                                    "history_only": history_only, "through": today + timedelta(days=-31 if history_only else 90)})
+                                    "history_only": history_only, "through": today + timedelta(days=-31 if history_only else FUTURE_DAYS)})
                     db.execute(text("UPDATE alfa_settings SET secret_ciphertext=:secret WHERE workspace_id=:w AND version=:v"),
                         {"w": workspace, "v": settings["version"], "secret": self.connections.vault.seal(workspace, settings["connection_id"], credentials)})
                     card_jobs.clear_verified_denial(db, workspace, job)

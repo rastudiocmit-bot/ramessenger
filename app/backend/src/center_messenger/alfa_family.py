@@ -12,6 +12,10 @@ from center_messenger.crm_directory import (
 )
 
 
+
+# Planned lessons are read this far ahead: enough for the nearest lesson after a short break.
+FUTURE_DAYS = 30
+
 def pages(client, path, filters, *, maximum=1000):
     found, seen, expected = [], set(), None
     for page in range(10):
@@ -187,7 +191,7 @@ def fetch_family_lessons(client, branch_id, customer_id, *, today=None, full=Fal
     lessons, seen = [], set()
     windows = (
         (3, today - timedelta(days=365 if full else 30), today),
-        (1, today, today + timedelta(days=90)),
+        (1, today, today + timedelta(days=FUTURE_DAYS)),
     )
     if history_only:
         if not full:
@@ -306,7 +310,7 @@ def _coverage_windows(card):
             continue
         checked_day = source_date(card.get(local_field)) or at.date()
         through = source_date(card.get("lessons_history_through")) if field == "lessons_full_refreshed_at" else None
-        windows.append((checked_day - timedelta(days=days), through or checked_day + timedelta(days=90), at))
+        windows.append((checked_day - timedelta(days=days), through or checked_day + timedelta(days=FUTURE_DAYS), at))
     return windows
 
 
