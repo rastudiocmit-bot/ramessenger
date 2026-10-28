@@ -18,6 +18,59 @@ BASE = '/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42'
 
 
 class RecipientDiagnosticTests(unittest.TestCase):
+    def journal(self, record, *, page=0, extra=''):
+        return (f'<ul class="pagination"><li class="active"><a data-page="{page}"></a></li></ul>'
+                f'<table class="crm-table"><tbody><tr data-key="{record}" data-user-id="77">'
+                '<td></td><td><a href="/company/1/customer/view?id=42">Private name</a></td>'
+                '<td>Private sender +7(916)123-45-67</td><td>Private message' + extra + '</td>'
+                '<td>28.10.2026 19:05</td></tr></tbody></table>')
+
+    def test_contact_contexts_preserve_two_distinct_phone_bindings_without_exposing_numbers(self):
+        html = ('<aside><div class="phone-row">+7(916)123-45-67'
+                f'<a href="{BASE}&maxUserId=77">MAX</a></div>'
+                '<div class="phone-row">+7(985)123-45-67'
+                f'<a href="{BASE}&maxUserId=78">MAX</a></div></aside>')
+        result = audit.contact_route_contexts(html, ORIGIN, 1, 42)
+        self.assertEqual(len(result), 2)
+        self.assertNotEqual(result[0]['phone_tags'], result[1]['phone_tags'])
+        self.assertEqual(result[0]['phone_tags'], audit.phone_tags('Sender +7(916)123-45-67'))
+        self.assertNotIn('123-45-67', json.dumps(result))
+
+    def test_feed_text_cannot_be_mistaken_for_contact_phone_metadata(self):
+        html = ('<div class="feed-element">Private message +7(916)123-45-67'
+                f'<a href="{BASE}&maxUserId=77">MAX</a></div>')
+        result = audit.contact_route_contexts(html, ORIGIN, 1, 42)
+        self.assertTrue(result[0]['inside_feed'])
+        self.assertEqual(result[0]['phone_tags'], [])
+
+    def test_source_row_schema_is_redacted_and_exact_record_only(self):
+        html = self.journal('900', extra=(
+            f'<a href="{BASE}&maxUserId=77&token=secret-token">Reply</a>'
+            '<a href="https://foreign.test/company/1/max/view?id=666">Foreign</a>'))
+        result = audit.journal_row_schema(html, '900', ORIGIN, 1)
+        self.assertIsNone(audit.journal_row_schema(html, '901', ORIGIN, 1))
+        serialized = json.dumps(result)
+        for private in ('Private', '123-45-67', 'secret-token', 'foreign.test', '666'):
+            self.assertNotIn(private, serialized)
+        self.assertEqual(result['customers'], [{'branch_id': 1, 'customer_id': 42}])
+        self.assertEqual(result['parsed_peer_tag'], audit.peer_tag('77'))
+        self.assertEqual(result['attributes'][0]['value_tag'], audit.peer_tag('77'))
+
+    def test_rank_is_only_a_page_hint_until_exact_source_record_is_found(self):
+        probe = Mock(origin=ORIGIN)
+        probe.navigate.side_effect = [self.journal('999'), self.journal('900', page=3)]
+        stored = {'source_branch': 1, 'record_id': '900', 'newer_source_rows': 3}
+        result = audit.inspect_incoming(probe, stored, Mock())
+        self.assertEqual(result['status'], 'record_found')
+        self.assertEqual(result['pages_checked'], [1, 4])
+        self.assertEqual(result['row']['record_id'], '900')
+
+    def test_reference_card_argument_is_bounded_and_never_a_url_or_shell(self):
+        self.assertEqual(audit.reference_card('1:9751'), (1, 9751))
+        for value in ['0:1', '1:0', '1:2; id', 'https://host/1:2', '1:2:3']:
+            with self.subTest(value=value), self.assertRaises(Exception):
+                audit.reference_card(value)
+
     def wait_scope(self):
         clock = [0.0]
         self.enterContext(patch.object(audit.time, 'monotonic', side_effect=lambda: clock[0]))

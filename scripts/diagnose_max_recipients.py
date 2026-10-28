@@ -4,6 +4,7 @@ Run inside the API container. No sends, client/history changes, raw forms,
 message texts, phone numbers, CSRF, credentials or raw MAX IDs in the report.
 Only the shared browser lease and refreshed session cookies may be saved.
 """
+import argparse
 import hashlib
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -11,7 +12,7 @@ import json
 import re
 import sys
 import time
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 from sqlalchemy import text
@@ -22,7 +23,11 @@ from center_messenger.alfa_max_browser import (
     AlfaBrowserError, MAX_HTML_BYTES, ONCLICK_BULK_URL, _compose_url_key,
     _compose_url_max_user_id, _inherit_max_user_id, _json_envelope, _login_form,
     _otp_form, _validated_compose_url, parse_compose_form,
+    parse_history_html, _history_url,
 )
+from center_messenger.crm_directory import phone_number
+from center_messenger.crm_api import DirectoryReader
+from center_messenger import card_preference
 from center_messenger.alfa_service import AlfaConnections
 from center_messenger.alfa_session import control, stamp
 from center_messenger.attachment_audit import BrowserProbe, load_source
@@ -34,6 +39,123 @@ from center_messenger.message_order import message_order
 
 def peer_tag(peer):
     return hashlib.sha256(peer.encode()).hexdigest()[:12] if isinstance(peer, str) else None
+
+
+def phone_tags(value):
+    # Metadata only. Never copy names, numbers or message bodies into a report.
+    values = re.findall(r'(?<!\d)(?:\+7|7|8)(?:[\s().-]*\d){10}(?!\d)', value or '')
+    return sorted({peer_tag('phone:' + number) for value in values
+                   if (number := phone_number(value))})
+
+
+def contact_route_contexts(markup, origin, branch, customer):
+    """Describe the phone/link relationship; do not infer a recipient from it."""
+    soup, result, seen = BeautifulSoup(markup, 'html.parser'), [], set()
+    for node in soup.select('[href],[data-url],[data-href],[onclick]'):
+        values = [node.get(name) for name in ('href', 'data-url', 'data-href')]
+        values += [match.group(1) for match in ONCLICK_BULK_URL.finditer(node.get('onclick', ''))]
+        for value in values:
+            try:
+                address = _validated_compose_url(value, origin=origin, branch=branch, customer=customer)
+            except (AlfaBrowserError, TypeError):
+                continue
+            peer = _compose_url_max_user_id(address)
+            if not peer or peer in seen:
+                continue
+            seen.add(peer)
+            item = {'peer_tag': peer_tag(peer), 'inside_feed': node.find_parent(class_='feed-element') is not None,
+                    'phone_tags': []}
+            result.append(item)
+            if item['inside_feed']:
+                continue
+            for parent in [node, *list(node.parents)[:5]]:
+                if getattr(parent, 'attrs', None) is None or parent.name in {'body', 'html'}:
+                    break
+                # A broad parent containing communication text proves nothing.
+                if parent.select_one('.feed-element'):
+                    break
+                text_value = parent.get_text(' ', strip=True)
+                if len(text_value) > 2000:
+                    break
+                tags = phone_tags(text_value)
+                for anchor in parent.select('a[href^="tel:"]'):
+                    tags += phone_tags(anchor.get('href', '')[4:])
+                if tags:
+                    item.update(phone_tags=sorted(set(tags)), context_tag=parent.name,
+                                context_classes=[c for c in parent.get('class', [])
+                                                 if re.fullmatch(r'[A-Za-z0-9_-]{1,60}', c)][:8])
+                    break
+            if len(result) >= 8:
+                return result
+    return result
+
+
+def journal_row_schema(markup, record, origin, branch, page=0):
+    soup = BeautifulSoup(markup, 'html.parser')
+    row = next((r for r in soup.select('table.crm-table tbody tr[data-key]')
+                if r.get('data-key') == record), None)
+    if row is None:
+        return None
+    attrs, links = [], []
+    for node in [row, *row.find_all(True)]:
+        for name, value in node.attrs.items():
+            if (name.startswith('data-') and re.search(r'max|user|peer|recipient|phone|contact|customer', name, re.I)
+                    and isinstance(value, str)):
+                attrs.append({'tag': node.name, 'name': name[:80], 'value_tag': peer_tag(value)})
+        for name in ('href', 'data-url', 'data-href'):
+            address = node.get(name)
+            if not isinstance(address, str):
+                continue
+            parts = urlsplit(urljoin(origin, address))
+            if parts.scheme != 'https' or parts.netloc != urlsplit(origin).netloc:
+                continue
+            if not re.fullmatch(r'/company/\d+/(?:max|customer)/[A-Za-z0-9_-]+', parts.path):
+                continue
+            query = parse_qs(parts.query, keep_blank_values=True)
+            links.append({'path': parts.path, 'query_keys': sorted(
+                re.sub(r'[^A-Za-z0-9_\[\]-]', '?', key)[:80] for key in query
+                if not re.search(r'token|csrf|secret|auth', key, re.I)),
+                'peer_tag': peer_tag(_compose_url_max_user_id(address))})
+    parsed = parse_history_html(markup, origin=origin, branch=branch, direction='receive', page=page)
+    message = next(m for m in parsed['messages'] if m['record_id'] == record)
+    return {'record_id': record, 'customers': [{key: c[key] for key in ('branch_id', 'customer_id')}
+                                             for c in message['customers']],
+            'parsed_peer_tag': peer_tag(message.get('max_user_id')),
+            'sender_phone_tags': phone_tags(message.get('actor_name')),
+            'attributes': attrs[:25], 'links': links[:20]}
+
+
+def inspect_incoming(probe, stored, renew):
+    branch, record = stored['source_branch'], stored['record_id']
+    if not branch or not record:
+        return {'status': 'source_identity_missing'}
+    # Saved rank is only a hint. Report evidence only after finding the exact ID.
+    result, visited = {'status': 'record_not_found', 'pages_checked': []}, set()
+    head = None
+    for number in range(4):
+        if number == 0:
+            page = 0
+        else:
+            size = (head or {}).get('row_count') or 20
+            estimate = stored['newer_source_rows'] // size
+            options = [estimate, max(0, estimate - 1), estimate + 1]
+            page = next((p for p in options if p not in visited), None)
+            if page is None:
+                break
+        visited.add(page)
+        renew()
+        print(f'MAX source: branch={branch} receive page={page + 1}', file=sys.stderr, flush=True)
+        markup = probe.navigate(_history_url(probe.origin, branch, 'receive', page))
+        parsed = parse_history_html(markup, origin=probe.origin, branch=branch, direction='receive', page=page)
+        if page == 0:
+            head = parsed
+        result['pages_checked'].append(page + 1)
+        if any(m['record_id'] == record for m in parsed['messages']):
+            # Pass the parsed page number as well: default page zero would
+            # otherwise reject a valid later page's active pagination marker.
+            result.update(status='record_found', row=journal_row_schema(markup, record, probe.origin, branch, page))
+            return result
+    return result
 
 
 def browser_status(service, workspace, connection):
@@ -162,7 +284,8 @@ def inspect_card(probe, branch, customer, expected_peer, renew):
     choices = routes(markup, probe.origin, branch, customer)
     report = {'compose_routes': len(choices), 'routes_truncated': len(choices) > 4,
               'card_peer_tags': sorted({peer_tag(peer) for address in choices
-                                       if (peer := _compose_url_max_user_id(address))}), 'forms': []}
+                                       if (peer := _compose_url_max_user_id(address))}), 'forms': [],
+              'contact_routes': contact_route_contexts(markup, probe.origin, branch, customer)}
     if not choices:
         choices = [f'{probe.origin}/company/{branch}/max/bulk?' + urlencode([
             ('related_class', 'Customer'), ('related_ids[]', customer)])]
@@ -207,10 +330,21 @@ def inspect_card(probe, branch, customer, expected_peer, renew):
     return report
 
 
-def main():
+def reference_card(value):
+    if not re.fullmatch(r'[1-9][0-9]{0,8}:[1-9][0-9]{0,17}', value):
+        raise argparse.ArgumentTypeError('Use BRANCH:CUSTOMER')
+    return tuple(map(int, value.split(':')))
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--reference-card', action='append', type=reference_card, default=[])
+    args = parser.parse_args(argv)
+    if len(args.reference_card) > 2:
+        parser.error('At most two reference cards')
     config = Settings()
     engine = make_engine(config)
-    report = {'message_writes': 0, 'message_posts': 0, 'stage': 'load_source', 'cases': []}
+    report = {'message_writes': 0, 'message_posts': 0, 'stage': 'load_source', 'cases': [], 'reference_cards': []}
     try:
         workspace, source, _ = load_source(engine)
         vault = ConnectorVault(config.connection_master_key_file)
@@ -231,13 +365,34 @@ def main():
             for failure in failed:
                 case = {'conversation_id': str(failure['conversation_id']), 'last_error': failure['last_error_code']}
                 report['cases'].append(case)
-                payload = db.execute(text("SELECT m.payload FROM messages m WHERE m.workspace_id=:w AND m.conversation_id=:c "
+                incoming = db.execute(text("SELECT m.payload,m.occurred_at FROM messages m WHERE m.workspace_id=:w AND m.conversation_id=:c "
                     "AND m.direction='in' AND m.payload->>'customer_id' IS NOT NULL "
                     "AND m.payload->>'customer_branch_id' IS NOT NULL ORDER BY " + message_order(descending=True) + " LIMIT 1"),
-                    {'w': workspace, 'c': failure['conversation_id']}).scalar_one_or_none()
-                if not payload:
+                    {'w': workspace, 'c': failure['conversation_id']}).mappings().one_or_none()
+                if not incoming:
                     case['error_code'] = 'no_incoming_target'
                     continue
+                payload = incoming['payload']
+                case['stored_incoming'] = {'record_id': str(payload.get('crm_record_id') or ''),
+                    'source_branch': int(payload['branch_id']) if payload.get('branch_id') else None,
+                    'occurred_at': incoming['occurred_at'].isoformat(),
+                    'sender_phone_tags': phone_tags(payload.get('actor_name')),
+                    'peer_tag': peer_tag(payload.get('max_user_id')),
+                    'hidden': bool(payload.get('superseded_by') or payload.get('crm_mirror') in (True, 'true')
+                                   or payload.get('deleted') in (True, 'true'))}
+                stored = case['stored_incoming']
+                stored['newer_source_rows'] = db.execute(text(
+                    "SELECT count(DISTINCT m.payload->>'crm_record_id') FROM messages m JOIN conversations c "
+                    "ON c.workspace_id=m.workspace_id AND c.id=m.conversation_id WHERE m.workspace_id=:w "
+                    "AND c.connection_id=:c AND m.direction='in' AND m.payload->>'branch_id'=:branch "
+                    "AND m.occurred_at>:at"), {'w': workspace, 'c': source['connection_id'],
+                    'branch': str(stored['source_branch']), 'at': incoming['occurred_at']}).scalar_one()
+                contact = db.execute(text('SELECT contact_id FROM conversations WHERE workspace_id=:w AND id=:c'),
+                    {'w': workspace, 'c': failure['conversation_id']}).scalar_one_or_none()
+                snapshot = DirectoryReader._published(db, workspace)
+                selection = card_preference.selected(db, workspace, snapshot, failure['conversation_id'], contact)
+                case['display_card'] = ({key: selection.get(key) for key in ('customer', 'branch', 'reason', 'ambiguous')}
+                                        if selection else None)
                 case.update(branch=int(payload['customer_branch_id']), customer=int(payload['customer_id']))
                 peer = None
                 try:
@@ -275,9 +430,26 @@ def main():
                             case['source'] = inspect_card(probe, case['branch'], case['customer'], peer, renew)
                         except AlfaBrowserError as error:
                             case['error_code'] = error.code
+                    for branch, customer in args.reference_card:
+                        item = {'branch': branch, 'customer': customer}
+                        report['reference_cards'].append(item)
+                        try:
+                            item['source'] = inspect_card(probe, branch, customer, None, renew)
+                        except AlfaBrowserError as error:
+                            item['error_code'] = error.code
+                    report['stage'] = 'incoming_source_rows'
+                    for case, _ in targets:
+                        try:
+                            case['incoming_source'] = inspect_incoming(probe, case['stored_incoming'], renew)
+                        except AlfaBrowserError as error:
+                            case['incoming_source'] = {'error_code': error.code}
                     errors = [case.get('error_code') for case in report['cases']]
                     errors += [item.get('error_code') for case in report['cases']
                                for item in case.get('source', {}).get('forms', [])]
+                    errors += [case.get('incoming_source', {}).get('error_code') for case in report['cases']]
+                    errors += [item.get('error_code') for item in report['reference_cards']]
+                    errors += [form.get('error_code') for item in report['reference_cards']
+                               for form in item.get('source', {}).get('forms', [])]
                     if not any(code in {'reauth_required', 'otp_required'} for code in errors):
                         service.sessions.finish(operation, probe.context.storage_state(), state='active')
         report['stage'] = 'complete'
