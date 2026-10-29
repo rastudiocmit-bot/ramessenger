@@ -1617,10 +1617,10 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 /* Task polish after the design review. */
 .chat-bubble.task-lift{visibility:hidden}
-.chat-bubble.task-lifted{position:fixed;z-index:1101;margin:0;max-width:none;transform:scale(1.02);transform-origin:left center;box-shadow:none;
+.chat-bubble.task-lifted{position:fixed;z-index:1101;margin:0;max-width:none;transform:scale(1.02);transform-origin:left bottom;box-shadow:none;
   pointer-events:none;animation:none}
 .chat-bubble.task-lifted .bub{box-shadow:0 14px 34px rgba(25,37,45,.26),0 2px 6px rgba(25,37,45,.10)}
-.chat-bubble.task-lifted.out{transform-origin:right center}
+.chat-bubble.task-lifted.out{transform-origin:right bottom}
 .task-menu-backdrop{background:rgba(24,39,56,.34)}
 @media (min-width:720px){.task-head,.task-pane .task-scope,.task-pane .task-groups,.task-pane .task-pane-error{max-width:760px}
   .task-head{box-sizing:border-box;width:100%}}
