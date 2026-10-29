@@ -4120,7 +4120,7 @@ class MessageSyncTests(unittest.TestCase):
         meta=self.reader.history(None,self.workspace,conversation)['conversation']
         self.assertEqual(meta['family_contact_id'],str(self.contact))
 
-    def test_card_preference_new_conflicting_phone_owner_invalidates_saved_choice(self):
+    def test_new_phone_owner_invalidates_guard_but_does_not_displace_a_higher_rank_teaching_client(self):
         policy,_,_,_,_,conversation=self.preferred_card_fixture()
         policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
         other=uuid4();self.add_customer(other,2,9200)
@@ -4129,8 +4129,23 @@ class MessageSyncTests(unittest.TestCase):
         self.assertIsNone(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact))
         policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
         choice=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
-        self.assertEqual(choice['contact'],str(self.contact))
-        self.assertEqual(choice['ambiguous'],'conflicting_parents')
+        self.assertEqual(choice['customer'],'9160')
+        self.assertEqual(choice['reason'],'scheduled_lesson')
+        self.assertIsNone(choice['ambiguous'])
+
+    def test_equal_rank_current_clients_with_different_parents_are_not_selected_arbitrarily(self):
+        policy, _, _, _, _, conversation = self.preferred_card_fixture()
+        other = uuid4()
+        self.add_customer(other, 2, 9200)
+        self.db.execute(text("UPDATE alfa_customers SET legal_name='Different current parent',"
+            "phones='[\"+79990000001\"]' WHERE workspace_id=:w AND external_id=9200"), {'w': self.workspace})
+        self.db.execute(text("UPDATE alfa_family_details SET lessons='[]' WHERE workspace_id=:w"), {'w': self.workspace})
+        self.db.execute(text('UPDATE alfa_memberships SET e_date=:yesterday WHERE workspace_id=:w'),
+                        {'w': self.workspace, 'yesterday': self.snapshot['today'] - timedelta(days=1)})
+        policy.refresh(self.db, self.workspace, self.snapshot, [self.contact])
+        choice = policy.selected(self.db, self.workspace, self.snapshot, conversation, self.contact)
+        self.assertEqual(choice['contact'], str(self.contact))
+        self.assertEqual(choice['ambiguous'], 'conflicting_parents')
 
     def test_card_preference_preserves_manual_links_and_requires_the_source_conversation(self):
         policy,reader,_,_,_,conversation=self.preferred_card_fixture()
@@ -4182,6 +4197,74 @@ class MessageSyncTests(unittest.TestCase):
             "WHERE workspace_id=:w"),{'w':self.workspace})
         policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
         self.assertEqual(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)['reason'],'active_client')
+
+    def test_active_group_outranks_an_archived_real_named_lead_with_an_old_parent_label(self):
+        policy, reader, _, active, _, conversation = self.preferred_card_fixture()
+        self.db.execute(text("UPDATE alfa_customers SET name='Former lead',legal_name='Old short label' "
+            "WHERE workspace_id=:w AND external_id=9161"), {'w': self.workspace})
+        self.db.execute(text("UPDATE alfa_family_details SET lessons='[]' WHERE workspace_id=:w"), {'w': self.workspace})
+        policy.refresh(self.db, self.workspace, self.snapshot, [self.contact])
+        choice = policy.selected(self.db, self.workspace, self.snapshot, conversation, self.contact)
+        self.assertEqual((choice['customer'], choice['reason']), ('9160', 'active_group'))
+        self.assertEqual(choice['contact'], str(active))
+        self.assertIsNone(choice['ambiguous'])
+        family = reader.detail(None, self.workspace, self.contact, conversation=conversation)
+        self.assertFalse(family['needs_review'])
+        self.assertEqual({card['id'] for child in family['students'] for card in child['cards']}, {'9160'})
+
+    def test_active_client_outranks_a_real_named_lead_after_names_were_corrected(self):
+        policy, reader, _, _, _, conversation = self.preferred_card_fixture()
+        self.db.execute(text("UPDATE alfa_customers SET name='Former lead',legal_name='Old parent',status='lead' "
+            "WHERE workspace_id=:w AND external_id=9161"), {'w': self.workspace})
+        policy.refresh(self.db, self.workspace, self.snapshot, [self.contact])
+        choice = policy.selected(self.db, self.workspace, self.snapshot, conversation, self.contact)
+        self.assertEqual(choice['customer'], '9160')
+        self.assertEqual(len(reader.detail(None, self.workspace, self.contact, conversation=conversation)['students']), 1)
+
+    def test_scanned_new_active_id_switches_existing_archive_chat_in_the_same_transaction(self):
+        from center_messenger.active_review import apply_customer
+        policy, _, _, _, _, conversation = self.preferred_card_fixture()
+        self.db.execute(text('DELETE FROM alfa_customers WHERE workspace_id=:w AND external_id=9160'), {'w': self.workspace})
+        policy.refresh(self.db, self.workspace, self.snapshot, [self.contact])
+        self.assertEqual(policy.selected(self.db, self.workspace, self.snapshot, conversation, self.contact)['customer'], '9161')
+        before = [(m['id'], m['text'], m['payload']['customer_id']) for m in self.messages()]
+        apply_customer(self.db, self.workspace, {'connection_id': self.crm}, self.snapshot,
+            {'id': 9160, '_branch': 2, 'name': 'Current pupil', 'legal_name': 'Current parent',
+             'is_study': 1, 'phone': ['+79990000001']})
+        choice = policy.selected(self.db, self.workspace, self.snapshot, conversation, self.contact)
+        self.assertEqual((choice['customer'], choice['status']), ('9160', 'client'))
+        listed = self.reader.listing(None, self.workspace)['conversations'][0]
+        self.assertEqual((listed['name'], listed['status']), ('Current parent', 'client'))
+        self.assertEqual([(m['id'], m['text'], m['payload']['customer_id']) for m in self.messages()], before)
+
+    def test_direct_phone_matching_does_not_follow_the_candidates_other_phone_to_a_third_family(self):
+        policy, _, _, active, _, conversation = self.preferred_card_fixture()
+        self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79990000002\",\"+79990000001\"]' "
+            "WHERE workspace_id=:w AND external_id=9160"), {'w': self.workspace})
+        third = uuid4()
+        self.add_customer(third, 2, 9300)
+        self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79990000002\"]',legal_name='Unrelated parent' "
+            "WHERE workspace_id=:w AND external_id=9300"), {'w': self.workspace})
+        bounded = policy._catalog(self.db, self.workspace, self.snapshot, [self.contact])
+        self.assertNotIn(str(third), bounded[0])
+        policy.refresh(self.db, self.workspace, self.snapshot, [self.contact])
+        choice = policy.selected(self.db, self.workspace, self.snapshot, conversation, self.contact)
+        self.assertEqual(choice['contact'], str(active))
+        self.assertNotIn('9300', json.dumps(choice))
+
+    def test_all_phone_index_is_reversible_and_used_for_direct_secondary_phone_lookup(self):
+        path = ROOT / 'app/backend/migrations/versions/0025_customer_phone_search.py'
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.db.execute(text('SET CONSTRAINTS ALL IMMEDIATE'))
+        with Operations.context(MigrationContext.configure(self.db)):
+            module.downgrade()
+            module.upgrade()
+        self.db.execute(text('SET LOCAL enable_seqscan=off'))
+        plan = '\n'.join(self.db.execute(text("EXPLAIN (COSTS OFF) SELECT external_id FROM alfa_customers "
+            "WHERE phones ?| ARRAY['+79990000001']")).scalars())
+        self.assertIn('alfa_customers_phones_gin_idx', plan)
 
     def test_card_preference_is_durable_and_fenced_by_settings_and_workspace(self):
         policy,_,_,_,_,conversation=self.preferred_card_fixture()
@@ -4261,14 +4344,16 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(choice['ambiguous'],'shared_business_phone')
         self.assertTrue(reader.detail(None,self.workspace,self.contact,conversation=conversation)['needs_review'])
 
-    def test_card_preference_does_not_follow_a_secondary_phone_chain(self):
-        policy,_,_,_,_,conversation=self.preferred_card_fixture()
+    def test_card_preference_accepts_a_direct_secondary_phone_without_changing_the_reply_target(self):
+        policy,_,_,active,_,conversation=self.preferred_card_fixture()
         self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79990000002\",\"+79990000001\"]'::jsonb "
             "WHERE workspace_id=:w AND external_id=9160"),{'w':self.workspace})
         policy.refresh(self.db,self.workspace,self.snapshot,[self.contact])
         choice=policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact)
-        self.assertEqual(choice['contact'],str(self.contact))
-        self.assertEqual(choice['customer'],'9161')
+        self.assertEqual(choice['contact'],str(active))
+        self.assertEqual(choice['customer'],'9160')
+        target=self.service.send_target(self.workspace,self.channel,conversation)
+        self.assertEqual(target['customer'],9161)
 
     def test_stored_history_count_tracks_superseding_moves_and_rollback(self):
         self.project(self.row('1'), self.row('2'), self.row('3'))

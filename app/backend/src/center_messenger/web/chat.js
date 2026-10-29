@@ -12,7 +12,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   const sendLabels = { queued: "В очереди", sending: "Отправляем…", accepted: "Принято MAX", delivered: "Доставлено", read: "Прочитано", failed: "Не отправлено", unknown: "Результат неизвестен", cancelled: "Отменено" };
   const recipientErrors = new Set(["recipient_missing", "multiple_recipients", "invalid_recipient", "max_recipient_missing", "crm_customer_missing"]);
   let generation = 0, listSeq = 0, selectionSeq = 0, linkSeq = 0, cardSeq = 0, detailsSeq = 0;
-  let family = null, familySelected = null, familyBusy = false, familyChildChoice = false;
+  let family = null, familySelected = null, familyPreferredStudent = null, familyBusy = false, familyChildChoice = false;
   let familyTimer = null, familyRenderKey = "";
   const familyCache = new Map(), familyRequests = new Map();
   let listToken = null, listTask = null, bootstrapBusy = false;
@@ -67,7 +67,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     state.chatPreferenceRevision = (state.chatPreferenceRevision || 0) + 1;
     $("#chat-name-order").disabled = false; $("#chat-name-order").value = nameOrder; renderNameExample();
     $("#chat-name-save-status").textContent = ""; show($("#chat-name-save-status"), false);
-    generation += 1; listSeq += 1; selectionSeq += 1; linkSeq += 1; cardSeq += 1; detailsSeq += 1; family = null; familySelected = null; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
+    generation += 1; listSeq += 1; selectionSeq += 1; linkSeq += 1; cardSeq += 1; detailsSeq += 1; family = null; familySelected = null; familyPreferredStudent = null; familyChildChoice = false; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     clearTimeout(timer); clearTimeout(searchTimer); clearTimeout(linkTimer); clearTimeout(notifyTimer);
     notifyTimer = null; notifyBusy = false; notifySeq = null; notifyEpoch = null; notifyTarget = null; show($("#chat-new-marker"), false);
     for (const data of cache.values()) data.controller?.abort();
@@ -1428,6 +1428,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (!family) return;
     detailsDialog.classList.remove("is-loading");
     const students = orderStudents(family.students || []);
+    // A newly preferred CRM student replaces a formerly selected archive card.
+    // Ordinary cache refreshes retain the operator's choice within this family.
+    if (family.selection?.student && family.selection.student !== familyPreferredStudent
+        && students.some(student => student.id === family.selection.student)) {
+      familyPreferredStudent = family.selection.student; familyChildChoice = false;
+    }
     if (!familyChildChoice && students.some(student => student.id === family.selection?.student)) familySelected = family.selection.student;
     if (!students.some(student => student.id === familySelected)) familySelected = students[0]?.id || null;
     renderFamilySync(students);
@@ -1641,7 +1647,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   function familyPending(name) {
     delete detailsDialog.dataset.identityPending;
-    detailsSeq += 1; family = null; familyRenderKey = ""; familySelected = null; familyChildChoice = false; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
+    detailsSeq += 1; family = null; familyRenderKey = ""; familySelected = null; familyPreferredStudent = null; familyChildChoice = false; familyBusy = false; clearTimeout(familyTimer); familyTimer = null;
     detailsDialog.querySelector(".family-scroll").scrollTop = 0;
     $("#chat-details-name").textContent = name || "Загружаем сведения…";
     detailsDialog.classList.add("is-loading"); detailsDialog.classList.remove("is-refreshing"); familySkeleton();

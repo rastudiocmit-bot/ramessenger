@@ -1075,6 +1075,29 @@ test('preferred CRM child opens first while an operator child choice survives ca
   assert.match(ui.$('#chat-details-student h3').textContent,/Child 1/);
 });
 
+test('a new preferred active student replaces the old choice, while unchanged preference preserves later manual choices', async t=>{
+  const first=preparedFamily(1),second=preparedFamily(2);
+  let family={...first,id:identifier(99),source_contact_id:identifier(91),
+    selection:{student:first.students[0].id,signature:'archive'},
+    cache:{...first.cache,auto_refresh:true},students:[...first.students,...second.students]};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return family;
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  ui.$('.family-kid').click();await flush();
+  assert.match(ui.$('#chat-details-student h3').textContent,/Child 1/);
+  family={...family,selection:{student:second.students[0].id,signature:'active'}};
+  await runTimer(ui,60000);await flush();
+  assert.match(ui.$('#chat-details-student h3').textContent,/Child 2/);
+  ui.$('.family-kid').click();await flush();
+  family={...family,selection:{...family.selection,signature:'active-new-facts'}};
+  await runTimer(ui,60000);await flush();
+  assert.match(ui.$('#chat-details-student h3').textContent,/Child 1/);
+});
+
 test('a stalled list does not hold multiple rounds of live messages or duplicate its request', async t=>{
   let lists=0,deltas=0,release;
   const ui=setup(t,url=>{

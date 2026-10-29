@@ -91,6 +91,9 @@ def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False, obs
     customer_updates.record(db, workspace, snapshot, branch, customer, observed_at,
                             revision=saved.get('revision', 0) + 1, source=source, saved=saved,
                             fields=customer_updates.observed_fields(raw, archive))
+    if not old or any(value[field] != old[field] for field in customer_updates.LIGHT_FIELDS):
+        from center_messenger.card_preference import refresh_affected
+        refresh_affected(db, workspace, snapshot, value['phones'] + (old['phones'] if old else []))
     if not old or old["contact_id"] != contact or old["student_id"] != student:
         # Repair only the newly linked ID, never all historic families.
         db.execute(text("UPDATE conversations c SET contact_id=:contact WHERE c.workspace_id=:w "

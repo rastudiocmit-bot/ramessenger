@@ -13,7 +13,7 @@ TOPIC = "crm.card.review.scan"
 VERSION = 1
 LIMIT = 2000
 FIELDS = ("a.external_id,a.branch_id,a.contact_id,a.student_id,a.name,a.legal_name,"
-          "a.legal_type,a.dob,a.phones,a.emails")
+          "a.legal_type,a.dob,a.phones,a.emails,a.status")
 SOURCE = (" FROM alfa_customers a JOIN alfa_branches b ON b.workspace_id=a.workspace_id "
           "AND b.connection_id=:conn AND b.external_id=a.branch_id AND b.available "
           "WHERE a.workspace_id=:w AND a.run_id=:r ")

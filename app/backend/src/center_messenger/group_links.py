@@ -181,6 +181,8 @@ def process(worker, workspace, job):
                     {"w": workspace, "v": settings["version"],
                      "secret": worker.connections.vault.seal(workspace, settings["connection_id"], credentials)})
                 card_jobs.clear_verified_denial(db, workspace, job)
+                from center_messenger.card_preference import refresh_for_contact
+                refresh_for_contact(db, workspace, snapshot, job['contact'])
                 worker.finish(db, workspace, job)
     except card_jobs.PageYield:
         worker.yield_job(workspace, job)
