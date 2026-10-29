@@ -1562,6 +1562,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const subscriptionsLoaded = cards.every(card => card.subscriptions_ready ?? Array.isArray(card.subscriptions)), subscriptionConflict = subs.some(item => item.needs_review);
     const subscriptionsReady = subscriptionsLoaded && !subscriptionConflict;
     const lessonsReady = cards.every(card => card.lessons_ready ?? Array.isArray(card.lessons));
+    const sectionStatus = name => family.cache?.sections?.[name]?.status;
+    const groupsReady = sectionStatus("groups") === "ready";
+    const relationsReady = subscriptionsReady && lessonsReady && groupsReady && cards.every(card => !card.needs_mapping_refresh);
     const born = familyDate(student.dob);
     detail.append(el("div", "family-kid-head",
       el("div", "family-kid-name", node("h3", student.name), node("p", [familyAge(student.dob), born && `род. ${born}`].filter(Boolean).join(" · "), "family-sub")),
@@ -1576,12 +1579,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (left >= 0 && left <= 7) notes.append(note("warn", left === 0 ? "Абонемент заканчивается сегодня" : `Абонемент заканчивается через ${left} ${plural(left, "день", "дня", "дней")}`, `${subName(item)} · до ${familyDate(item.end)}`, "warn"));
     }
     if (known(student.balance) && Number(student.balance) < 0) notes.append(note("wallet", `Задолженность ${familyMoney(Math.abs(Number(student.balance)))}`, "Общий баланс клиента отрицательный", "debt"));
-    const sectionStatus = name => family.cache?.sections?.[name]?.status;
-    const pendingDetails = [sectionStatus("finance"), sectionStatus("lessons")].some(value => ["queued", "loading", "busy", "retry_wait", "partial"].includes(value));
+    const pendingDetails = [sectionStatus("finance"), sectionStatus("lessons"), sectionStatus("groups")].some(value => ["queued", "loading", "busy", "retry_wait", "partial"].includes(value));
     if ((!subscriptionsLoaded || !lessonsReady) && pendingDetails) notes.prepend(note("clock", "Готовим подробную карточку", "Абонементы и занятия поставлены в очередь. Уже полученные сведения доступны ниже.", ""));
     else if (!subscriptionsLoaded || !lessonsReady) notes.prepend(note("warn", "Подробные данные не получены", "Обновите карточку или проверьте состояние подключения AlfaCRM.", "warn"));
     if (subscriptionConflict) notes.prepend(note("warn", "Уточните сведения об абонементе", "Один ID вернулся из филиалов с разными данными. Обновите карточку.", ""));
-    if (cards.some(card => card.needs_mapping_refresh) && ["queued", "loading", "busy", "retry_wait", "partial"].includes(sectionStatus("finance"))) notes.prepend(note("clock", "Обновляем связи абонементов", "Проверяем предметы и филиалы по занятиям. Сохранённые суммы доступны.", ""));
+    if (cards.some(card => card.needs_mapping_refresh) && pendingDetails) notes.prepend(note("clock", "Обновляем связи абонементов", "Проверяем предметы и филиалы по занятиям. Сохранённые суммы доступны.", ""));
     else if (cards.some(card => card.needs_mapping_refresh)) notes.prepend(note("warn", "Связи абонементов не получены", "Сохранённые суммы доступны. Запустите повторное обновление.", "warn"));
     if (notes.childNodes.length) detail.append(notes);
 
@@ -1609,7 +1611,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     for (const group of groups) {
       const linked = (group.subscriptions || []).filter(item => !item.archived && (!item.begin || item.begin <= today) && (!item.end || item.end >= today)), previous = group.previous_lesson;
       const mark = !previous ? null : previous.attended === true ? node("span", "Был", "family-mark ok") : previous.attended === false ? node("span", "Не был", "family-mark miss") : node("span", "Не отмечено", "family-mark");
-      const pay = linked.length ? linked.map(item => `${item.balance === null || item.balance === undefined ? "Остаток не указан" : familyMoney(item.balance)} · ${item.end ? `до ${familyDate(item.end)}` : "срок не указан"}`).join("\n") : subscriptionsReady ? "Связь с абонементом не подтверждена" : "Сведения загружаются";
+      const pay = linked.length ? linked.map(item => `${item.balance === null || item.balance === undefined ? "Остаток не указан" : familyMoney(item.balance)} · ${item.end ? `до ${familyDate(item.end)}` : "срок не указан"}`).join("\n") : relationsReady ? "Связь с абонементом не подтверждена" : "Проверяем связь с абонементом";
       const facts = el("dl", "family-facts",
         fact("Прошлое", previous ? node("span", dayLabel(previous.date, previous.time)) : node("span", lessonsReady ? "За год занятий не было" : "Сведения загружаются", "family-muted"), mark),
         fact("Следующее", group.next_lesson ? node("span", dayLabel(group.next_lesson.date, group.next_lesson.time)) : node("span", lessonsReady ? "Не запланировано на 90 дней" : "Сведения загружаются", "family-muted")),

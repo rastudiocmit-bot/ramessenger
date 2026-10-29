@@ -59,25 +59,34 @@ def _active_lease(job, now):
     return bool(job.get("lease_owner") and lease and lease > now)
 
 
-def _manual_fields(contact, *, source_contact=None, conversation=None):
+def _manual_fields(contact, *, source_contact=None, conversation=None, inherited=None):
     if contact is None:
         return {"manual": False, "requested_at": None, "manual_until": None,
-                "source_contact": None, "conversation": None}
+                "source_contact": None, "conversation": None,
+                "priority_boost": False, "watchdog_at": None}
     now = datetime.now(UTC)
-    return {"manual": True, "requested_at": now.isoformat(),
-            "manual_until": (now + MANUAL_INTEREST).isoformat(),
-            "source_contact": str(source_contact or contact),
-            "conversation": str(conversation) if conversation else None}
+    inherited = inherited or {}
+    return {"manual": True, "requested_at": inherited.get("requested_at") or now.isoformat(),
+            "manual_until": inherited.get("manual_until") or (now + MANUAL_INTEREST).isoformat(),
+            "source_contact": str(source_contact or inherited.get("source_contact") or contact),
+            "conversation": str(conversation or inherited.get("conversation"))
+                if conversation or inherited.get("conversation") else None,
+            "priority_boost": bool(inherited.get("priority_boost")),
+            "watchdog_at": inherited.get("watchdog_at")}
 
 
 def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS,
-            source_contact=None, conversation=None):
+            source_contact=None, conversation=None, manual_context=None):
     """Independent queues: finances first, recent lessons, then the daily history.
 
     All three keep their own leases and retry clocks. A failed history request
     cannot hold the next balance refresh. Read clients require explicit opening.
     """
     count = 0
+    # One operator action owns one clock across every section. Separate clocks
+    # let the last inserted yearly-history job outrank the balance shown first.
+    manual = _manual_fields(contact, source_contact=source_contact, conversation=conversation,
+                            inherited=manual_context)
     for topic, column, interval, stale in (
         (TOPIC, "refreshed_at", "30 minutes", SUBSCRIPTIONS_STALE_SQL),
         (LESSONS, "lessons_refreshed_at", "30 minutes", "false"),
@@ -87,17 +96,16 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS
             continue
         count += _enqueue(db, workspace, snapshot, contact=contact, force=force,
                          topic=topic, column=column, interval=interval, stale=stale,
-                         source_contact=source_contact, conversation=conversation)
+                         manual=manual)
     if GROUPS in topics:
         count += group_links.enqueue(db, workspace, snapshot, contact=contact, force=force,
-                                    source_contact=source_contact, conversation=conversation)
+                                    source_contact=source_contact, conversation=conversation,
+                                    manual_context=manual)
     return count
 
 
-def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale,
-             source_contact, conversation):
+def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale, manual):
     # SQL fragments below come only from the fixed policy in enqueue().
-    manual = _manual_fields(contact, source_contact=source_contact, conversation=conversation)
     return db.execute(text("WITH pending_families AS MATERIALIZED (" + card_preference.pending_sql(snapshot) + ") " + f"""
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
       SELECT :w,gen_random_uuid(),:topic,concat(:conn,':',c.branch_id,':',c.external_id),
@@ -106,6 +114,7 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
           'version',:version,'manual',:manual,'requested_at',CAST(:requested_at AS text),
           'manual_until',CAST(:manual_until AS text),'source_contact',CAST(:source_contact AS text),
           'conversation',CAST(:conversation AS text),'due_at',coalesce(f.{column}+interval '{interval}',now()),
+          'priority_boost',:priority_boost,'watchdog_at',CAST(:watchdog_at AS text),
           'force_at',CASE WHEN :force THEN CAST(clock_timestamp() AS text) ELSE NULL END,
           'available_at',now(),'attempts',0),'pending'
       FROM alfa_customers c JOIN alfa_branches b ON b.workspace_id=c.workspace_id
@@ -128,6 +137,8 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
             'manual_until',CASE WHEN :manual THEN CAST(:manual_until AS text) ELSE outbox_events.payload->>'manual_until' END,
             'source_contact',CASE WHEN :manual THEN CAST(:source_contact AS text) ELSE outbox_events.payload->>'source_contact' END,
             'conversation',CASE WHEN :manual THEN CAST(:conversation AS text) ELSE outbox_events.payload->>'conversation' END,
+            'priority_boost',CASE WHEN :manual THEN :priority_boost ELSE coalesce((outbox_events.payload->>'priority_boost')::boolean,false) END,
+            'watchdog_at',CASE WHEN :manual THEN CAST(:watchdog_at AS text) ELSE outbox_events.payload->>'watchdog_at' END,
             'force_at',CASE WHEN :force THEN EXCLUDED.payload->>'force_at' ELSE outbox_events.payload->>'force_at' END)
           ELSE EXCLUDED.payload END
       WHERE (outbox_events.state<>'pending' AND coalesce((outbox_events.payload->>'lease_until')::timestamptz,'epoch')<=now())
@@ -535,8 +546,10 @@ class FamilyCacheWorker:
                 "coalesce((e.payload->>'priority_boost')::boolean,false) DESC,"
                 "CASE WHEN coalesce((e.payload->>'manual')::boolean,false) THEN "
                 "coalesce((e.payload->>'requested_at')::timestamptz,e.created_at) END DESC NULLS LAST,"
-                "(e.topic=:preferred) DESC,"
-                "CASE e.topic WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :history THEN 2 ELSE 3 END,"
+                "CASE WHEN coalesce((e.payload->>'manual')::boolean,false) THEN CASE e.topic "
+                "WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :groups THEN 2 WHEN :history THEN 3 ELSE 4 END ELSE 0 END,"
+                "CASE WHEN NOT coalesce((e.payload->>'manual')::boolean,false) AND e.topic=:preferred THEN 0 ELSE 1 END,"
+                "CASE e.topic WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :groups THEN 2 WHEN :history THEN 3 ELSE 4 END,"
                 "coalesce((e.payload->>'served_at')::timestamptz,e.created_at),e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED"),
                 {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY,
                  "groups": GROUPS, "preferred": preferred, "prefer_background": prefer_background}).mappings().one_or_none()
@@ -642,7 +655,8 @@ class FamilyCacheWorker:
         targets = selection["contacts"] if selection else [source_contact]
         for target in targets:
             enqueue(db, workspace, snapshot, contact=target, force=force,
-                    source_contact=source_contact, conversation=conversation)
+                    source_contact=source_contact, conversation=conversation,
+                    manual_context=owned)
 
     def process(self, workspace, job):
         if job["topic"] == GROUPS:
@@ -759,7 +773,8 @@ class FamilyCacheWorker:
                         if snapshot and snapshot["connection_id"] == settings["connection_id"] and snapshot["version"] == settings["version"]:
                             enqueue(db, workspace, snapshot, contact=job["contact"] if own.get("manual") else None,
                                     force=bool(job.get("force_at")), topics=(LESSONS, HISTORY),
-                                    source_contact=own.get("source_contact"), conversation=own.get("conversation"))
+                                    source_contact=own.get("source_contact"), conversation=own.get("conversation"),
+                                    manual_context=own)
                     else:
                         cached = db.execute(text("SELECT lessons,lessons_refreshed_at,lessons_full_refreshed_at FROM alfa_family_details "
                             "WHERE workspace_id=:w AND connection_id=:conn AND branch_id=:b AND customer_id=:id "

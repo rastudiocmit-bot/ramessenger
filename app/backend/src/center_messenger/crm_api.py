@@ -15,7 +15,7 @@ from center_messenger.alfa_family import fetch_family_card, group_facts, custome
 from center_messenger.alfa_sync import SyncOptions
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_directory import normalized_name, phone_number
-from center_messenger.family_cache import enqueue, cache_status
+from center_messenger.family_cache import enqueue, cache_status, _manual_fields
 from center_messenger.group_links import TOPIC as GROUPS_TOPIC
 from center_messenger import card_preference
 from center_messenger.crm_review import cached_status as current_review_status
@@ -488,9 +488,10 @@ class DirectoryReader:
         # Both cache hits and requests retain the same chat membership checks.
         from center_messenger.chat_queue import state
         with self.connections.chat_transaction(actor, workspace) as db:
-            linked = db.execute(text("SELECT 1 FROM conversations WHERE workspace_id=:w AND id=:c "
-                "AND contact_id=:contact AND kind='direct'"),
-                {"w": workspace, "c": conversation, "contact": contact_id}).scalar_one_or_none()
+            linked = db.execute(text("SELECT c.crm_link_manual,cn.kind AS channel_kind FROM conversations c "
+                "JOIN connections cn ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id "
+                "WHERE c.workspace_id=:w AND c.id=:c AND c.contact_id=:contact AND c.kind='direct'"),
+                {"w": workspace, "c": conversation, "contact": contact_id}).mappings().one_or_none()
             if not linked:
                 raise AuthError(404, "Контакт недоступен в этом диалоге.")
             if auto and not state(db, workspace, conversation)["needs_reply"]:
@@ -500,12 +501,17 @@ class DirectoryReader:
             snapshot = self._published(db, workspace)
             if snapshot is None:
                 raise AuthError(404, "Контакт недоступен.")
-            if not cached_only:
+            if cached_only and linked["channel_kind"] == "alfa_max_browser" and not linked["crm_link_manual"]:
+                card_preference.ensure_selected(db, workspace, snapshot, conversation, contact_id)
+            elif not cached_only:
                 card_preference.refresh(db, workspace, snapshot, [contact_id])
                 selection = card_preference.selected(db, workspace, snapshot, conversation, contact_id)
+                manual_context = _manual_fields(contact_id, source_contact=contact_id,
+                                                conversation=conversation)
                 for target in selection["contacts"] if selection else [contact_id]:
                     enqueue(db, workspace, snapshot, contact=target, force=force,
-                            source_contact=contact_id, conversation=conversation)
+                            source_contact=contact_id, conversation=conversation,
+                            manual_context=manual_context)
         if compact:
             return self.prepared_view(actor, workspace, contact_id, conversation, known_version=known_version)
         return self.detail(actor, workspace, contact_id, conversation=conversation)

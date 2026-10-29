@@ -141,6 +141,24 @@ def selected(db, workspace, snapshot, conversation, source):
         {"w": workspace, "c": conversation, "source": source, **params(snapshot)}).scalar_one_or_none()
 
 
+def ensure_selected(db, workspace, snapshot, conversation, source):
+    """Repair a missing display projection from local PostgreSQL facts only.
+
+    A valid projection stays read-only, preserving the compact card cache. The
+    workspace lock makes the uncommon rebuild idempotent when several browser
+    polls observe the same directory change together.
+    """
+    choice = selected(db, workspace, snapshot, conversation, source)
+    if choice is not None:
+        return choice
+    db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
+    choice = selected(db, workspace, snapshot, conversation, source)
+    if choice is None:
+        refresh(db, workspace, snapshot, [source])
+        choice = selected(db, workspace, snapshot, conversation, source)
+    return choice
+
+
 def public(selection, *, manual=False):
     if not selection:
         return {"mode": "manual"} if manual else None
