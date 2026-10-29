@@ -327,7 +327,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
         top: "auto", bottom: "24px", maxHeight: `${innerHeight - 48}px` });
     }
   }
-  addEventListener("resize", () => { for (const dialog of document.querySelectorAll(".task-sheet[open], #task-settings-dialog[open]")) { placeSheet(dialog); paintEdges(dialog); } fitKeyboard(); });
+  addEventListener("resize", () => { for (const dialog of document.querySelectorAll(".task-sheet[open]")) { placeSheet(dialog); paintEdges(dialog); } fitKeyboard(); });
   // The middle of a sheet scrolls; its head and the button at the bottom stay put. Lines and soft
   // edges show only when there is something to scroll.
   function paintEdges(dialog) {
@@ -914,57 +914,112 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   }
   if (pane) {
     pane.querySelector(".task-new").append(icon("plus"));
-    pane.querySelector(".task-settings").append(icon("cog"));
     pane.querySelector(".task-new").addEventListener("click", () => openSheet({ draft: { title: "", sources: [], conversation_id: null, client_label: "", origin: "manual" } }));
-    pane.querySelector(".task-settings").addEventListener("click", openSettings);
     pane.querySelector(".task-scope").addEventListener("click", event => { const tab = event.target.closest("button[data-scope]"); if (!tab || tab.dataset.scope === scope) return; scope = tab.dataset.scope; loadLists(); });
   }
 
   // ── settings ─────────────────────────────────────────────────────────────
-  async function openSettings() {
-    try { await context(true); } catch (error) { toast(error.message, true); return; }
-    const dialog = $("#task-settings-dialog"), form = dialog.querySelector("form"), p = ctx.personal, s = ctx.studio;
+  const settingsPanel = $("#task-settings-panel"), settingsForm = $("#task-settings-form");
+  let taskView = "list", settingsEpoch = -1, settingsAt = 0, settingsSeq = 0, settingsBusy = false, settingsSaving = false;
+  const settingsTouched = new Set(), viewScroll = { list: 0, settings: 0 };
+  const settingsStatus = () => settingsPanel.querySelector(".task-settings-status");
+  function settingsFields() {
+    for (const field of settingsForm.querySelectorAll("input,select,button[type=submit]")) {
+      field.disabled = settingsBusy || settingsSaving || settingsEpoch !== state.epoch ||
+        Boolean(field.closest("[data-studio]") && !ctx?.admin) || field.name === "alfa_copy";
+    }
+    settingsPanel.setAttribute("aria-busy", String(settingsBusy || settingsSaving));
+  }
+  function fillSettings() {
+    const form = settingsForm, p = ctx.personal, s = ctx.studio;
     form.elements.press.value = p.press; form.elements.voice_task.value = p.voice_task;
     form.elements.reminders.checked = p.reminders; form.elements.hints.checked = p.hints; form.elements.digest.checked = p.digest;
     form.elements.day_start.value = s.day_start; form.elements.day_end.value = s.day_end;
     for (const box of form.querySelectorAll('input[name="work_days"]')) box.checked = s.work_days.includes(Number(box.value));
     form.elements.default_due.value = s.default_due; form.elements.visibility.value = s.visibility; form.elements.alfa_copy.checked = s.alfa_copy;
-    for (const field of form.querySelectorAll("[data-studio] :is(input,select)")) field.disabled = !ctx.admin;
-    form.elements.alfa_copy.disabled = true; // the AlfaCRM connection is read-only for now
-    show(dialog.querySelector(".task-studio-note"), !ctx.admin);
-    dialog.querySelector(".task-settings-error").hidden = true;
-    dialog.showModal(); placeSheet(dialog);
+    settingsTouched.clear(); settingsFields();
   }
-  const settingsDialog = $("#task-settings-dialog");
+  function selectTaskView(view, focus = false) {
+    if (!pane || !["list", "settings"].includes(view)) return;
+    const scroll = pane.querySelector(".scroll");
+    const changed = taskView !== view;
+    if (changed) viewScroll[taskView] = scroll.scrollTop;
+    taskView = view;
+    for (const tab of pane.querySelectorAll("[data-tasks-view]")) {
+      const active = tab.dataset.tasksView === view;
+      tab.setAttribute("aria-selected", String(active)); tab.tabIndex = active ? 0 : -1;
+      if (active && focus) tab.focus();
+    }
+    $("#tasks-list-panel").hidden = view !== "list"; settingsPanel.hidden = view !== "settings";
+    if (changed) scroll.scrollTop = viewScroll[view];
+    if (view === "settings") openSettings();
+  }
+  pane?.querySelector(".tasks-page-tabs").addEventListener("click", event => {
+    const tab = event.target.closest("[data-tasks-view]"); if (tab) selectTaskView(tab.dataset.tasksView);
+  });
+  pane?.querySelector(".tasks-page-tabs").addEventListener("keydown", event => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    selectTaskView(event.key === "Home" ? "list" : event.key === "End" ? "settings" : taskView === "list" ? "settings" : "list", true);
+  });
+  async function openSettings() {
+    if (settingsBusy || settingsSaving || !allowed() ||
+      (settingsEpoch === state.epoch && (settingsTouched.size || Date.now() - settingsAt < 60000))) return;
+    const epoch = state.epoch, seq = ++settingsSeq, error = settingsPanel.querySelector(".task-settings-error");
+    settingsBusy = true; settingsFields(); settingsStatus().textContent = "Загружаем настройки…";
+    error.hidden = true; settingsPanel.querySelector(".task-settings-retry").hidden = true;
+    try {
+      await context(true);
+      if (epoch !== state.epoch || seq !== settingsSeq || ctxEpoch !== epoch) return;
+      settingsEpoch = epoch; settingsAt = Date.now(); fillSettings(); settingsStatus().textContent = "Измените нужные параметры и нажмите «Сохранить настройки».";
+    } catch (failure) {
+      if (epoch !== state.epoch || seq !== settingsSeq || failure.name === "AbortError") return;
+      error.textContent = failure.message; error.hidden = false; settingsStatus().textContent = "Настройки не загружены.";
+      settingsPanel.querySelector(".task-settings-retry").hidden = false;
+    } finally { if (seq === settingsSeq) { settingsBusy = false; settingsFields(); } }
+  }
+  settingsPanel?.querySelector(".task-settings-retry").addEventListener("click", openSettings);
+  settingsForm?.addEventListener("input", event => {
+    settingsTouched.add(event.target.name); settingsStatus().textContent = "Есть несохранённые изменения.";
+  });
   document.addEventListener("cm:task-reminders-change", event => {
     if (event.detail?.epoch !== state.epoch) return;
     if (ctx?.personal) ctx.personal.reminders = event.detail.enabled;
-    if (settingsDialog?.open) settingsDialog.querySelector('[name="reminders"]').checked = event.detail.enabled;
+    if (settingsEpoch === state.epoch && !settingsTouched.has("reminders")) settingsForm.elements.reminders.checked = event.detail.enabled;
   });
   document.addEventListener("cm:notification-preferences", event => {
-    if (event.detail?.epoch === state.epoch && ctx?.personal) ctx.personal.reminders = event.detail.task_reminders;
+    if (event.detail?.epoch !== state.epoch) return;
+    if (ctx?.personal) ctx.personal.reminders = event.detail.task_reminders;
+    if (settingsEpoch === state.epoch && !settingsTouched.has("reminders")) settingsForm.elements.reminders.checked = event.detail.task_reminders;
   });
-  settingsDialog?.querySelector("form").addEventListener("submit", async event => {
+  settingsForm?.addEventListener("submit", async event => {
     event.preventDefault();
-    const form = event.target, error = settingsDialog.querySelector(".task-settings-error"), save = form.querySelector('[type="submit"]');
-    save.disabled = true; error.hidden = true;
+    if (settingsBusy || settingsSaving || settingsEpoch !== state.epoch || !ctx) return;
+    const form = event.target, error = settingsPanel.querySelector(".task-settings-error"), epoch = state.epoch;
+    const admin = ctx.admin, url = base();
+    const days = [...form.querySelectorAll('input[name="work_days"]:checked')].map(box => Number(box.value));
+    error.hidden = true;
     try {
+      if (admin && !days.length) throw new Error("Отметьте хотя бы один рабочий день.");
+      if (admin && form.elements.day_end.value <= form.elements.day_start.value) throw new Error("Конец рабочего дня должен быть позже начала.");
       const personal = { press: form.elements.press.value, voice_task: form.elements.voice_task.value,
         reminders: form.elements.reminders.checked, hints: form.elements.hints.checked, digest: form.elements.digest.checked };
-      await api(`${base()}/tasks/preferences`, { method: "PUT", data: personal });
-      if (ctx.admin) {
-        const days = [...form.querySelectorAll('input[name="work_days"]:checked')].map(box => Number(box.value));
-        if (!days.length) throw new Error("Отметьте хотя бы один рабочий день.");
-        if (form.elements.day_end.value <= form.elements.day_start.value) throw new Error("Конец рабочего дня должен быть позже начала.");
-        await api(`${base()}/tasks/settings`, { method: "PUT", data: { day_start: form.elements.day_start.value, day_end: form.elements.day_end.value,
-          work_days: days, default_due: form.elements.default_due.value, visibility: form.elements.visibility.value, alfa_copy: form.elements.alfa_copy.checked } });
+      const studio = { day_start: form.elements.day_start.value, day_end: form.elements.day_end.value,
+        work_days: days, default_due: form.elements.default_due.value, visibility: form.elements.visibility.value, alfa_copy: form.elements.alfa_copy.checked };
+      settingsSaving = true; settingsFields(); settingsStatus().textContent = "Сохраняем настройки…";
+      await api(`${url}/tasks/preferences`, { method: "PUT", data: personal });
+      if (epoch !== state.epoch) return;
+      if (admin) {
+        await api(`${url}/tasks/settings`, { method: "PUT", data: studio });
+        if (epoch !== state.epoch) return;
       }
-      await context(true); settingsDialog.close();
+      await context(true);
+      if (epoch !== state.epoch) return;
+      settingsAt = Date.now(); fillSettings(); settingsStatus().textContent = "Настройки сохранены.";
       document.dispatchEvent(new CustomEvent("cm:task-reminders-saved", {detail:{epoch:state.epoch}}));
-      notices?.notify({ type: "success", title: "Настройки задач сохранены", key: "task:settings", count: false });
       if (state.pane === "tasks") loadLists();
-    } catch (failure) { if (failure.name !== "AbortError") { error.textContent = failure.message; error.hidden = false; } }
-    finally { save.disabled = false; }
+    } catch (failure) { if (epoch === state.epoch && failure.name !== "AbortError") { error.textContent = failure.message; error.hidden = false; settingsStatus().textContent = "Не удалось сохранить все настройки. Проверьте ошибку и повторите сохранение."; } }
+    finally { if (epoch === state.epoch) { settingsSaving = false; settingsFields(); } }
   });
 
   // ── lifecycle ────────────────────────────────────────────────────────────
@@ -972,6 +1027,10 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   function reset() {
     ctx = null; ctxAt = 0; ctxEpoch = -1; summary = null; lists = { open: [], closed: [] }; convId = null; convTasks = [];
     scope = "mine"; closedOpen = false; closeMenu(); endPick(); paintBadge(); paintStrip();
+    settingsEpoch = -1; settingsAt = 0; settingsSeq += 1; settingsBusy = false; settingsSaving = false; settingsTouched.clear();
+    settingsForm?.reset(); selectTaskView("list"); viewScroll.list = 0; viewScroll.settings = 0; pane.querySelector(".scroll").scrollTop = 0;
+    settingsPanel.querySelector(".task-settings-error").hidden = true; settingsPanel.querySelector(".task-settings-retry").hidden = true;
+    settingsStatus().textContent = "Загружаем настройки…"; settingsFields();
     if (sheet?.open) sheet.close();
   }
   function sync() {

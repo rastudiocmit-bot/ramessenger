@@ -23,12 +23,12 @@ async function geometry(page, label) {
     const pairs = [['#task-strip', '#chat-header'], ['.task-hint', '#chat-compose'], ['.notice-capsule', '#task-strip'], ['.notice-capsule', '#chat-header'],
       ['.task-hint', '#task-strip'], ['.task-pick-bar', '#task-strip']];
     for (const [a, b] of pairs) { const x = document.querySelector(a), y = document.querySelector(b); if (vis(x) && vis(y) && hit(r(x), r(y))) out.push(`${a} overlaps ${b}`); }
-    for (const sel of ['#task-strip', '.task-hint', '.task-menu', '.notice-capsule', '.task-pick-bar', '#task-dialog[open]', '#task-settings-dialog[open]', '#task-done-dialog[open]', '.chat-bubble.task-lifted']) {
+    for (const sel of ['#task-strip', '.task-hint', '.task-menu', '.notice-capsule', '.task-pick-bar', '#task-dialog[open]', '#task-done-dialog[open]', '.chat-bubble.task-lifted']) {
       const e = document.querySelector(sel); if (!vis(e)) continue; const b = r(e);
       if (b.left < -1 || b.right > W + 1 || b.top < -1 || b.bottom > H + 1) out.push(`${sel} outside viewport ${JSON.stringify({ l: b.left | 0, r: b.right | 0, t: b.top | 0, b: b.bottom | 0 })}`);
     }
     // Text that is cut without an ellipsis, or children wider than their parent.
-    for (const e of document.querySelectorAll('#task-strip *, .task-hint *, .task-row *, .task-sheet *, #task-settings-dialog *, #task-done-dialog *, .notice-capsule *, .task-menu *, .row-task, .task-scope *')) {
+    for (const e of document.querySelectorAll('#task-strip *, .task-hint *, .task-row *, .task-sheet *, #task-settings-panel *, #task-done-dialog *, .notice-capsule *, .task-menu *, .row-task, .task-scope *')) {
       if (!vis(e)) continue; const cs = getComputedStyle(e);
       if (e.scrollWidth > e.clientWidth + 2 && cs.overflowX === 'visible' && cs.textOverflow !== 'ellipsis' && !['svg', 'path', 'rect', 'g', 'circle', 'polyline'].includes(e.tagName.toLowerCase()))
         out.push(`overflow ${e.tagName.toLowerCase()}.${(e.className && e.className.baseVal === undefined ? e.className : '').toString().split(' ')[0]} "${(e.textContent || '').trim().slice(0, 30)}"`);
@@ -96,8 +96,8 @@ async function geometry(page, label) {
       await page.waitForSelector('#pane-tasks .task-row'); await page.evaluate(() => document.querySelectorAll('.notice-capsule .notice-del').forEach(b => b.click()));
       await shot('tasks');
       await page.locator('#pane-tasks .task-closed-toggle').click(); await page.waitForTimeout(300); await shot('tasks-closed');
-      await page.locator('#pane-tasks .task-settings').click(); await page.waitForSelector('#task-settings-dialog[open]'); await shot('settings');
-      await page.evaluate(() => { const d = document.querySelector('#task-settings-dialog'); d.scrollTop = d.scrollHeight; }); await shot('settings-end');
+      await page.locator('#tasks-settings-tab').click(); await page.waitForFunction(() => !document.querySelector('.task-settings-save').disabled); await shot('settings');
+      await page.evaluate(() => { const d = document.querySelector('#pane-tasks .scroll'); d.scrollTop = d.scrollHeight; }); await shot('settings-end');
       await context.close();
     }
   } finally { await browser.close(); }

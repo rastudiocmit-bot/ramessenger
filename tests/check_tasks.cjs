@@ -125,13 +125,14 @@ async function longPress(page, selector) {
       assert.ok(snooze && Date.parse(snooze.body.due_at) > Date.now(), 'snoozed into the future');
       // Settings: switching long press to «Везде меню» is saved and applied.
       await page.locator('#tabbar [data-pane="tasks"]').tap();
-      await page.locator('#pane-tasks .task-settings').tap();
-      await page.waitForSelector('#task-settings-dialog[open]');
-      assert.equal(await page.locator('#task-settings-dialog input[name="visibility"]').first().isDisabled(), true, 'operators cannot change studio settings');
-      await page.locator('#task-settings-dialog input[name="press"][value="menu"]').check();
+      await page.locator('#tasks-settings-tab').tap();
+      await page.waitForSelector('#task-settings-panel:not([hidden])');
+      await page.waitForFunction(() => !document.querySelector('#task-settings-form input[name=press]').disabled);
+      assert.equal(await page.locator('#task-settings-panel input[name="visibility"]').first().isDisabled(), true, 'operators cannot change studio settings');
+      await page.locator('#task-settings-panel input[name="press"][value="menu"]').check();
       await settle(page); await save(page, 'tasks-settings');
-      await page.locator('#task-settings-dialog [type="submit"]').tap();
-      await page.waitForSelector('#task-settings-dialog', { state: 'hidden' });
+      await page.locator('#task-settings-panel [type="submit"]').tap();
+      await page.waitForSelector('.task-settings-status:has-text("Настройки сохранены")');
       assert.equal(data.mutations.find(m => m.path.endsWith('/tasks/preferences')).body.press, 'menu');
       assert.ok(!data.mutations.some(m => m.path.endsWith('/tasks/settings')), 'studio settings untouched by an operator');
       assert.equal(await page.evaluate(() => window.document.documentElement && true), true);
