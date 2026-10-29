@@ -2075,6 +2075,45 @@ class MessageSyncTests(unittest.TestCase):
             "WHERE workspace_id=:w AND topic=:t"),{'w':self.workspace,'t':group_links.TOPIC})
         self.assertEqual(worker.claim(self.workspace)['topic'],group_links.TOPIC)
 
+    def test_manual_card_pipeline_shares_one_clock_and_claims_visible_sections_first(self):
+        from center_messenger import family_cache, group_links
+        reader,worker,_=self.family_worker_fixture(include_groups=True)
+        self.project(self.row('1',direction='out',actor='automation'))
+        conversation=self.conversation()['id']
+        reader.prepare(None,self.workspace,self.contact,conversation=conversation)
+        pending=lambda:list(self.db.execute(text("SELECT topic,payload FROM outbox_events WHERE workspace_id=:w "
+            "AND topic=ANY(CAST(:topics AS text[])) AND state='pending' ORDER BY topic"),
+            {'w':self.workspace,'topics':list(family_cache.TOPICS)}).mappings())
+        initial=pending()
+        self.assertEqual({row['topic'] for row in initial},{family_cache.TOPIC,group_links.TOPIC})
+        self.assertEqual(len({row['payload']['requested_at'] for row in initial}),1)
+        finance=worker.claim(self.workspace)
+        self.assertEqual(finance['topic'],family_cache.TOPIC)
+        with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
+            worker.process(self.workspace,finance)
+        downstream=pending()
+        self.assertEqual({row['topic'] for row in downstream},
+                         {family_cache.LESSONS,family_cache.HISTORY,group_links.TOPIC})
+        self.assertEqual(len({row['payload']['requested_at'] for row in downstream}),1)
+        self.assertEqual(worker.claim(self.workspace)['topic'],family_cache.LESSONS)
+
+    def test_one_open_clock_is_shared_by_every_selected_family_contact(self):
+        reader,_,_=self.family_worker_fixture(include_groups=True)
+        self.project(self.row('1',direction='out',actor='automation'))
+        conversation=self.conversation()['id'];other=uuid4()
+        selection={'contacts':[self.contact,other]}
+        with patch('center_messenger.crm_api.card_preference.refresh'), \
+             patch('center_messenger.crm_api.card_preference.selected',return_value=selection), \
+             patch('center_messenger.crm_api.enqueue') as queued, \
+             patch.object(reader,'detail',return_value={}):
+            reader.prepare(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(queued.call_count,2)
+        contexts=[call.kwargs['manual_context'] for call in queued.call_args_list]
+        self.assertIs(contexts[0],contexts[1])
+        self.assertEqual(len({context['requested_at'] for context in contexts}),1)
+        self.assertEqual({call.kwargs['contact'] for call in queued.call_args_list},
+                         {self.contact,other})
+
     def test_targeted_preference_catalog_preserves_candidates_without_loading_other_clients(self):
         policy,_,_,active,_,_=self.preferred_card_fixture()
         unrelated=uuid4();self.add_customer(unrelated,1,12345)
@@ -2337,6 +2376,31 @@ class MessageSyncTests(unittest.TestCase):
         self.assertTrue(value['cache']['ready'])
         self.assertTrue(self.db.execute(text("SELECT 1 FROM outbox_events WHERE workspace_id=:w AND topic='crm.card.lessons' AND state='pending'"),{'w':self.workspace}).scalar())
         worker.connections.client_factory.assert_not_called()
+
+    def test_cached_only_repairs_missing_local_preference_without_enqueuing_crm(self):
+        policy,reader,worker,active,_,conversation=self.preferred_card_fixture()
+        self.assertIsNone(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact))
+        before=self.db.execute(text("SELECT card_revision FROM chat_read_versions WHERE workspace_id=:w"),
+                               {'w':self.workspace}).scalar_one()
+        value=reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True)
+        self.assertEqual(value['id'],str(active))
+        self.assertEqual(value['selection']['customer'],'9160')
+        self.assertEqual(value['students'][0]['balance'],'487.50')
+        self.assertEqual(self.family_jobs(),[])
+        worker.connections.client_factory.assert_not_called()
+        projection=self.db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w "
+            "AND topic='crm.card.preference' AND event_key=:key"),
+            {'w':self.workspace,'key':f'{self.crm}:{self.contact}'}).scalar_one()
+        revision=self.db.execute(text("SELECT card_revision FROM chat_read_versions WHERE workspace_id=:w"),
+                                 {'w':self.workspace}).scalar_one()
+        self.assertGreater(revision,before)
+        again=reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True)
+        self.assertEqual(again['selection']['signature'],value['selection']['signature'])
+        self.assertEqual(self.db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w "
+            "AND topic='crm.card.preference' AND event_key=:key"),
+            {'w':self.workspace,'key':f'{self.crm}:{self.contact}'}).scalar_one(),projection)
+        self.assertEqual(self.db.execute(text("SELECT card_revision FROM chat_read_versions WHERE workspace_id=:w"),
+            {'w':self.workspace}).scalar_one(),revision)
 
     def test_archived_customer_new_messages_keep_distinct_ids_and_skip_saved_source(self):
         from center_messenger.history_receipts import new_records

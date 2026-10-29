@@ -40,9 +40,10 @@ def progress(db, workspace, snapshot):
 
 
 def enqueue(db, workspace, snapshot, *, contact=None, force=False,
-            source_contact=None, conversation=None):
+            source_contact=None, conversation=None, manual_context=None):
     from center_messenger.family_cache import _manual_fields
-    manual = _manual_fields(contact, source_contact=source_contact, conversation=conversation)
+    manual = manual_context or _manual_fields(contact, source_contact=source_contact,
+                                               conversation=conversation)
     return db.execute(text("""
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
       SELECT :w,gen_random_uuid(),:topic,concat(:conn,':',c.branch_id,':',c.external_id),
@@ -51,6 +52,7 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False,
           'version',:v,'manual',:manual,'requested_at',CAST(:requested_at AS text),
           'manual_until',CAST(:manual_until AS text),'source_contact',CAST(:source_contact AS text),
           'conversation',CAST(:conversation AS text),'due_at',now(),'available_at',now(),'attempts',0,
+          'priority_boost',:priority_boost,'watchdog_at',CAST(:watchdog_at AS text),
           'force_at',CASE WHEN :force THEN CAST(clock_timestamp() AS text) ELSE NULL END),'pending'
       FROM alfa_customers c JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND b.connection_id=:conn
         AND b.external_id=c.branch_id AND b.available
@@ -73,6 +75,8 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False,
           'manual_until',CASE WHEN :manual THEN CAST(:manual_until AS text) ELSE outbox_events.payload->>'manual_until' END,
           'source_contact',CASE WHEN :manual THEN CAST(:source_contact AS text) ELSE outbox_events.payload->>'source_contact' END,
           'conversation',CASE WHEN :manual THEN CAST(:conversation AS text) ELSE outbox_events.payload->>'conversation' END,
+          'priority_boost',CASE WHEN :manual THEN :priority_boost ELSE coalesce((outbox_events.payload->>'priority_boost')::boolean,false) END,
+          'watchdog_at',CASE WHEN :manual THEN CAST(:watchdog_at AS text) ELSE outbox_events.payload->>'watchdog_at' END,
           'force_at',CASE WHEN :force THEN EXCLUDED.payload->>'force_at' ELSE outbox_events.payload->>'force_at' END)
         ELSE EXCLUDED.payload||CASE WHEN outbox_events.payload->>'version'=EXCLUDED.payload->>'version'
           AND outbox_events.payload->>'contact'=EXCLUDED.payload->>'contact'

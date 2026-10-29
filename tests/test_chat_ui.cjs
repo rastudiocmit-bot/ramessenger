@@ -703,6 +703,34 @@ test("conflicting branch observations show unknown totals without endless prepar
   assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Готовим подробную карточку/);
 });
 
+test('subscription relation stays pending until lessons and mapping facts are complete',async t=>{
+  let family=preparedFamily(1),source=family.students[0].cards[0];
+  family.students[0].subscriptions=[{id:40,name:'Школа',balance:'100',begin:'2026-10-01',end:'2027-07-04'}];
+  family.students[0].groups=[{id:'5',name:'Группа',branch_id:'1',branch_name:'Филиал',customer_ids:['1'],subscriptions:[]}];
+  Object.assign(source,{subscriptions_ready:true,lessons_ready:true,needs_mapping_refresh:false});
+  family.cache={...family.cache,state:'partial',pending:true,incomplete:true,sections:{
+    finance:{label:'Баланс и абонементы',status:'ready'},
+    lessons:{label:'Занятия',status:'ready'},
+    groups:{label:'Группы',status:'queued'}}};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return structuredClone(family);
+  });
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.match(ui.$('#chat-details-student').textContent,/Проверяем связь с абонементом/);
+  assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Связь с абонементом не подтверждена/);
+  source=family.students[0].cards[0];Object.assign(source,{needs_mapping_refresh:true});
+  family.cache={...family.cache,state:'stale',pending:false,incomplete:true,complete:false,
+    sections:{...family.cache.sections,groups:{label:'Группы',status:'ready'}}};
+  await runTimer(ui,5000);await flush();
+  assert.match(ui.$('#chat-details-student').textContent,/Проверяем связь с абонементом/);
+  assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Связь с абонементом не подтверждена/);
+  source=family.students[0].cards[0];Object.assign(source,{needs_mapping_refresh:false});
+  family.cache={...family.cache,state:'ready',pending:false,incomplete:false,complete:true};
+  await runTimer(ui,10000);await flush();
+  assert.match(ui.$('#chat-details-student').textContent,/Связь с абонементом не подтверждена/);
+});
+
 test('window patches retain unchanged nodes and apply new ordering without duplicates', async t=>{
   let lists=0;
   const rows=[conversation(1),conversation(2),conversation(3)];
