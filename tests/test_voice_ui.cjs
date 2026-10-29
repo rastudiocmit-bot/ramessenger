@@ -208,11 +208,11 @@ test('recognized words appear before the slower agent completes, then become the
    ++polls===1?{status:'recognized',result:{text:'ну мы придём'}}:{status:'done',result:{text:'Мы придём.'}}});
  s.$('#chat-compose').addEventListener('submit',()=>submits++);
  await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();
- await s.advance(751);
+ await s.advance(301);
  assert.equal(s.$('#chat-input').value,'ну мы придём');
  assert.match(s.$('#chat-voice-label').textContent,/Улучшаем/);
  assert.equal(s.$('#chat-voice-panel').dataset.phase,'working');
- await s.advance(751);
+ await s.advance(301);
  assert.equal(s.$('#chat-input').value,'Мы придём.');
  assert.equal(s.$('#chat-voice-panel').hidden,true);
  assert.equal(submits,0);
@@ -222,10 +222,10 @@ test('a late agent result never overwrites a voice draft edited or already sent 
    let polls=0;
    const s=setup(t,{transcribe:()=>({job_id:'job'}),job:args=>args.method==='DELETE'?null:
      ++polls===1?{status:'recognized',result:{text:'Сырые слова'}}:{status:'done',result:{text:'Обработанные слова'}}});
-   await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();await s.advance(751);
+   await s.tap();s.frames();s.$('#chat-voice-done').click();await flush();await s.advance(301);
    assert.equal(s.$('#chat-input').value,'Сырые слова');
    s.$('#chat-input').value=edited;s.$('#chat-input').dispatchEvent(new s.w.Event('input',{bubbles:true}));
-   await s.advance(751);
+   await s.advance(301);
    assert.equal(s.$('#chat-input').value,edited);
  }
 });
