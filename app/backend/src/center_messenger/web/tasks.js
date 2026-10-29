@@ -201,7 +201,9 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     items.push(menuItem("Копировать", "copy", target => copyText(target)));
     if (!readOnly()) items.push(menuItem("Выбрать несколько", "checks", target => startPick(target)));
     menu.replaceChildren(...items); backdrop.hidden = false; menu.hidden = false;
-    const rect = bubble.getBoundingClientRect(), width = menu.offsetWidth || 240, height = menu.offsetHeight || 190;
+    // Keep menu placement tied to the untouched message geometry. The source
+    // bubble is hidden and scaled while its fixed visual copy is displayed.
+    const rect = at, width = menu.offsetWidth || 240, height = menu.offsetHeight || 190;
     let top = point?.y ?? rect.bottom + 8, left = point?.x ?? (bubble.classList.contains("out") ? rect.right - width : rect.left);
     if (!point) top = rect.bottom + 8;
     if (top + height > innerHeight - 12) top = Math.max(12, (point?.y ?? rect.top) - height - 8);
