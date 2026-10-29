@@ -32,8 +32,15 @@ async function longPress(page, selector) {
       await page.locator('.chat-select').first().tap();
       await page.waitForSelector('#chat-history .chat-bubble.msg[data-id="m1"]');
       await settle(page);
+      const messageBeforeMenu = await page.locator('#chat-history .chat-bubble.msg[data-id="m1"]').boundingBox();
+      const scrollBeforeMenu = await page.locator('#chat-stream').evaluate(node => node.scrollTop);
       await longPress(page, '#chat-history .chat-bubble.msg[data-id="m1"]');
       await page.waitForSelector('.task-menu:not([hidden])');
+      const liftedMessage = await page.locator('.chat-bubble.task-lifted').boundingBox();
+      const scrollAfterMenu = await page.locator('#chat-stream').evaluate(node => node.scrollTop);
+      assert.ok(Math.abs((liftedMessage.y + liftedMessage.height / 2) - (messageBeforeMenu.y + messageBeforeMenu.height / 2)) <= 1,
+        'long press enlarges the message around its vertical center');
+      assert.equal(scrollAfterMenu, scrollBeforeMenu, 'long press does not move the chat');
       assert.equal(await page.evaluate(() => document.documentElement.classList.contains('voice-holding')), false, 'a long press on a message does not record');
       assert.equal(await page.locator('#voice-hold:not([hidden])').count(), 0, 'no voice layer over the menu');
       assert.match(await page.locator('.task-menu-item').first().innerText(), /Сделать задачей/);
@@ -132,8 +139,15 @@ async function longPress(page, selector) {
       await page.goto('https://cabinet.example.test/?view=messages');
       await page.locator('.chat-select').first().click();
       await page.waitForSelector('#chat-history .chat-bubble.msg[data-id="m4"]');
+      const desktopBeforeMenu = await page.locator('#chat-history .chat-bubble.msg[data-id="m1"]').boundingBox();
+      const desktopScrollBefore = await page.locator('#chat-stream').evaluate(node => node.scrollTop);
       await page.locator('#chat-history .chat-bubble.msg[data-id="m1"] .msg-text').click({ button: 'right' });
       await page.waitForSelector('.task-menu:not([hidden])');
+      const desktopLifted = await page.locator('.chat-bubble.task-lifted').boundingBox();
+      assert.ok(Math.abs((desktopLifted.y + desktopLifted.height / 2) - (desktopBeforeMenu.y + desktopBeforeMenu.height / 2)) <= 1,
+        'right click enlarges the message around its vertical center');
+      assert.equal(await page.locator('#chat-stream').evaluate(node => node.scrollTop), desktopScrollBefore,
+        'right click does not move the chat');
       await page.locator('.task-menu-item', { hasText: 'Выбрать несколько' }).click();
       await page.locator('#chat-history .chat-bubble.msg[data-id="m4"]').click();
       assert.match(await page.locator('.task-pick-make').innerText(), /Задача из 2 сообщений/);
