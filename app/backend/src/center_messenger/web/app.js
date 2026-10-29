@@ -461,6 +461,9 @@
   function connectionView(view) {
     if (!["monitor", "wizard", "settings", "voice", "agents"].includes(view)) view = "monitor";
     state.connectionsView = view;
+    // One live monitor, no duplicate IDs, timers or request streams.
+    const monitor = $("#connection-monitor-content");
+    (view === "wizard" ? $("#wizard-monitor-slot") : $("#connections-monitor-view")).append(monitor);
     if (view === "wizard") void cardLoader.load();
     for (const name of ["monitor", "wizard", "settings", "voice", "agents"]) {
       show($("#connections-" + name + "-view"), name === view);
@@ -472,12 +475,15 @@
   $(".connection-tabs").addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const names = ["monitor", "wizard", "settings", "voice", "agents"];
+    const names = ["wizard", "monitor", "settings", "voice", "agents"];
     const focusedView = event.target.closest("[data-connection-view]")?.dataset.connectionView;
     const index = names.indexOf(focusedView || state.connectionsView || "monitor");
     const view = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
       : names[(index + (event.key === "ArrowLeft" ? names.length - 1 : 1)) % names.length];
     connectionView(view); $("#connections-" + view + "-tab").focus();
+  });
+  for (const button of document.querySelectorAll("[data-wizard-target]")) button.addEventListener("click", () => {
+    document.getElementById(button.dataset.wizardTarget)?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   function alfaButtons() {
     const ready = Boolean(state.alfa?.vault_ready), configured = Boolean(state.alfa?.configured);
@@ -612,7 +618,7 @@
     if (recovery.after && restoring) details.push("Следующая проверка: " + date(recovery.after));
     if (payload.last_sync_at) details.push("Последняя синхронизация: " + date(payload.last_sync_at));
     if (payload.crm_configured && payload.branches?.length) details.push("Филиалов: " + payload.branches.length);
-    if (!payload.crm_configured) details.push("Сначала настройте подключение AlfaCRM в соседнем блоке.");
+    if (!payload.crm_configured) details.push("Сначала подключите AlfaCRM в первом шаге мастера.");
     else if (!payload.branches?.length) details.push("Сначала загрузите филиалы AlfaCRM.");
     $("#alfa-max-info").textContent = details.join(" · ");
     notice(!payload.vault_ready ? "На сервере не настроен ключ хранения веб-сессий." : ((alfaReconnectEditing && recovery.manual_error) || payload.error || ""), $("#alfa-max-error"));
@@ -625,7 +631,7 @@
     alfaMaxButtons();
     const hasSession = payload.configured && payload.state !== "not_configured";
     show($("#history-monitor-empty"), !hasSession);
-    if (previousState !== payload.state && payload.state !== "active" && !["voice", "agents", "wizard"].includes(state.connectionsView)) connectionView("settings");
+    if (previousState !== payload.state && payload.state !== "active" && !["voice", "agents", "wizard"].includes(state.connectionsView)) connectionView("wizard");
     if (hasSession) alfaMaxProgress.start();
     else { alfaMaxProgress.reset(); connectionSummary("#alfa-history-summary", "Сначала подключите MAX", "waiting"); }
     clearTimeout(alfaSessionTimer);
