@@ -16,17 +16,76 @@ const settings = {
   parallel_card_jobs: 1, host_request_gap_ms: 350,
 };
 
-function setup(t) {
+function setup(t, handler) {
   const dom = new JSDOM(fs.readFileSync(web + "/index.html", "utf8"), { runScripts: "outside-only" });
   const { window } = dom, $ = selector => window.document.querySelector(selector);
   window.eval(fs.readFileSync(web + "/card-loader.js", "utf8"));
   const calls = [];
   const state = { workspace: { id: "workspace", role: "owner" } };
-  const api = async (url, options = {}) => { calls.push([url, options]); return { ...settings, ...(options.data || {}) }; };
+  const api = async (url, options = {}) => { calls.push([url, options]); return handler ? handler(url, options) : { ...settings, ...(options.data || {}) }; };
   const loader = window.CenterCardLoader({ $, state, api, show: (element, visible = true) => { element.hidden = !visible; } });
   t.after(() => window.close());
   return { $, state, calls, loader, window };
 }
+
+test("wizard contains one loader form with visible defaults before the API responds", async t => {
+  let resolve;
+  const ui = setup(t, () => new Promise(done => { resolve = done; }));
+  const form = ui.$("#card-loader-form");
+  assert.equal(form.closest('[role="tabpanel"]').id, "connections-wizard-view");
+  assert.equal(ui.$("#connections-settings-view #card-loader-form"), null);
+  assert.equal(ui.window.document.querySelectorAll("#card-loader-form").length, 1);
+  assert.equal(form.elements.finance_interval_minutes.value, "30");
+  assert.equal(form.elements.lessons_interval_minutes.value, "30");
+  assert.equal(form.elements.groups_interval_minutes.value, "360");
+  assert.equal(form.elements.history_interval_minutes.value, "0");
+  assert.equal(form.elements.preload_unanswered.checked, true);
+  assert.equal(form.elements.preload_active_groups.checked, true);
+  const first = ui.loader.load(), second = ui.loader.load();
+  assert.equal(ui.calls.length, 1);
+  assert.equal(form.querySelector('button[type="submit"]').disabled, true);
+  resolve(settings); await Promise.all([first, second]);
+  assert.equal(form.elements.lessons_interval_minutes.value, "45");
+  assert.equal(form.querySelector('button[type="submit"]').disabled, false);
+});
+
+test("failed settings read keeps defaults, shows retry and never saves over unknown settings", async t => {
+  let failing = true;
+  const ui = setup(t, () => { if (failing) throw new Error("Сервис временно недоступен"); return settings; });
+  await ui.loader.load();
+  const form = ui.$("#card-loader-form");
+  assert.equal(form.elements.retry_initial_seconds.value, "30");
+  assert.equal(ui.$("#card-loader-error").hidden, false);
+  assert.match(ui.$("#card-loader-error-text").textContent, /Не удалось прочитать/);
+  form.dispatchEvent(new ui.window.Event("submit", { cancelable: true }));
+  assert.equal(ui.calls.length, 1);
+  failing = false; ui.$("#card-loader-retry").click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(ui.$("#card-loader-error").hidden, true);
+  assert.equal(form.elements.lessons_interval_minutes.value, "45");
+  assert.equal(form.querySelector('button[type="submit"]').disabled, false);
+});
+
+test("API intervals outside presets remain visible and do not turn into an empty selection", async t => {
+  const ui = setup(t, () => ({ ...settings, history_interval_minutes: 480 }));
+  await ui.loader.load();
+  assert.equal(ui.$("#card-loader-form").elements.history_interval_minutes.value, "480");
+});
+
+test("reset restores defaults and fences a save response from the previous workspace", async t => {
+  let resolve;
+  const ui = setup(t, (_, options) => options.method === "PUT" ? new Promise(done => { resolve = done; }) : settings);
+  await ui.loader.load();
+  ui.$("#card-loader-form").dispatchEvent(new ui.window.Event("submit", { cancelable: true }));
+  ui.state.workspace = { id: "another", role: "owner" }; ui.loader.reset();
+  resolve({ ...settings, finance_interval_minutes: 80 });
+  await new Promise(done => setImmediate(done));
+  const form = ui.$("#card-loader-form");
+  assert.equal(form.elements.finance_interval_minutes.value, "30");
+  assert.equal(form.elements.lessons_interval_minutes.value, "30");
+  assert.equal(form.querySelector('button[type="submit"]').disabled, true);
+  assert.equal(form.querySelector('button[type="submit"]').textContent, "Сохранить настройки загрузчика");
+});
 
 test("card loader reads persisted policy and explains fixed concurrency", async t => {
   const ui = setup(t); await ui.loader.load();

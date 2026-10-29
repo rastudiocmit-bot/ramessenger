@@ -8,6 +8,11 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     studio: { day_start: '10:00', day_end: '20:00', work_days: [1, 2, 3, 4, 5, 6], default_due: 'end_of_day', visibility: 'all', alfa_copy: false },
     personal: { press: 'split', voice_task: 'instant', reminders: true, hints: true, digest: false }, voice: [] };
   const preferences = { name_order: "parent_first" };
+  const cardLoader = { preload_unanswered: true, preload_active_groups: true,
+    finance_interval_minutes: 30, lessons_interval_minutes: 30, groups_interval_minutes: 360,
+    history_interval_minutes: 0, requests_per_turn: 3, busy_retry_seconds: 5,
+    retry_initial_seconds: 30, retry_max_seconds: 1800, manual_priority_seconds: 30,
+    manual_interest_minutes: 10, manual_burst: 5, parallel_card_jobs: 1, host_request_gap_ms: 350 };
   // Voice input and AI agents (Connections → service settings). Off in the chat unless asked.
   const ai = { settings: { configured: Boolean(options.voice), folder_id: options.voice ? 'b1gexamplefolder0000' : '', key_hint: options.voice ? 'k3y9' : '',
       voice_enabled: Boolean(options.voice), voice_max_seconds: 180, monthly_limit_rub: null, status: options.voice ? 'active' : 'not_configured', error: null, verified_at: null,
@@ -193,6 +198,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       } else payload = { conversation, messages, next_seq: messages.length, has_more: false, more_changes: false, total: messages.length };
     } else if (p.endsWith('/handled')) { const c = conversations.find(c => p.includes('/' + c.id + '/')); c.unread = false; c.unread_count = 0; c.revision = (c.revision || 1) + 1; payload = {conversation:c}; }
     else if (p.endsWith('/family') || /\/(directory|chat-contacts)\/contacts\//.test(p)) payload = family;
+    else if (p.endsWith('/directory/card-loader')) { if (method === 'PUT') Object.assign(cardLoader, entry.body); payload = cardLoader; }
     else if (/\/(directory|chat-contacts)\/sync$/.test(p)) payload = { configured: true, state: 'idle', last_success_at: '2026-10-24T11:00:00Z', auto_refresh: false, interval_minutes: 30, stats: {} };
     else if (/\/(directory|chat-contacts)$/.test(p)) payload = { contacts, total: contacts.length, branches, snapshot: 'run-1', page: 0, has_more: false };
     else if (p.endsWith('/members')) payload = { members };
