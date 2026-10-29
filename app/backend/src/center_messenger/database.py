@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0026_card_loader_settings"
+SCHEMA_REVISION = "0027_card_loader_grant"
 
 
 def log_database_error(logger, error, *, operation):

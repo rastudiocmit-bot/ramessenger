@@ -8,6 +8,6 @@
   "postgres": "postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24",
   "stage": "message_unread",
   "version": "0.8.1",
-  "schema_revision": "0026_card_loader_settings",
+  "schema_revision": "0027_card_loader_grant",
   "deployment_format": 1
 }
