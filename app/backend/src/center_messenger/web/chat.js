@@ -9,7 +9,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     ["Уточнить филиал", "Подскажите, пожалуйста, какой филиал вам удобнее?"]
   ];
   const statuses = { client: "Клиент", lead: "Лид", archive: "Архивный", unlinked: "Связать с CRM" };
-  const sendLabels = { queued: "В очереди", sending: "Отправляем…", accepted: "Принято MAX", delivered: "Доставлено", read: "Прочитано", failed: "Не отправлено", unknown: "Результат неизвестен", cancelled: "Отменено" };
+  const sendLabels = { queued: "В очереди", sending: "Отправляем…", accepted: "Принято MAX", delivered: "Доставлено", read: "Прочитано", failed: "Сообщение не отправлено", unknown: "Проверяем отправку", cancelled: "Сообщение не отправлено" };
   const recipientErrors = new Set(["recipient_missing", "multiple_recipients", "invalid_recipient", "max_recipient_missing", "crm_customer_missing"]);
   let generation = 0, listSeq = 0, selectionSeq = 0, linkSeq = 0, cardSeq = 0, detailsSeq = 0;
   let family = null, familySelected = null, familyPreferredStudent = null, familyBusy = false, familyChildChoice = false;
@@ -37,6 +37,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   const channelPath = () => `${base()}/integrations/max`;
   const chatPath = id => `${base()}/chats${id ? `/${id}` : ""}`;
   const ignored = error => error.name === "AbortError";
+  const transient = error => ignored(error) || [408, 429, 502, 503, 504].includes(error.status) || error.status >= 500 || ["NetworkError", "TimeoutError"].includes(error.name) || ["network", "timeout"].includes(error.code);
   const currentItem = () => items.find(item => item.id === selected);
   function fail(error, target = $("#chat-error")) { if (!ignored(error)) notice(error.message, target); }
   function button(text, className, handler) {
@@ -315,7 +316,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       const secondary = node("span", names.secondary, "row-kids contact-students"); secondary.title = names.secondary; body.append(secondary);
       const bottom = node("span", undefined, "row-bot");
       bottom.append(node("span", item.preview || "Переписка ещё не началась", "row-prev"));
-      if (item.last_direction === "out" && !item.unread && item.last_state) { const tick = node("span", undefined, "tick" + (item.last_state === "read" ? " read" : "")); tick.title = sendLabels[item.last_state] || ""; tick.append(icon(["read", "delivered"].includes(item.last_state) ? "checks" : "check")); bottom.append(tick); }
+      if (item.last_direction === "out" && !item.unread && item.last_state) { const tick = node("span", undefined, "tick" + (item.last_state === "read" ? " read" : "")); tick.title = sendLabels[item.last_state] || ""; tick.append(icon(["read", "delivered"].includes(item.last_state) ? "checks" : ["queued", "sending", "unknown"].includes(item.last_state) ? "clock" : ["failed", "cancelled"].includes(item.last_state) ? "warn" : "check")); bottom.append(tick); }
       body.append(bottom);
       const meta = node("span", undefined, "contact-meta");
       if (channels.length > 1) meta.append(node("small", item.channel_name, "muted"));
@@ -594,8 +595,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     send.setAttribute("aria-label", retry ? "Проверить отправку" : "Отправить");
     send.title = retry ? "Проверить отправку" : "Отправить";
     const hint = $("#chat-send-hint");
-    hint.hidden = !unavailable && !data.pending && !tooLong;
-    hint.textContent = state.workspace?.role === "observer" ? "Роль «Наблюдатель» открывает переписку только для чтения." : unavailable ? "Проверьте подключение MAX, чтобы отправить ответ." : tooLong ? "Запись сохранена в черновике целиком. Сократите текст до 4000 символов перед отправкой." : data.pending ? draft ? "Сначала проверим предыдущую отправку, затем отправим новый текст." : "Связь прервалась. Кнопка проверит тот же запрос без повторного сообщения." : "";
+    hint.hidden = !tooLong;
+    hint.textContent = tooLong ? "Сократите текст до 4000 символов перед отправкой." : "";
   }
   function compareMessages(a, b) {
     const value = message => BigInt(message.sort_time ?? Math.trunc(new Date(message.occurred_at).getTime()) * 1000);
@@ -639,8 +640,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     $("#chat-stream").setAttribute("aria-busy", String(Boolean(data.olderLoading)));
     const total = Math.max(data.total || 0, data.messages.size);
     const count = `Показано сообщений: ${data.messages.size} из ${total}.`;
-    const progress = data.meta?.history_error ? ` История AlfaCRM пока загружена не полностью. ${data.meta.history_error}`
-      : data.meta?.history_loading ? " Загружаем более раннюю историю из AlfaCRM…" : "";
+    const progress = data.meta?.history_loading ? " Загружаем более раннюю историю из AlfaCRM…" : "";
     $("#chat-history-note").textContent = count + progress;
     if (position) restoreScroll(position);
   }
@@ -686,7 +686,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     for (const m of messages) {
       if (m.direction !== "out" || !m.text || m.deleted) continue;
       if (m.state === "failed") { (waiting.get(m.text) || waiting.set(m.text, []).get(m.text)).push(m); continue; }
-      if (m.state === "cancelled") continue;
+      if (!["accepted", "delivered", "read"].includes(m.state)) continue;
       const failed = waiting.get(m.text)?.pop(); if (failed) resentBy.set(failed.id, m);
     }
     for (let i = 0; i < messages.length; i++) {
@@ -735,7 +735,6 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         toggle.addEventListener("click", event => event.stopPropagation());
         bubble.addEventListener("click", () => { if (!String(window.getSelection?.() || "")) toggle.click(); });
         bubble.append(row, body);
-        if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
         wanted.push(bubble);
         continue;
       }
@@ -757,21 +756,17 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       }
       content.append(meta); bubble.append(content);
       // A definite failure (nothing reached the client): one quiet line «Не отправлено · Повторить · Изменить».
-      const failedOut = message.direction === "out" && message.state === "failed" && !message.deleted;
-      if (failedOut && resent) {
-        bubble.append(node("small", `Отправлено повторно в ${time(resent.occurred_at)}`, "chat-message-resent"));
-      } else {
-        if (failedOut && message.text && data.meta?.can_send && !recipientErrors.has(message.error_code)) {
+      const failedOut = message.direction === "out" && ["failed", "cancelled"].includes(message.state) && !message.deleted;
+      if (!(failedOut && resent)) {
+        if (failedOut) bubble.append(node("small", "Сообщение не отправлено", "chat-message-error"));
+        if (failedOut && message.state === "failed" && message.text && data.meta?.can_send && !recipientErrors.has(message.error_code)) {
           const actions = node("span", undefined, "chat-message-actions");
-          actions.append(node("span", "Не отправлено", "chat-message-state"));
           const again = node("button", undefined, "chat-retry-send"); again.type = "button"; again.append(icon("retry"), node("span", "Повторить"));
           again.addEventListener("click", () => resendFailed(id, message.text, false));
           const edit = node("button", undefined, "chat-retry-edit"); edit.type = "button"; edit.append(icon("edit"), node("span", "Изменить"));
           edit.addEventListener("click", () => resendFailed(id, message.text, true));
           actions.append(again, edit); bubble.append(actions);
         }
-        if (failedOut && recipientErrors.has(message.error_code)) bubble.append(node("small", "Проверьте адресата в AlfaCRM. После исправления отправьте новое сообщение.", "chat-message-error"));
-        if (message.error) bubble.append(node("small", message.error, "chat-message-error"));
       }
       wanted.push(bubble);
     }
@@ -963,13 +958,42 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   }
   function schedule(delay = 2500) {
     clearTimeout(timer); if (!active()) return;
-    if (streamHealthy && delay === 2500 && !listPollError && !historyPollError && (!selected || cache.get(selected)?.loaded)) delay = 45000;
+    const data = cache.get(selected);
+    const checkingSend = data?.pending || [...(data?.messages.values() || [])].some(message => ["queued", "sending", "unknown"].includes(message.state));
+    if (streamHealthy && delay === 2500 && !checkingSend && !listPollError && !historyPollError && (!selected || data?.loaded)) delay = 45000;
     timer = setTimeout(poll, delay);
+  }
+  async function recoverPending(id, data) {
+    // This repeats only intake of the SAME command UUID, never the browser POST.
+    // Read history first: the server may already have committed the command.
+    if (!data.pending || data.recovering || historyBusy || !data.meta?.can_send || Date.now() < (data.pendingAfter || 0)) return;
+    const payload = data.pending, epoch = state.epoch, gen = generation;
+    data.recovering = true;
+    try {
+      await api(`${chatPath(id)}/messages`, { method: "POST", data: payload, timeoutMs: 20000 });
+      if (valid(epoch, gen) && data.pending === payload) {
+        data.pending = null; data.pendingRetries = 0;
+        if (selected === id) { renderHeader(); await loadHistory(id); }
+      }
+    } catch (error) {
+      if (!valid(epoch, gen) || ignored(error) || data.pending !== payload) return;
+      if (error.status >= 400 && error.status < 500 && !transient(error)) {
+        data.pending = null;
+        data.draft = [payload.text, data.draft].filter(Boolean).join("\n\n");
+        if (selected === id) {
+          $("#chat-input").value = data.draft; resizeCompose(); renderHeader();
+          fail(new Error("Сообщение не отправлено"));
+        }
+      } else {
+        data.pendingRetries = (data.pendingRetries || 0) + 1;
+        data.pendingAfter = Date.now() + Math.min(60000, 2500 * 2 ** Math.min(data.pendingRetries, 5));
+      }
+    } finally { data.recovering = false; }
   }
   function renderPollStatus() {
     const error = listPollError || historyPollError;
     $("#chat-sync-state").textContent = error ? "Ожидаем соединение…" : selected && !cache.get(selected)?.loaded ? "Загружаем историю…" : "Обновлено · история на сервере";
-    if (error) { fail(error); schedule(2500); } else notice("", $("#chat-error"));
+    if (error) { if (transient(error)) notice("", $("#chat-error")); else fail(error); schedule(2500); } else notice("", $("#chat-error"));
   }
   async function poll() {
     if (!active()) return;
@@ -993,8 +1017,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     const id = selected, data = cache.get(id), choice = selectionSeq;
     if (id && data && !data.polling && now >= (data.pollAfter || 0)) {
       data.polling = true;
-      tasks.push(loadHistory(id).then(() => {
-        if (valid(epoch, gen) && active() && choice === selectionSeq) { historyPollError = null; data.pollAfter = 0; renderPollStatus(); }
+      tasks.push(loadHistory(id).then(async () => {
+        if (valid(epoch, gen) && active() && choice === selectionSeq) {
+          historyPollError = null; data.pollAfter = 0; renderPollStatus();
+          await recoverPending(id, data);
+        }
       }).catch(error => {
         if (valid(epoch, gen) && active() && choice === selectionSeq && !ignored(error)) {
           historyPollError = error; data.pollAfter = Date.now() + 8000; renderPollStatus();
@@ -1048,7 +1075,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (!content || content.length > 4000) return;
       payload = { request_id: crypto.randomUUID(), text: content, seen_inbound_seq: data.meta.inbound_seq, seen_checkpoint: data.meta.seen_checkpoint };
       acknowledged = false;
-      data.pending = payload; data.draft = "";
+      data.pending = payload; data.pendingAfter = 0; data.pendingRetries = 0; data.draft = "";
       $("#chat-input").value = ""; resizeCompose(); renderHeader();
       await api(`${chatPath(id)}/messages`, { method: "POST", data: payload, timeoutMs: 20000 });
       if (!valid(epoch, gen)) return;
@@ -1058,12 +1085,21 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     } catch (error) {
       if (!valid(epoch, gen)) return;
       // HTTP rejection is definite; loss of the HTTP response keeps the same UUID.
-      if (!acknowledged && payload && error.status && error.status < 500 && error.status !== 408) {
+      if (!acknowledged && payload && error.status && error.status < 500 && !transient(error)) {
         if (data.pending === payload) data.pending = null;
         data.draft = [payload.text, data.draft].filter(Boolean).join("\n\n");
         if (selected === id) { $("#chat-input").value = data.draft; resizeCompose(); }
       }
-      if (selected === id) fail(error);
+      // A transport failure cannot prove that the message was not sent.
+      // Keep its UUID and let history reconcile it; never show browser/server diagnostics here.
+      if (selected === id) {
+        if (!acknowledged && error.status >= 400 && error.status < 500 && !transient(error)) {
+          fail(new Error("Сообщение не отправлено"));
+        } else {
+          notice("", $("#chat-error"));
+          historyPollError = error; schedule(2500);
+        }
+      }
       if (!acknowledged && error.status === 409) { try { await loadHistory(id); } catch (_) { /* Preserve the draft and error. */ } }
     } finally { if (valid(epoch, gen) && selected === id && choice === selectionSeq) { historyBusy = false; renderHeader(); } }
   }
