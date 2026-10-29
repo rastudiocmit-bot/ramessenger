@@ -339,8 +339,8 @@ def current(db, workspace, connection):
         AND s.connection_id=:conn AND s.secret_ciphertext IS NOT NULL
       JOIN alfa_sync_control sc ON sc.workspace_id=s.workspace_id AND sc.connection_id=s.connection_id
       JOIN alfa_customers c ON c.workspace_id=s.workspace_id AND c.run_id=sc.published_id
-        AND c.branch_id::text=e.payload->>'branch' AND c.external_id::text=e.payload->>'customer'
-        AND c.contact_id::text=e.payload->>'contact' AND c.student_id::text=e.payload->>'student'
+        AND c.branch_id=CAST(e.payload->>'branch' AS bigint) AND c.external_id=CAST(e.payload->>'customer' AS bigint)
+        AND c.contact_id=CAST(e.payload->>'contact' AS uuid) AND c.student_id=CAST(e.payload->>'student' AS uuid)
       JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND b.connection_id=s.connection_id
         AND b.external_id=c.branch_id AND b.available
       LEFT JOIN alfa_directory d ON d.workspace_id=c.workspace_id AND d.run_id=c.run_id AND d.contact_id=c.contact_id
@@ -371,7 +371,7 @@ def progress(db, workspace, connection, snapshot):
              "queued": 0, "manual_queued": 0, "background_queued": 0, "loading": 0,
              "busy": 0, "stalled": 0, "oldest_wait_seconds": 0,
              "errors": 0, "next_retry_at": None,
-             "interval_minutes": policy["finance_interval_minutes"], "as_of": at}
+             "interval_minutes": policy["finance_interval_minutes"], "priority_seconds": policy["manual_priority_seconds"], "as_of": at}
     if not snapshot or snapshot["connection_id"] != connection:
         return empty
     row = db.execute(text("""
@@ -408,27 +408,32 @@ def progress(db, workspace, connection, snapshot):
              "finance_interval": policy["finance_interval_minutes"],
              "lessons_interval": policy["lessons_interval_minutes"],
              **card_preference.params(snapshot)}).mappings().one()
+    urgent = card_queue.manual('e')
     queue = dict(db.execute(text("""
       SELECT count(*) FILTER(WHERE coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()) AS queue_depth,
-        count(*) FILTER(WHERE coalesce((payload->>'manual')::boolean,false)
+        count(*) FILTER(WHERE """ + urgent + """
           AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()) AS manual_queued,
-        count(*) FILTER(WHERE NOT coalesce((payload->>'manual')::boolean,false)
+        count(*) FILTER(WHERE NOT """ + urgent + """
           AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()) AS background_queued,
         count(*) FILTER(WHERE coalesce((payload->>'lease_until')::timestamptz,'epoch')>now()) AS loading,
         count(*) FILTER(WHERE payload->>'cause'='busy') AS busy,
-        count(*) FILTER(WHERE (coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()
-          AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-make_interval(secs=>:priority_seconds))
-          OR (coalesce((payload->>'lease_until')::timestamptz,'epoch')>now()
-            AND coalesce((payload->>'last_progress_at')::timestamptz,
-              (payload->>'started_at')::timestamptz,created_at)<now()-interval '60 seconds')) AS stalled,
+        count(*) FILTER(WHERE """ + urgent + """
+          AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()
+          AND (payload->>'available_at')::timestamptz<=now()
+          AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-make_interval(secs=>:priority_seconds)) AS manual_delayed,
+        count(*) FILTER(WHERE (payload->>'lease_until')::timestamptz>now()
+          AND coalesce((payload->>'last_progress_at')::timestamptz,
+              (payload->>'started_at')::timestamptz,created_at)<now()-interval '60 seconds') AS stalled_running,
         coalesce(max(EXTRACT(EPOCH FROM now()-coalesce((payload->>'requested_at')::timestamptz,created_at)))
           FILTER(WHERE coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()),0)::integer AS oldest_wait_seconds
-      FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups)
+      FROM outbox_events e WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups)
         AND state='pending' AND payload->>'connection'=CAST(:conn AS text)
         AND payload->>'version'=CAST(:version AS text)
     """), {"w": workspace, "conn": connection, "version": snapshot["version"],
              "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
-             "priority_seconds": policy["manual_priority_seconds"]}).mappings().one())
+             "priority_seconds": policy["manual_priority_seconds"],
+             "interest_minutes": policy["manual_interest_minutes"]}).mappings().one())
+    queue['stalled'] = queue['manual_delayed'] + queue['stalled_running']
     return empty | dict(row) | queue | {"groups": group_links.progress(db, workspace, snapshot)}
 
 
@@ -550,10 +555,10 @@ class FamilyCacheWorker:
             "OR payload->>'version'<>CAST(:version AS text) OR NOT EXISTS(SELECT 1 "
             "FROM alfa_sync_control sc JOIN alfa_customers c ON c.workspace_id=sc.workspace_id "
             "AND c.run_id=sc.published_id WHERE sc.workspace_id=outbox_events.workspace_id "
-            "AND sc.connection_id=:conn AND c.branch_id::text=outbox_events.payload->>'branch' "
-            "AND c.external_id::text=outbox_events.payload->>'customer' "
-            "AND c.contact_id::text=outbox_events.payload->>'contact' "
-            "AND c.student_id::text=outbox_events.payload->>'student'))"),
+            "AND sc.connection_id=:conn AND c.branch_id=CAST(outbox_events.payload->>'branch' AS bigint) "
+            "AND c.external_id=CAST(outbox_events.payload->>'customer' AS bigint) "
+            "AND c.contact_id=CAST(outbox_events.payload->>'contact' AS uuid) "
+            "AND c.student_id=CAST(outbox_events.payload->>'student' AS uuid) OFFSET 0))"),
             {"w": workspace, "conn": snapshot["connection_id"], "version": snapshot["version"],
              "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS})
 

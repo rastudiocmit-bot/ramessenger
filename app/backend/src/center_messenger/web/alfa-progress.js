@@ -3,6 +3,9 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
   let timer = null, generation = 0, pending = null, failures = 0, lastDetail = "";
   let lastPayload = null, lastFullAt = 0, selectedEvent = null, feedKey = "", mutationError = "";
   const number = value => new Intl.NumberFormat("ru-RU").format(Number(value) || 0);
+  const waitTime = seconds => seconds >= 86400 ? Math.floor(seconds / 86400) + " д " + Math.floor(seconds % 86400 / 3600) + " ч"
+    : seconds >= 3600 ? Math.floor(seconds / 3600) + " ч " + Math.floor(seconds % 3600 / 60) + " мин"
+    : seconds >= 60 ? Math.floor(seconds / 60) + " мин " + Math.floor(seconds % 60) + " с" : Math.floor(seconds) + " с";
   const node = (tag, value, className) => { const e = document.createElement(tag); if (value !== undefined) e.textContent = value; if (className) e.className = className; return e; };
   const crmIds = client => [...new Set((client?.cards || []).map(c => c.customer_id))].join(", ");
   const resultText = event => event.rolled_back ? "Не сохранено · повторим" : !event.committed ? "В обработке"
@@ -194,12 +197,15 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
   function renderCards(payload, offline = false) {
     const cards = payload.cards, worker = offline ? null : payload.card_worker;
     const badge = $("#alfa-loader-cards-badge"), value = $("#alfa-loader-cards-value"), queue = $("#alfa-loader-cards-queue"), track = $("#alfa-loader-cards-track");
-    badge.textContent = offline ? "Последние данные" : worker ? "Загружается" : cards?.busy ? "Канал занят" : cards?.errors ? "Ожидают повтора" : cards?.queued ? "В очереди" : cards?.configured ? "Актуальны" : "Нужен справочник";
+    badge.textContent = offline ? "Последние данные" : worker ? "Загружается" : cards?.busy ? "Канал занят" : cards?.errors ? "Ожидают повтора" : (cards?.queue_depth || cards?.queued) ? "В очереди" : cards?.configured ? "Актуальны" : "Нужен справочник";
     value.textContent = !cards ? "Получаем состояние кэша" : !cards.configured ? "Сначала загрузите справочник" : cards.total ? number(cards.ready) + " из " + number(cards.total) + " клиентов готовы" : "Нет клиентов, ожидающих ответа";
-    queue.textContent = cards?.queued ? "В очереди: " + number(cards.queued) +
-      (cards.manual_queued ? " · открыты операторами: " + number(cards.manual_queued) : "") +
-      (cards.background_queued ? " · фоновые: " + number(cards.background_queued) : "") +
-      (cards.oldest_wait_seconds ? " · ожидание до " + number(cards.oldest_wait_seconds) + " с" : "") : "";
+    queue.textContent = cards?.queue_depth || cards?.queued ? [
+      cards.queued ? "Клиентов в очереди ответа: " + number(cards.queued) : "",
+      cards.queue_depth ? "Заданий: " + number(cards.queue_depth) : "",
+      cards.manual_queued ? "срочных: " + number(cards.manual_queued) : "",
+      cards.background_queued ? "фоновых: " + number(cards.background_queued) : "",
+      cards.oldest_wait_seconds ? "самое старое задание: " + waitTime(cards.oldest_wait_seconds) : ""
+    ].filter(Boolean).join(" · ") : "";
     show(track, Boolean(cards?.total));
     for (const [attr, content] of [["aria-valuenow", cards?.ready], ["aria-valuemin", 0], ["aria-valuemax", cards?.total]]) {
       if (cards?.total) track.setAttribute(attr, String(content)); else track.removeAttribute(attr);
@@ -222,7 +228,8 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
     show(groups, Boolean(counts));
     const error = $("#alfa-loader-cards-error");
     error.textContent = cards?.errors ? "Не удалось обновить клиентов: " + number(cards.errors) + ". " + (cards.next_retry_at ? isFuture(cards.next_retry_at, payload) ? "Повтор после " + date(cards.next_retry_at) + ". " : "Повтор ожидает выполнения. " : "") + "Последние сохранённые сведения остаются доступны."
-      : cards?.stalled ? "Дольше 30 секунд ожидают запуска: " + number(cards.stalled) + ". Загрузчик повысит их приоритет и продолжит автоматически."
+      : cards?.stalled_running ? "Нет свежего прогресса от обработчиков: " + number(cards.stalled_running) + ". Контрольные точки сохранены; задания восстановятся после окончания аренды."
+      : (cards?.manual_delayed ?? cards?.stalled) ? "Срочных заданий ждут дольше " + number(cards.priority_seconds || 30) + " с: " + number(cards.manual_delayed ?? cards.stalled) + ". Их приоритет повышен; сохранённые данные доступны."
       : cards?.busy ? "Канал AlfaCRM занят другой операцией. Повтор произойдёт автоматически." : "";
     show(error, Boolean(cards?.errors || cards?.stalled || cards?.busy));
   }

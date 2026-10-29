@@ -9,6 +9,8 @@
     "test:appearance": "node tests/check_appearance.cjs",
     "test:mobile-visuals": "node tests/check_mobile_visuals.cjs",
     "test:cabinet": "node tests/check_cabinet.cjs",
+    "test:card-loader": "node tests/check_card_loader_wizard.cjs",
+    "test:family-recovery": "node tests/check_family_recovery.cjs",
     "test:composer": "node tests/check_composer.cjs",
     "test:history-states": "node tests/check_history_states.cjs",
     "test:incremental": "node tests/check_incremental_sync.cjs",

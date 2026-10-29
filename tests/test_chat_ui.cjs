@@ -1693,3 +1693,74 @@ test('a queued copy never hides the definite failure of an older message with id
   assert.equal(ui.$('.chat-message-error').textContent,'Сообщение не отправлено');
   assert.equal(ui.window.document.querySelectorAll('.chat-message-error').length,1);
 });
+
+test('an initial family 503 keeps the client name and retries automatically without reopening', async t=>{
+  let failed=true;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family')){if(failed)throw Object.assign(new Error('Сервис временно недоступен'),{status:503});return preparedFamily(1);}
+  });
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.equal(ui.$('#chat-details-name').textContent,'Parent 1');
+  assert.match(ui.$('#chat-details-student').textContent,/Повторим загрузку автоматически/);
+  assert.equal(ui.$('#chat-details-dialog').classList.contains('is-refreshing'),false);
+  failed=false;await runTimer(ui,5000);
+  assert.match(ui.$('#chat-details-student').textContent,/Child 1/);
+  assert.equal(ui.$('#chat-details-name').textContent,'Family 1');
+});
+
+test('the refresh arrow retries a card that has never loaded', async t=>{
+  let failed=true;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family')){if(failed)throw Object.assign(new Error('Unavailable'),{status:503});return preparedFamily(1);}
+  });
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  failed=false;ui.$('#chat-details-refresh').click();await flush();
+  assert.match(ui.$('#chat-details-student').textContent,/Child 1/);
+});
+
+test('a temporary preparation failure keeps cached facts and resumes on the same panel', async t=>{
+  let failed=true;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family')){if(failed&&!url.searchParams.has('cached_only'))throw Object.assign(new Error('Unavailable'),{status:503});return preparedFamily(1);}
+  });
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  const stats=ui.$('.family-stats');assert.match(stats.textContent,/100/);
+  assert.match(ui.$('#chat-details-sync').textContent,/повторяем подключение/);
+  failed=false;await runTimer(ui,5000);
+  assert.equal(ui.$('.family-stats'),stats);
+  assert.doesNotMatch(ui.$('#chat-details-sync').textContent,/повторяем подключение/);
+});
+
+test('a denied family read removes cached private facts and never retries as a temporary outage', async t=>{
+  let denied=false;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family')){if(denied)throw Object.assign(new Error('Нет доступа'),{status:403});return {...preparedFamily(1),cache:{...preparedFamily(1).cache,auto_refresh:true}};}
+  });
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.ok(ui.$('.family-stats'));denied=true;await runTimer(ui,60000);
+  assert.equal(ui.$('.family-stats'),null);
+  assert.match(ui.$('#chat-details-student').textContent,/Нет доступа/);
+  assert.equal([...ui.timers.values()].some(timer=>[5000,10000,60000].includes(timer.delay)),false);
+});
+
+test('section-state changes replace stale loading notes without changing child choice or scroll', async t=>{
+  let family=preparedFamily(1);
+  family.cache={...family.cache,state:'queued',pending:true,incomplete:true,sections:{finance:{status:'queued'},lessons:{status:'missing'},groups:{status:'ready'}}};
+  delete family.students[0].cards[0].subscriptions;
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return structuredClone(family);
+  });
+  dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.match(ui.$('#chat-details-student').textContent,/Готовим подробную карточку/);
+  ui.$('.family-scroll').scrollTop=80;
+  family.cache={...family.cache,state:'error',sections:{finance:{status:'error'},lessons:{status:'missing'},groups:{status:'ready'}}};
+  await runTimer(ui,5000);
+  assert.doesNotMatch(ui.$('#chat-details-student').textContent,/Готовим подробную карточку/);
+  assert.match(ui.$('#chat-details-student').textContent,/Подробные данные не получены/);
+  assert.equal(ui.$('.family-scroll').scrollTop,80);
+});

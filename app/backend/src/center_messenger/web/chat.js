@@ -1476,7 +1476,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     // Queue progress and freshness change more often than the actual card facts.
     // Keep its focused controls, child choice and scroll position when only the footer changes.
     const { cache: progress, snapshot_at: snapshot, version: viewVersion, ...facts } = family;
-    const key = JSON.stringify([facts, familySelected, familyToday(), state.workspace?.timezone, currentItem()?.status]);
+    const detailStates = Object.fromEntries(Object.entries(progress?.sections || {}).map(([name, section]) => [name, section.status]));
+    const key = JSON.stringify([facts, detailStates, familySelected, familyToday(), state.workspace?.timezone, currentItem()?.status]);
     if (familyRenderKey === key) return;
     const scroll = detailsDialog.querySelector(".family-scroll"), top = scroll.scrollTop;
     familyRenderKey = key;
@@ -1672,22 +1673,28 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     }
     return familyRequests.get(path).promise;
   }
-  function watchFamily(conversation, contact, epoch, gen, seq) {
+  function watchFamily(conversation, contact, epoch, gen, seq, retryAfterError = false) {
     clearTimeout(familyTimer);
-    if (!family?.cache || (!family.cache.pending && !family.cache.incomplete && !family.cache.auto_refresh)) return;
+    if (!family?.cache || (!family.cache.pending && !family.cache.incomplete && !family.cache.auto_refresh && !retryAfterError)) return;
     // Poll prepared facts only; the server owns CRM work and the 30-minute clock.
     const phase = family.cache.state || (family.cache.refreshing ? "loading" : family.cache.pending ? "queued" : family.cache.error ? "error" : "ready");
-    const delay = !family.cache.state && family.cache.paused ? 60000 : phase === "loading" ? 3000 : ["queued", "partial"].includes(phase) ? 5000
+    const delay = retryAfterError ? 10000 : !family.cache.state && family.cache.paused ? 60000 : phase === "loading" ? 3000 : ["queued", "partial"].includes(phase) ? 5000
       : ["busy", "retry_wait"].includes(phase) ? 10000 : phase === "error" ? 30000 : family.cache.incomplete ? 10000 : 60000;
     familyTimer = setTimeout(async () => {
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation || !active()) return;
-      if (document.hidden) { watchFamily(conversation, contact, epoch, gen, seq); return; }
+      if (document.hidden) { watchFamily(conversation, contact, epoch, gen, seq, retryAfterError); return; }
+      let failed = false;
       try {
         const updated = await preparedFamilyRequest(conversation, true, contact);
         if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation) return;
         family = updated; rememberFamily(contact, updated); renderFamily();
-      } catch (_) { /* Keep the last good card during a temporary outage. */ }
-      if (valid(epoch, gen) && seq === detailsSeq) watchFamily(conversation, contact, epoch, gen, seq);
+      } catch (_) {
+        if (valid(epoch, gen) && seq === detailsSeq) {
+          if (familyAccessDenied(_, contact)) return;
+          failed = true; familyReadUnavailable();
+        }
+      }
+      if (valid(epoch, gen) && seq === detailsSeq) watchFamily(conversation, contact, epoch, gen, seq, failed);
     }, delay);
   }
   function familyRefreshState() {
@@ -1700,7 +1707,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       : familyBusy ? "Ставим карточку в очередь" : "Обновить сведения из CRM";
   }
   async function refreshSelected(force) {
-    if (!force || !isAdmin() || familyBusy || !family) return;
+    if (!force || !isAdmin() || familyBusy) return;
+    if (!family) return openDetails();
     const epoch = state.epoch, gen = generation, seq = detailsSeq, conversation = selected, contact = family.source_contact_id || family.id;
     familyBusy = true; familyRefreshState();
     try {
@@ -1757,25 +1765,48 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (!contactId) { familyUnlinked(); return; }
     const saved = familyCache.get(contactId);
     if (saved && saved.value.selection?.signature === meta.card_selection?.signature) { family = saved.value; renderFamily(); }
+    await readOpenedFamily(conversation, contactId, epoch, gen, seq);
+  }
+  function familyAccessDenied(error, contact) {
+    if (![401, 403, 404].includes(error.status)) return false;
+    familyCache.delete(contact); family = null; familyRenderKey = "";
+    detailsDialog.classList.remove("is-loading", "is-refreshing");
+    familySkeleton(); $("#chat-details-refresh").setAttribute("aria-busy", "false");
+    $("#chat-details-contact").replaceChildren();
+    $("#chat-details-student").replaceChildren(node("p", error.message, "family-empty"));
+    familySync("Карточка недоступна", error.message); return true;
+  }
+  function familyReadUnavailable() {
+    detailsDialog.classList.remove("is-loading", "is-refreshing");
+    $("#chat-details-refresh").setAttribute("aria-busy", "false");
+    familySync(family ? "Сохранённая карточка · повторяем подключение" : "Карточка пока недоступна · повторяем подключение",
+      "Сервер временно не отвечает. Сохранённые данные остаются доступны; повторим запрос автоматически.");
+  }
+  async function readOpenedFamily(conversation, contactId, epoch, gen, seq) {
     try {
-      // Always display the last complete disk snapshot before asking the server
-      // to schedule due work. Neither GET waits for AlfaCRM or clears good data.
+      // Show local facts first. Scheduling never waits for AlfaCRM.
       const cached = await preparedFamilyRequest(conversation, true, contactId);
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
       family = cached; rememberFamily(contactId, cached); renderFamily();
-      // An open panel is a request for this client's card, including a pinned
-      // panel following a read chat. Background preparation remains server-owned.
       const result = await preparedFamilyRequest(conversation, false, contactId);
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
       family = result; rememberFamily(contactId, result); renderFamily();
       watchFamily(conversation, contactId, epoch, gen, seq);
     } catch (error) {
-      if (valid(epoch, gen) && seq === detailsSeq && detailsDialog.open) {
-        detailsDialog.classList.remove("is-loading");
-        if (family) { familySync("Сохранённая карточка · обновление недоступно", error.message); watchFamily(conversation, contactId, epoch, gen, seq); return; }
-        $("#chat-details-name").textContent = error.message;
-        $("#chat-details-contact").replaceChildren(); $("#chat-details-student").replaceChildren(node("p", "Сведения не загрузились. Попробуйте открыть карточку ещё раз.", "family-empty"));
+      if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected) return;
+      if (familyAccessDenied(error, contactId)) return;
+      familyReadUnavailable();
+      if (!family) {
+        $("#chat-details-contact").replaceChildren();
+        $("#chat-details-student").replaceChildren(node("p", "Сведения временно недоступны. Повторим загрузку автоматически. Можно нажать стрелку обновления.", "family-empty"));
       }
+      clearTimeout(familyTimer);
+      const retry = () => {
+        if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || conversation !== selected || !active()) return;
+        if (document.hidden) { familyTimer = setTimeout(retry, 5000); return; }
+        void readOpenedFamily(conversation, contactId, epoch, gen, seq);
+      };
+      familyTimer = setTimeout(retry, 5000);
     }
   }
   // Where the card lives. With room for list, chat and card side by side it docks as a

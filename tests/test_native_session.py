@@ -638,8 +638,8 @@ class NativeSessionTests(unittest.TestCase):
             self.service.browser.send.assert_not_called()
             self.assertFalse(control(self.setting()).get('needs_check'))
             message = self.reader.history(None, self.workspace, self.conversation()['id'])['messages'][-1]
-            self.assertIn('Браузер AlfaCRM занят', message['error'])
-            self.assertNotIn('авторизац', message['error'])
+            self.assertIsNone(message['error'])  # Waiting is silent under the quiet-send contract.
+            self.assertEqual(message['state'], 'queued')
         finally:
             self.service.sessions.release(operation)
         self.db.execute(text("UPDATE message_jobs SET due_at=now()-interval '1 second' WHERE subject_id=:id"),

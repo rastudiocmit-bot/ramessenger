@@ -102,6 +102,8 @@ TENANT_TABLES = (
     "alfa_max_settings",
     "alfa_family_details",
     "crm_card_loader_settings",
+    "crm_card_loader_state",
+    "crm_family_snapshots",
     "ai_settings",
     "ai_agents",
     "ai_agent_versions",

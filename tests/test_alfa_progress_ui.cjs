@@ -397,3 +397,19 @@ test("workspace reset clears cache aggregates and progress bars before an unavai
   assert.equal(ui.$('#alfa-max-progress-value').textContent,'—');
   assert.doesNotMatch(ui.$('#alfa-max-progress').textContent,/Card parent|History parent|47 из 52/);
 });
+
+test('background jobs remain visible separately from clients needing an answer', async t => {
+  const ui=setup(t,()=>report({cards:{configured:true,total:0,queued:0,queue_depth:647,manual_queued:0,
+    background_queued:647,oldest_wait_seconds:417846,stalled:0,errors:0}}));
+  await ui.app.start();
+  assert.equal(ui.$('#alfa-loader-cards-badge').textContent,'В очереди');
+  assert.match(ui.$('#alfa-loader-cards-queue').textContent,/Заданий: 647.*фоновых: 647.*4 д 20 ч/);
+  assert.equal(ui.$('#alfa-loader-cards-error').hidden,true);
+});
+
+test('a stalled active lease is distinguished from delayed manual priority',async t=>{
+  const ui=setup(t,()=>report({cards:{configured:true,total:1,queued:1,stalled:1,stalled_running:1,manual_delayed:0}}));
+  await ui.app.start();
+  assert.match(ui.$('#alfa-loader-cards-error').textContent,/Нет свежего прогресса от обработчиков/);
+  assert.doesNotMatch(ui.$('#alfa-loader-cards-error').textContent,/приоритет/);
+});
