@@ -185,7 +185,11 @@
   const cardLoader = window.CenterCardLoader
     ? window.CenterCardLoader({ $, state, api, show })
     : { load: async () => {}, reset: () => {} };
+  const syncMaster = window.CenterSyncMaster
+    ? window.CenterSyncMaster({ $, state, show, refreshStatus: () => $("#alfa-max-progress-refresh").click() })
+    : { reset() {}, render() {}, enter() {}, leave() {}, progress() {} };
   async function renderPane(pane) {
+    if (state.pane === "connections" && pane !== "connections") syncMaster.leave();
     state.pane = pane === "queue" ? "messages" : pane;
     const sections = grantedSections();
     sections.profile = true;
@@ -210,6 +214,7 @@
     form.elements.name.disabled = !manage;
     show($("button[type=submit]", form), Boolean(manage));
     show($("#workspace-readonly"), !manage);
+    if (state.pane === "connections" && state.connectionsView === "wizard") syncMaster.enter();
     if (state.pane === "connections") await Promise.allSettled([ai.load(), cardLoader.load(), loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
     if (state.pane === "messages") { chat.setView(state.chatView || "all", false); await chat.enter(); }
     if (state.pane === "tasks") await tasks?.enter();
@@ -439,7 +444,9 @@
   $("#confirm-cancel").addEventListener("click", () => $("#confirm-dialog").close("no"));
   $("#confirm-yes").addEventListener("click", () => $("#confirm-dialog").close("yes"));
 
+  let alfaEditing = false;
   function resetAlfa() {
+    alfaEditing = false;
     state.alfa = null; state.alfaBusy = false;
     $("#alfa-form").reset(); $("#alfa-branches").replaceChildren();
     ["#alfa-status", "#alfa-cache-time"].forEach(selector => { $(selector).textContent = ""; });
@@ -454,12 +461,15 @@
     const label = $(selector); label.textContent = text; label.closest(".connection-tile").dataset.state = mode;
     // A service that breaks says so once; when it is back, the notice goes away.
     const before = connectionModes[selector]; connectionModes[selector] = mode;
+    syncMaster.render();
     if (mode === "error" && before !== "error") notices?.notify({ type: "warning", title: connectionNames[selector] || "Подключение", text,
       key: "connection:" + selector, action: { label: "Открыть", run: () => { $("#connections-tab")?.click(); } } });
     else if (mode === "active" && before === "error") notices?.resolve("connection:" + selector);
   }
   function connectionView(view) {
     if (!["wizard", "settings", "voice", "agents"].includes(view)) view = "wizard";
+    const previous = state.connectionsView;
+    if (previous === "wizard" && view !== "wizard") syncMaster.leave();
     state.connectionsView = view;
     if (view === "wizard") void cardLoader.load();
     for (const name of ["wizard", "settings", "voice", "agents"]) {
@@ -467,6 +477,7 @@
       $("#connections-" + name + "-tab").setAttribute("aria-selected", String(name === view));
       $("#connections-" + name + "-tab").tabIndex = name === view ? 0 : -1;
     }
+    if (view === "wizard") syncMaster.enter();
   }
   for (const button of document.querySelectorAll("[data-connection-view]")) button.addEventListener("click", () => connectionView(button.dataset.connectionView));
   $(".connection-tabs").addEventListener("keydown", event => {
@@ -478,9 +489,6 @@
     const view = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
       : names[(index + (event.key === "ArrowLeft" ? names.length - 1 : 1)) % names.length];
     connectionView(view); $("#connections-" + view + "-tab").focus();
-  });
-  for (const button of document.querySelectorAll("[data-wizard-target]")) button.addEventListener("click", () => {
-    document.getElementById(button.dataset.wizardTarget)?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   function alfaButtons() {
     const ready = Boolean(state.alfa?.vault_ready), configured = Boolean(state.alfa?.configured);
@@ -495,10 +503,14 @@
     if (workspace.id !== state.workspace?.id) return;
     if (state.alfa?.configured !== payload.configured) $("#alfa-config").open = !payload.configured;
     state.alfa = payload;
-    const form = $("#alfa-form"); form.elements.origin.value = payload.origin;
-    form.elements.email.value = payload.email; form.elements.seed_branch_id.value = payload.seed_branch_id || "";
-    form.elements.api_key.value = ""; form.elements.api_key.type = "password";
-    const reveal = $(".reveal", form); reveal.textContent = "Показать"; reveal.setAttribute("aria-label", "Показать пароль"); reveal.setAttribute("aria-pressed", "false");
+    const form = $("#alfa-form");
+    // A reread of saved credentials must not erase an unsaved operator draft.
+    if (!alfaEditing) {
+      form.elements.origin.value = payload.origin;
+      form.elements.email.value = payload.email; form.elements.seed_branch_id.value = payload.seed_branch_id || "";
+      form.elements.api_key.value = ""; form.elements.api_key.type = "password";
+      const reveal = $(".reveal", form); reveal.textContent = "Показать"; reveal.setAttribute("aria-label", "Показать пароль"); reveal.setAttribute("aria-pressed", "false");
+    }
     form.elements.api_key.required = !payload.configured;
     form.elements.api_key.placeholder = payload.configured ? "Ключ сохранён" : "Введите ключ API";
     $("#alfa-key-note").textContent = payload.configured ? "Оставьте пустым, чтобы сохранить действующий ключ." : "Ключ находится в профиле пользователя АльфаCRM.";
@@ -533,12 +545,13 @@
       if (epoch === state.epoch) { state.alfaBusy = false; alfaButtons(); }
     }
   }
+  $("#alfa-form").addEventListener("input", () => { alfaEditing = true; });
   $("#alfa-form").addEventListener("submit", event => {
     event.preventDefault(); const form = event.currentTarget;
     const data = { origin: form.elements.origin.value.trim(), email: form.elements.email.value.trim(), seed_branch_id: form.elements.seed_branch_id.value ? Number(form.elements.seed_branch_id.value) : null };
     if (form.elements.api_key.value.trim()) data.api_key = form.elements.api_key.value.trim();
     alfaAction(async path => {
-      await api(path, { method: "PUT", data }); form.elements.api_key.value = "";
+      await api(path, { method: "PUT", data }); alfaEditing = false; form.elements.api_key.value = "";
       await api(`${path}/check`, { method: "POST" });
     });
   });
@@ -554,8 +567,9 @@
   function resetAlfaMax() {
     clearTimeout(alfaSessionTimer); alfaSessionTimer = null; alfaReconnectEditing = false;
     alfaMaxProgress.reset();
-    connectionView("wizard"); show($("#history-monitor-empty"), false);
     state.alfaMax = null; state.alfaMaxBusy = false;
+    syncMaster.reset();
+    connectionView("wizard"); show($("#history-monitor-empty"), false);
     $("#alfa-max-connect-form").reset(); $("#alfa-max-otp-form").reset();
     $("#alfa-max-status").textContent = "Не подключено";
     $("#alfa-max-info").textContent = "";
@@ -712,6 +726,7 @@
   const tasks = window.CenterTasks ? window.CenterTasks({ $, state, api, node, show, toast: feedback, notices, renderPane }) : null;
   const ai = window.CenterAi({ $, state, api, node, show, notice, toast: feedback, confirm });
   const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date, onStatus: (payload, view) => {
+    syncMaster.progress(payload, view);
     connectionSummary("#alfa-history-summary", view.title, view.mode === "complete" ? "active" : ["error", "offline", "attention"].includes(view.mode) ? "error" : "waiting");
     if (payload && state.alfaMax && payload.state !== state.alfaMax.state) loadAlfaMax().catch(error => { if (error.name !== "AbortError") notice(error.message, $("#alfa-max-error")); });
   } });

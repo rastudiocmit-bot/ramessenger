@@ -34,7 +34,7 @@ test("wizard contains one loader form with visible defaults before the API respo
   let resolve;
   const ui = setup(t, () => new Promise(done => { resolve = done; }));
   const form = ui.$("#card-loader-form");
-  assert.equal(form.closest('[role="tabpanel"]').id, "connections-wizard-view");
+  assert.equal(form.closest('[role="tabpanel"]').id, "sync-master-policy-panel");
   assert.equal(ui.$("#connections-settings-view #card-loader-form"), null);
   assert.equal(ui.window.document.querySelectorAll("#card-loader-form").length, 1);
   assert.equal(form.elements.finance_interval_minutes.value, "30");

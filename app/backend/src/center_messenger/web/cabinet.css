@@ -1953,3 +1953,96 @@ body:has(#cabinet[hidden]){overflow:auto}
  #connections-wizard-view .text-button{white-space:normal;text-align:left}
  .wizard-monitor-section{margin-top:22px;padding-top:20px}
 }
+
+/* Compact sync master: daily status first, setup and policy on separate tabs. */
+#connections-wizard-view .sync-master-header{margin:0 0 14px}
+.sync-master-header h2{margin:0;font-size:20px;line-height:1.35;letter-spacing:-.3px}
+.sync-master-header p{margin:5px 0 0;font-size:12px;color:var(--muted);line-height:1.5}
+.sync-master-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0 0 14px}
+#connections-wizard-view .sync-master-summary .connection-tile{min-width:0;min-height:0;padding:10px 12px;align-items:center;gap:9px;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:none}
+.sync-master-summary .connection-tile .item-icon{width:26px;height:26px;flex:none}
+.sync-master-summary .connection-tile strong{font-size:12px;line-height:1.4}
+.sync-master-summary .connection-tile div>span{font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+.sync-master-last-check{min-width:0;display:flex;flex-direction:column;justify-content:center;padding:10px 12px;gap:3px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.sync-master-last-check>span{font-size:11px;line-height:1.4;color:var(--muted)}
+.sync-master-last-check strong{font-size:12px;line-height:1.5;font-weight:600;overflow-wrap:anywhere}
+.sync-master-tabs{display:flex;gap:4px;position:sticky;top:0;z-index:4;padding:5px;margin:0 0 16px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2)}
+.sync-master-tabs button{flex:1;min-width:0;min-height:40px;padding:8px 12px;border:0;border-radius:8px;background:transparent;box-shadow:none;font-family:inherit;font-size:12px;font-weight:600;line-height:1.4;color:var(--muted);cursor:pointer}
+.sync-master-tabs button[aria-selected=true]{background:var(--surface);color:var(--primary-ink);box-shadow:0 1px 4px rgba(24,39,56,.07)}
+.sync-master-tabs button:hover{color:var(--primary-ink)}
+.sync-master-tabs button:focus-visible,.sync-source-settings>summary:focus-visible,.sync-help>summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.sync-master-panel{min-width:0}
+.sync-master-alert{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 12px;padding:11px 14px;border-radius:10px;border:1px solid var(--line);background:var(--primary-tint);color:var(--ink)}
+.sync-master-alert strong{font-size:12px;line-height:1.5}
+.sync-master-alert p{margin:3px 0 0;font-size:12px;line-height:1.55;color:var(--muted)}
+#connections-wizard-view .sync-master-alert .text-button{white-space:normal;text-align:left;flex:none;max-width:170px;min-height:40px}
+.sync-panel-intro{margin-bottom:12px}
+.sync-panel-intro h3{font-size:15px;margin:0 0 4px}
+.sync-panel-intro p{font-size:12px;line-height:1.6;color:var(--muted);margin:0;max-width:78ch}
+#connections-wizard-view .wizard-connections{gap:12px;margin-bottom:14px}
+.sync-source-settings>summary{display:flex;align-items:center;gap:12px;padding:16px 18px;cursor:pointer;list-style:none}
+.sync-source-settings>summary::-webkit-details-marker{display:none}
+.sync-source-settings>summary .wizard-step-copy{flex:1}
+#connections-wizard-view .sync-source-settings>summary h2{font-size:15px}
+.sync-source-settings>summary p{font-size:12px;margin-top:3px}
+#connections-wizard-view .sync-source-settings>summary .connection-status{margin:0;max-width:40%;font-size:11px}
+.sync-source-toggle{color:var(--primary-ink);font-size:12px;line-height:1.5;flex:none;display:flex;align-items:center;gap:9px}
+.sync-source-toggle:after{content:'';width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(45deg);margin-top:-3px}
+.sync-source-settings[open] .sync-source-toggle:after{transform:rotate(225deg);margin-top:3px}
+.sync-source-settings>.card-b{border-top:1px solid var(--line-soft);padding:16px 18px 18px}
+.sync-help{margin-top:12px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.sync-help>summary{padding:12px 0;font-size:12px;line-height:1.5;font-weight:600;color:var(--primary-ink);cursor:pointer}
+.sync-help dl{margin:0 0 12px;display:grid;gap:10px}
+.sync-help dt{font-size:12px;font-weight:600;line-height:1.5}
+.sync-help dd,.sync-help p{margin:3px 0 12px;font-size:12px;line-height:1.6;color:var(--muted)}
+#connections-wizard-view .sync-status-monitor{margin:0;padding:0;border:0}
+#connections-wizard-view .sync-status-monitor .alfa-loader{margin:0;padding:16px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start}
+.sync-status-monitor .alfa-loader>*{grid-column:1/-1;min-width:0}
+.sync-status-monitor .alfa-loader>.sync-history-section,.sync-status-monitor .alfa-loader>.sync-cards-section{grid-column:auto}
+.sync-status-monitor .alfa-loader-heading h2{font-size:18px;letter-spacing:0}
+.sync-status-monitor .alfa-loader-heading p{margin-top:4px}
+.sync-status-monitor .alfa-loader-note{margin:0}
+.sync-status-monitor .alfa-loader-section{margin:0;padding:14px;border-radius:10px}
+.sync-status-monitor .alfa-loader-section-head h3{font-size:14px}
+.sync-status-monitor .alfa-loader-progress-label,.sync-status-monitor .alfa-loader-result{margin-top:10px}
+.sync-status-monitor .alfa-loader-operation{margin-top:10px;padding:12px}
+.sync-status-monitor .alfa-loader-review,.sync-status-monitor .alfa-loader-diagnostics,.sync-status-monitor .alfa-loader-footer,.sync-status-monitor .alfa-loader-server-note{margin-top:0}
+#connections-wizard-view .sync-master-totals{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:0;padding:12px 0;border-top:1px solid var(--line-soft);border-bottom:1px solid var(--line-soft)}
+#connections-wizard-view .sync-master-totals>div{min-width:0;padding:0;border:0}
+.sync-master-totals strong{font-size:22px;line-height:1.25}
+.sync-master-totals span{display:block;font-size:10px;line-height:1.45;color:var(--muted);margin-top:4px}
+#sync-master-policy-panel .loader-card-heading{padding:18px 20px}
+#sync-master-policy-panel .loader-card-heading h2{font-size:17px}
+.sync-settings-tip{margin:0;padding:0 20px 16px;font-size:12px;line-height:1.6;color:var(--muted);max-width:82ch}
+#sync-master-policy-panel .loader-section{padding:18px 20px}
+#sync-master-policy-panel .loader-section-note{margin-bottom:10px}
+#sync-master-policy-panel .card-loader-grid{gap:14px 20px}
+#sync-master-policy-panel .loader-switch{min-height:70px;padding:10px 0}
+#sync-master-policy-panel .card-loader-footer{padding:13px 20px}
+@media(max-width:650px){
+ .sync-master-header h2{font-size:18px}
+ .sync-master-summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+ .sync-master-last-check{grid-column:1/-1;flex-direction:row;justify-content:space-between;align-items:baseline;gap:12px;padding:7px 10px}
+ #connections-wizard-view .sync-master-summary .connection-tile{padding:9px;align-items:flex-start}
+ .sync-master-summary .connection-tile>div{display:block}
+ .sync-master-summary .connection-tile div>span{max-width:none;text-align:left;margin:3px 0 0}
+ .sync-master-summary .connection-tile strong{font-size:11px;white-space:normal}
+ .sync-master-tabs{gap:2px;padding:4px;margin-bottom:12px}
+ .sync-master-tabs button{padding:8px 5px;font-size:11px;min-height:44px}
+ .sync-master-alert{align-items:flex-start;flex-direction:column;gap:5px}
+ #connections-wizard-view .sync-master-alert .text-button{max-width:100%;padding:4px 0}
+ .sync-source-settings>summary{flex-wrap:wrap;gap:8px 12px;padding:14px}
+ .sync-source-settings>summary .wizard-step-copy{flex-basis:100%}
+ #connections-wizard-view .sync-source-settings>summary .connection-status{max-width:75%}
+ .sync-source-toggle{margin-left:auto}
+ .sync-source-settings>.card-b{padding:14px}
+ #connections-wizard-view .sync-status-monitor .alfa-loader{padding:12px;gap:10px;grid-template-columns:minmax(0,1fr)}
+ .sync-status-monitor .alfa-loader>.sync-history-section,.sync-status-monitor .alfa-loader>.sync-cards-section{grid-column:1/-1}
+ .sync-master-totals{gap:8px}
+ .sync-master-totals strong{font-size:19px}
+ #sync-master-policy-panel .loader-card-heading{padding:16px}
+ .sync-settings-tip{padding:0 16px 14px}
+ #sync-master-policy-panel .loader-section{padding:16px}
+ #sync-master-policy-panel .card-loader-footer{padding:12px 16px}
+}
+@media(prefers-reduced-motion:reduce){.sync-master-tabs button{transition:none}}
