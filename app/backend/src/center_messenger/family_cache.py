@@ -477,6 +477,7 @@ class FamilyCacheWorker:
                     db.execute(text("UPDATE alfa_settings SET secret_ciphertext=:secret WHERE workspace_id=:w AND version=:v"),
                         {"w": workspace, "v": settings["version"], "secret": self.connections.vault.seal(workspace, settings["connection_id"], credentials)})
                     card_jobs.clear_verified_denial(db, workspace, job)
+                    card_preference.refresh_for_contact(db, workspace, snapshot, job['contact'])
                     self.finish(db, workspace, job)
         except card_jobs.PageYield:
             self.yield_job(workspace, job)

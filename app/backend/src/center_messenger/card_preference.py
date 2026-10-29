@@ -2,7 +2,7 @@
 
 Published outbox records are durable projections, never executable jobs. Every
 read fences the projection by CRM settings, publication and the current identity
-of the entire primary-phone cohort. Manual conversation links always win.
+of the directly matched phone cohort. Manual conversation links always win.
 """
 import hashlib
 import json
@@ -18,7 +18,7 @@ from center_messenger.crm_directory import normalized_name, phone_number
 
 TOPIC = "crm.card.preference"
 SCAN = TOPIC + ".scan"
-VERSION = 1
+VERSION = 2
 REASONS = {5: "scheduled_lesson", 4: "active_group", 3: "active_client", 2: "lead", 1: "archive"}
 
 
@@ -41,7 +41,7 @@ def join_sql(snapshot, *, c="c", cn="cn", am="am", alias="cp"):
         return f" LEFT JOIN LATERAL (SELECT NULL::jsonb AS payload) {alias} ON true "
     # This guard also detects a new, conflicting owner of a formerly unique
     # phone, not just edits to the previously selected card.
-    # Keep the two mutually exclusive contact/phone paths separate. A CASE in
+    # Keep the mutually exclusive contact/phone paths separate. A CASE in
     # the customer filter prevents indexed contact lookups and scans the entire
     # CRM catalog again for every pending dialog.
     return f""" LEFT JOIN LATERAL (
@@ -64,11 +64,22 @@ def join_sql(snapshot, *, c="c", cn="cn", am="am", alias="cp"):
             FROM alfa_customers a JOIN alfa_branches b ON b.workspace_id=a.workspace_id
               AND b.connection_id=:card_connection AND b.external_id=a.branch_id AND b.available
             WHERE e.payload->>'phone' IS NOT NULL AND a.workspace_id=e.workspace_id
+              AND e.payload->>'match' IS DISTINCT FROM 'direct_phone'
               AND a.run_id=:card_run AND a.contact_id IN (
                 SELECT anchor.contact_id FROM alfa_customers anchor JOIN alfa_branches ab ON ab.workspace_id=anchor.workspace_id
                   AND ab.connection_id=:card_connection AND ab.external_id=anchor.branch_id AND ab.available
                 WHERE anchor.workspace_id=e.workspace_id AND anchor.run_id=:card_run
                   AND anchor.phones->>0=e.payload->>'phone')
+            UNION ALL
+            SELECT a.external_id,a.branch_id,{guard_piece()} AS piece
+            FROM alfa_customers a JOIN alfa_branches b ON b.workspace_id=a.workspace_id
+              AND b.connection_id=:card_connection AND b.external_id=a.branch_id AND b.available
+            WHERE e.payload->>'match'='direct_phone' AND a.workspace_id=e.workspace_id AND a.run_id=:card_run
+              AND (a.contact_id={c}.contact_id OR a.contact_id IN (
+                SELECT anchor.contact_id FROM alfa_customers anchor JOIN alfa_branches ab ON ab.workspace_id=anchor.workspace_id
+                  AND ab.connection_id=:card_connection AND ab.external_id=anchor.branch_id AND ab.available
+                WHERE anchor.workspace_id=e.workspace_id AND anchor.run_id=:card_run
+                  AND anchor.phones ?| ARRAY(SELECT jsonb_array_elements_text(e.payload->'anchor_phones'))))
           ) guarded)
     ) {alias} ON true """
 
@@ -145,20 +156,20 @@ def person_name(value, phones):
 
 
 def _catalog(db, workspace, snapshot, sources=None):
-    # A card opening needs only its own contacts and all direct primary-phone
+    # A card opening needs only its own contacts and all direct phone
     # candidates, including every branch/card of those candidates. Keep the
     # same ambiguity guards; do not read the entire directory for one family.
     prefix, restriction = "", ""
     if sources is not None:
         prefix = """WITH source_phones AS MATERIALIZED (
-          SELECT a.phones->>0 AS phone FROM alfa_customers a JOIN alfa_branches b
+          SELECT jsonb_array_elements_text(a.phones) AS phone FROM alfa_customers a JOIN alfa_branches b
             ON b.workspace_id=a.workspace_id AND b.connection_id=:conn AND b.external_id=a.branch_id AND b.available
           WHERE a.workspace_id=:w AND a.run_id=:r AND a.contact_id=ANY(CAST(:sources AS uuid[]))
         ), candidates AS MATERIALIZED (
           SELECT unnest(CAST(:sources AS uuid[])) AS contact_id UNION
           SELECT a.contact_id FROM alfa_customers a JOIN alfa_branches b
             ON b.workspace_id=a.workspace_id AND b.connection_id=:conn AND b.external_id=a.branch_id AND b.available
-          WHERE a.workspace_id=:w AND a.run_id=:r AND a.phones->>0 IN (SELECT phone FROM source_phones)
+          WHERE a.workspace_id=:w AND a.run_id=:r AND a.phones ?| ARRAY(SELECT phone FROM source_phones)
         ) """
         restriction = " AND a.contact_id IN (SELECT contact_id FROM candidates) "
     rows = list(db.execute(text(prefix + "SELECT a.external_id,a.branch_id,a.contact_id,a.student_id,a.name,a.legal_name,a.legal_type,"
@@ -173,8 +184,8 @@ def _catalog(db, workspace, snapshot, sources=None):
     for raw in rows:
         row = dict(raw); row["contact_id"] = str(row["contact_id"])
         by_contact[row["contact_id"]].append(row)
-        if row["phones"]:
-            by_phone[row["phones"][0]].append(row)
+        for phone in row['phones']:
+            by_phone[phone].append(row)
     for phone, values in list(by_phone.items()):
         by_phone[phone] = [row for contact in sorted({r["contact_id"] for r in values}) for row in by_contact[contact]]
     return by_contact, by_phone
@@ -185,6 +196,11 @@ def _cohort(source, by_contact, by_phone):
     phones = {r["phones"][0] for r in own if r["phones"]}
     phone = next(iter(phones)) if len(phones) == 1 else None
     rows = by_phone.get(phone, own) if phone else own
+    if any(r.get('status') == 'client' for r in own):
+        # Inactive records describe past ownership/labels. They cannot turn a
+        # current client's display into an unresolved old-name conflict.
+        active = {r['contact_id'] for r in rows if r.get('status') == 'client'}
+        rows = [r for r in rows if r['contact_id'] in active]
     if len({r["contact_id"] for r in rows}) > 100:
         return None, own, own, "too_many_candidates"
     all_phones = {p for r in rows for p in r["phones"]}
@@ -204,6 +220,51 @@ def _cohort(source, by_contact, by_phone):
         if phone and numbers != {phone}:
             conflict = "phone_chain"
     return phone, rows, own if conflict else rows, conflict
+
+
+def direct_cohort(source, by_contact, by_phone):
+    own = by_contact.get(source, [])
+    anchors = {p for r in own for p in r['phones']}
+    contacts = {source} | {r['contact_id'] for p in anchors for r in by_phone.get(p, [])}
+    return [r for contact in sorted(contacts) for r in by_contact.get(contact, [])]
+
+
+def active_display(source, by_contact, cohort, facts, members, snapshot):
+    """A current personal client outranks a former lead by a direct phone match.
+
+    This is a display choice only. No contact/customer/message or MAX peer is
+    relinked. Several distinct current representatives remain ambiguous.
+    """
+    own = by_contact.get(source, [])
+    if not own or any(r['status'] == 'client' or r['legal_type'] == 2 for r in own):
+        return None
+    anchors = {p for r in own for p in r['phones']}
+    contacts = {r['contact_id'] for r in cohort if r['status'] == 'client' and r['legal_type'] == 1
+                and anchors.intersection(r['phones'])}
+    rows = [r for r in cohort if r['contact_id'] in contacts]
+    clients = [r for r in rows if r['status'] == 'client']
+    if not clients or len(contacts) > 100 or any(r['legal_type'] == 2 for r in rows):
+        return None
+    all_phones = {p for r in rows for p in r['phones']}
+    parents = {person_name(r['legal_name'], all_phones) for r in clients} - {''}
+    if len(parents) > 1 or (len(contacts) > 1 and not parents):
+        # Actual study evidence has priority over an unrelated active card
+        # without a group. Equal-priority different representatives still need
+        # review; no arbitrary ID/order tie-break can establish a family.
+        customers = defaultdict(list)
+        for row in rows:
+            customers[row['external_id']].append(row)
+        ranks = {customer: _rank(cards, facts, members, snapshot)[0] for customer, cards in customers.items()}
+        highest = max(ranks.values())
+        if highest < 4:
+            return None
+        top = [r for r in clients if ranks[r['external_id']] == highest]
+        top_contacts = {r['contact_id'] for r in top}
+        top_parents = {person_name(r['legal_name'], all_phones) for r in top} - {''}
+        if len(top_contacts) > 1 and len(top_parents) != 1:
+            return None
+        rows = [r for r in rows if r['contact_id'] in top_contacts]
+    return rows
 
 
 def _facts(db, workspace, snapshot, customers):
@@ -280,6 +341,10 @@ def _rank(rows, facts, members, snapshot):
 
 def choose(source, by_contact, by_phone, facts, members, snapshot, previous=None, verified_contacts=None):
     phone, cohort, eligible, ambiguous = _cohort(source, by_contact, by_phone)
+    direct = direct_cohort(source, by_contact, by_phone)
+    preferred = active_display(source, by_contact, direct, facts, members, snapshot)
+    if preferred:
+        eligible, ambiguous = preferred, None
     proven = set(map(str, verified_contacts or []))
     if (len(proven) > 1 and phone and source in proven
             and proven <= {row["contact_id"] for row in cohort}):
@@ -298,6 +363,8 @@ def choose(source, by_contact, by_phone, facts, members, snapshot, previous=None
     best = min(ranked, key=lambda x: (-x[0], str(x[2]["external_id"]) != (previous or {}).get("customer"),
         x[1].get("date", "9999"), x[1].get("time") or "", x[2]["external_id"], x[2]["branch_id"]))
     rank, evidence, row = best
+    if preferred:
+        evidence = dict(evidence, display_rule='active_client_by_direct_phone')
     real_phones = {p for r in eligible for p in r["phones"]}
     # Archive phone-only records stay available as related source cards, rather
     # than appearing as an extra child in the displayed active family.
@@ -323,8 +390,11 @@ def choose(source, by_contact, by_phone, facts, members, snapshot, previous=None
     label = next((r["legal_name"] for r in observations if person_name(r["legal_name"], real_phones)), row["name"])
     # Most chats retain their original contact. Their indexed contact guard does
     # not scan a whole phone cohort on every list count or unchanged family read.
-    phone = phone if any(contact != source for contact in displayed) or row["contact_id"] != source else None
-    guarded = cohort if phone else by_contact[source]
+    anchors = sorted({p for r in by_contact[source] for p in r['phones']})
+    cross_contact = any(contact != source for contact in displayed) or row['contact_id'] != source
+    direct_match = bool(anchors and cross_contact)
+    phone = (phone or anchors[0]) if direct_match else None
+    guarded = direct if direct_match else by_contact[source]
     guard = hashlib.md5("|".join(r["guard_piece"] for r in sorted(guarded, key=lambda r: (r["external_id"], r["branch_id"]))).encode()).hexdigest()
     result = {"policy": VERSION, "connection": str(snapshot["connection_id"]), "run": str(snapshot["run"]),
         "version": snapshot["version"], "source": source, "contact": row["contact_id"], "contacts": sorted(displayed),
@@ -332,11 +402,12 @@ def choose(source, by_contact, by_phone, facts, members, snapshot, previous=None
         "student": str(row["student_id"]) if row["student_id"] else None,
         "name": label, "status": {5: "client", 4: "client", 3: "client", 2: "lead", 1: "archive"}[rank],
         "rank": rank, "reason": REASONS[rank], "evidence": evidence, "ambiguous": ambiguous,
-        "phone": phone, "guard": guard,
+        "phone": phone, "guard": guard, 'match': 'direct_phone' if direct_match else None,
+        'anchor_phones': anchors if direct_match else [],
         "hidden_customers": sorted(str(key) for key, values in customers.items() if rank >= 3 and key != row["external_id"]
             and all(not person_name(r["name"], real_phones) for r in values)),
         "related_cards": [{"customer": str(r["external_id"]), "branch": str(r["branch_id"]), "status": r["status"]}
-                          for r in cohort if r["contact_id"] not in displayed or
+                          for r in (direct if direct_match else cohort) if r["contact_id"] not in displayed or
                             (rank >= 3 and r["external_id"] != row["external_id"] and not person_name(r["name"], real_phones))]}
     result["signature"] = hashlib.sha256(json.dumps(result, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     return result
@@ -353,7 +424,7 @@ def refresh(db, workspace, snapshot, sources):
     if not valid:
         return 0
     by_contact, by_phone = _catalog(db, workspace, snapshot, sources)
-    cohorts = [_cohort(str(source), by_contact, by_phone)[1] for source in sources]
+    cohorts = [direct_cohort(str(source), by_contact, by_phone) for source in sources]
     facts, members = _facts(db, workspace, snapshot, {r["external_id"] for cohort in cohorts for r in cohort})
     count, at = 0, datetime.now(UTC).isoformat()
     for source in map(str, sources):
@@ -384,12 +455,37 @@ def refresh(db, workspace, snapshot, sources):
     return count
 
 
+def refresh_affected(db, workspace, snapshot, phones, *, limit=100):
+    """Recalculate existing chat displays atomically with a changed CRM source."""
+    phones = sorted(set(phones))
+    if not enabled(snapshot) or not phones:
+        return 0
+    sources = list(db.execute(text("SELECT DISTINCT c.contact_id FROM conversations c JOIN alfa_max_settings am "
+        "ON am.workspace_id=c.workspace_id AND am.connection_id=c.connection_id JOIN alfa_customers a "
+        "ON a.workspace_id=c.workspace_id AND a.contact_id=c.contact_id AND a.run_id=:r "
+        "WHERE c.workspace_id=:w AND am.crm_connection_id=:conn AND c.kind='direct' "
+        "AND NOT c.crm_link_manual AND a.phones ?| CAST(:phones AS text[]) "
+        "ORDER BY c.contact_id LIMIT :n"), {'w': workspace, 'r': snapshot['run'],
+        'conn': snapshot['connection_id'], 'phones': phones, 'n': limit}).scalars())
+    return refresh(db, workspace, snapshot, sources) if sources else 0
+
+
+def refresh_for_contact(db, workspace, snapshot, contact):
+    if not enabled(snapshot):
+        return 0
+    phones = list(db.execute(text("SELECT DISTINCT jsonb_array_elements_text(phones) FROM alfa_customers "
+        "WHERE workspace_id=:w AND run_id=:r AND contact_id=CAST(:contact AS uuid)"),
+        {'w': workspace, 'r': snapshot['run'], 'contact': contact}).scalars())
+    return refresh_affected(db, workspace, snapshot, phones)
+
+
 def repair(db, workspace, snapshot, *, limit=100):
     if not enabled(snapshot):
         return 0
     state = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND topic=:t AND event_key=:key"),
         {"w": workspace, "t": SCAN, "key": str(snapshot["connection_id"])}).scalar_one_or_none() or {}
-    same = state.get("run") == str(snapshot["run"]) and state.get("version") == snapshot["version"]
+    same = (state.get("run") == str(snapshot["run"]) and state.get("version") == snapshot["version"]
+            and state.get('policy') == VERSION)
     if same and state.get("next_at") and datetime.fromisoformat(state["next_at"]) > datetime.now(UTC):
         return 0
     after = state.get("after") if same else None
@@ -400,7 +496,7 @@ def repair(db, workspace, snapshot, *, limit=100):
         {"w": workspace, "conn": snapshot["connection_id"], "after": after, "limit": limit}).scalars())
     count = refresh(db, workspace, snapshot, sources)
     done = len(sources) < limit
-    payload = {"run": str(snapshot["run"]), "version": snapshot["version"], "after": str(sources[-1]) if sources and not done else None,
+    payload = {"run": str(snapshot["run"]), "version": snapshot["version"], 'policy': VERSION, "after": str(sources[-1]) if sources and not done else None,
                "next_at": (datetime.now(UTC) + timedelta(minutes=1)).isoformat() if done else None}
     db.execute(text("INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) VALUES(:w,:id,:t,:key,CAST(:p AS jsonb),'published') "
         "ON CONFLICT(workspace_id,topic,event_key) DO UPDATE SET payload=EXCLUDED.payload,state='published'"),
