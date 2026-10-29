@@ -77,6 +77,13 @@ window.CenterCardLoader = ({ $, state, api, show }) => {
       const payload = {
         preload_unanswered: form.elements.preload_unanswered.checked,
         preload_active_groups: form.elements.preload_active_groups.checked,
+        preload_active_cards: form.elements.preload_active_cards.checked,
+        automatic_clients_only: form.elements.automatic_clients_only.checked,
+        pause_background_on_send: form.elements.pause_background_on_send.checked,
+        active_interval_minutes: number("active_interval_minutes"),
+        parallel_card_jobs: number("parallel_card_jobs"),
+        requests_per_minute: number("requests_per_minute"),
+        manual_max_wait_seconds: number("manual_max_wait_seconds"),
         finance_interval_minutes: number("finance_interval_minutes"),
         lessons_interval_minutes: number("lessons_interval_minutes"),
         groups_interval_minutes: number("groups_interval_minutes"),

@@ -16,7 +16,7 @@ from sqlalchemy import text
 from center_messenger.alfa_client import AlfaError
 from center_messenger.alfa_family import FUTURE_DAYS, fetch_family_finance, fetch_family_lessons, merge_family_lessons
 from center_messenger.auth_security import AuthError
-from center_messenger import group_links, card_preference, card_jobs, card_loader_settings
+from center_messenger import group_links, card_preference, card_jobs, card_loader_settings, card_queue
 
 TOPIC = "crm.card.refresh"
 LESSONS = "crm.card.lessons"
@@ -95,7 +95,7 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS
             continue
         count += _enqueue(db, workspace, snapshot, contact=contact, force=force,
                          topic=topic, column=column, interval=interval, stale=stale,
-                         manual=manual, preload=policy["preload_unanswered"])
+                         manual=manual, policy=policy)
     if GROUPS in topics:
         count += group_links.enqueue(db, workspace, snapshot, contact=contact, force=force,
                                     source_contact=source_contact, conversation=conversation,
@@ -103,14 +103,15 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS
     return count
 
 
-def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale, manual, preload):
+def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale, manual, policy):
     # SQL fragments below come only from the fixed policy in enqueue().
     return db.execute(text("WITH pending_families AS MATERIALIZED (" + card_preference.pending_sql(snapshot) + ") " + f"""
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
       SELECT :w,gen_random_uuid(),:topic,concat(:conn,':',c.branch_id,':',c.external_id),
         jsonb_build_object('connection',CAST(:conn AS text),'branch',c.branch_id::text,
           'customer',c.external_id::text,'contact',c.contact_id::text,'student',c.student_id::text,
-          'version',:version,'manual',:manual,'requested_at',CAST(:requested_at AS text),
+          'version',:version,'unanswered',(:preload AND c.contact_id IN (SELECT contact_id FROM pending_families)),
+          'manual',:manual,'requested_at',CAST(:requested_at AS text),
           'manual_until',CAST(:manual_until AS text),'source_contact',CAST(:source_contact AS text),
           'conversation',CAST(:conversation AS text),'due_at',coalesce(f.{column}+make_interval(mins=>:interval),now()),
           'priority_boost',:priority_boost,'watchdog_at',CAST(:watchdog_at AS text),
@@ -122,15 +123,19 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
         AND f.branch_id=c.branch_id AND f.customer_id=c.external_id AND f.settings_version=:version
       WHERE c.workspace_id=:w AND c.run_id=:run AND c.contact_id IS NOT NULL AND c.student_id IS NOT NULL
         AND (CAST(:contact AS uuid) IS NULL OR c.contact_id=CAST(:contact AS uuid))
-        AND (:manual OR (:preload AND c.contact_id IN (SELECT contact_id FROM pending_families)))
+        AND (:manual OR (((:preload AND c.contact_id IN (SELECT contact_id FROM pending_families))
+          OR (:active AND c.status='client')) AND (NOT :clients_only OR c.status='client')))
         AND (:finance OR f.customer_id IS NOT NULL)
-        AND (:force OR f.{column} IS NULL OR (:repeat AND f.{column}<=now()-make_interval(mins=>:interval)) OR {stale})
+        AND (:force OR f.{column} IS NULL OR (:repeat AND f.{column}<=now()-make_interval(mins=>CASE
+          WHEN NOT :manual AND NOT (:preload AND c.contact_id IN (SELECT contact_id FROM pending_families))
+          THEN :active_interval ELSE :interval END)) OR {stale})
       ON CONFLICT (workspace_id,topic,event_key) DO UPDATE SET
         state='pending',payload=CASE WHEN outbox_events.state='pending'
           AND outbox_events.payload->>'version'=EXCLUDED.payload->>'version'
           AND outbox_events.payload->>'contact'=EXCLUDED.payload->>'contact'
           AND outbox_events.payload->>'student'=EXCLUDED.payload->>'student'
           THEN outbox_events.payload||jsonb_build_object(
+            'unanswered',EXCLUDED.payload->'unanswered',
             'manual',coalesce((outbox_events.payload->>'manual')::boolean,false) OR :manual,
             'requested_at',CASE WHEN :manual THEN CAST(:requested_at AS text) ELSE outbox_events.payload->>'requested_at' END,
             'manual_until',CASE WHEN :manual THEN CAST(:manual_until AS text) ELSE outbox_events.payload->>'manual_until' END,
@@ -146,11 +151,14 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
         OR outbox_events.payload->>'student'<>EXCLUDED.payload->>'student'
         OR (:manual AND (outbox_events.payload->>'manual' IS DISTINCT FROM 'true'
           OR coalesce((outbox_events.payload->>'requested_at')::timestamptz,'epoch')<CAST(:requested_at AS timestamptz)))
+        OR outbox_events.payload->'unanswered' IS DISTINCT FROM EXCLUDED.payload->'unanswered'
         OR :force
       """), {"w": workspace, "topic": topic, "conn": snapshot["connection_id"],
                "run": snapshot["run"], "version": snapshot["version"],
                "contact": contact, "manual": contact is not None, "force": force,
-               "preload": preload, "interval": max(1, interval), "repeat": interval > 0,
+               "preload": policy["preload_unanswered"], "active": policy["preload_active_cards"],
+               "clients_only": policy["automatic_clients_only"], "active_interval": policy["active_interval_minutes"],
+               "interval": max(1, interval), "repeat": interval > 0,
                "finance": topic == TOPIC, **manual, **card_preference.params(snapshot)}).rowcount
 
 
@@ -159,27 +167,21 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
     sources = [card for student in cards for card in student["cards"]]
     now = datetime.now(UTC)
     policy = card_loader_settings.get(db, workspace)
+    order, ordering = card_queue.ordering(card_queue.state(db, workspace), policy)
     jobs = list(db.execute(text("""
       WITH ranked AS (
-        SELECT e.id,row_number() OVER (ORDER BY
-          coalesce((e.payload->>'manual')::boolean,false) DESC,
-          CASE WHEN coalesce((e.payload->>'manual')::boolean,false)
-            THEN coalesce((e.payload->>'requested_at')::timestamptz,e.created_at) END DESC NULLS LAST,
-          (coalesce((e.payload->>'served_at')::timestamptz,e.created_at)<now()-interval '15 minutes') DESC,
-          coalesce((e.payload->>'served_at')::timestamptz,e.created_at),e.id) AS position
-        FROM outbox_events e WHERE e.workspace_id=:w
-          AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending'
-          AND e.payload->>'connection'=:conn AND e.payload->>'version'=:v
+        SELECT e.id,row_number() OVER (ORDER BY """ + order + ") AS position FROM outbox_events e "
+        "WHERE e.workspace_id=:w AND " + card_queue.eligible(policy) + """
       )
       SELECT (e.payload-'checkpoint')||jsonb_build_object('topic',e.topic,'job_id',CAST(e.id AS text),
         'created_at',e.created_at,'queue_position',ranked.position,'checkpoint_pages',
         coalesce((e.payload->'checkpoint'->>'pages')::integer,0))
-      FROM outbox_events e JOIN ranked ON ranked.id=e.id
+      FROM outbox_events e LEFT JOIN ranked ON ranked.id=e.id
       WHERE e.workspace_id=:w AND e.topic IN (:finance,:lessons,:history,:groups)
         AND e.state='pending' AND e.payload->>'connection'=:conn AND e.payload->>'version'=:v
         AND e.payload->>'contact'=ANY(CAST(:contacts AS text[]))
     """), {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
-         "conn": str(connection), "v": str(version), "contacts": list(map(str, contacts))}).scalars())
+         "conn": str(connection), "v": str(version), "contacts": list(map(str, contacts)), **ordering}).scalars())
     # Outbox JSON keeps source identifiers as strings.  Normalising both sides
     # is essential: otherwise a real queued/leased job disappears from the
     # public status when the prepared card contains integer AlfaCRM IDs.
@@ -187,10 +189,14 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
     jobs = [job for job in jobs if (job["branch"], job["customer"]) in keys]
     active_blocks = card_jobs.blocks(db, workspace, connection, version) if jobs else []
     jobs = [card_jobs.effective_job(job, active_blocks) for job in jobs]
+    if jobs and policy['pause_background_on_send'] and db.execute(text(
+        "SELECT " + card_queue.sends().replace('e.workspace_id', ':w')), {'w': workspace}).scalar_one():
+        jobs = [dict(job, cause='send_pending', available_at=(now+timedelta(seconds=policy['busy_retry_seconds'])).isoformat())
+                if not job.get('error') and not card_queue.urgent(job, now) and not _active_lease(job, now) else job for job in jobs]
     runnable = [job for job in jobs if not job.get("paused")]
     loading = any(_active_lease(job, now) for job in runnable)
     retries = [job["available_at"] for job in runnable
-               if job.get("available_at") and (job.get("error") or job.get("cause") == "busy")]
+               if job.get("available_at") and (job.get("error") or job.get("cause") in {"busy", "quota_wait", "send_pending"})]
     failures = [{"code": job["error"], "http_status": job.get("http_status"), "cause": job.get("cause"),
                  "operation": job["topic"], "branch_id": job["branch"], "customer_id": job["customer"],
                  "stage": job.get("stage"), "page": job.get("page"), "paused": bool(job.get("paused")),
@@ -224,6 +230,8 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
             status = "error"
         elif errors and waiting:
             status = "retry_wait"
+        elif waiting and any(job.get("cause") in {"quota_wait", "send_pending"} for job in section_jobs):
+            status = "retry_wait"
         elif partial:
             status = "partial"
         elif section_jobs:
@@ -237,7 +245,7 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
         else:
             status = "missing"
         section_retry = [_parse_time(job.get("available_at")) for job in section_jobs
-                         if job.get("error") or job.get("cause") == "busy"]
+                         if job.get("error") or job.get("cause") in {"busy", "quota_wait", "send_pending"}]
         section_retry = [value for value in section_retry if value]
         requested = [_parse_time(job.get("requested_at")) or _parse_time(job.get("created_at")) for job in section_jobs]
         requested = [value for value in requested if value]
@@ -253,6 +261,8 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
             "started_at": min(started).isoformat() if started else None,
             "retry_at": min(section_retry).isoformat() if section_retry else None,
             "queue_position": min(positions) if positions else None,
+            "wait_exceeded": any(job.get("manual") and (_parse_time(job.get("requested_at")) or now)
+                < now-timedelta(seconds=policy["manual_max_wait_seconds"]) for job in section_jobs),
             "sources": len(sources), "cached_sources": len(cached), "fresh_sources": len(fresh),
             "source_customer_ids": sorted({str(job["customer"]) for job in section_jobs}
                                           or {str(card["id"]) for card in sources}),
@@ -292,6 +302,8 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
             "state": state, "loading": loading, "refreshing": loading, "busy": any(job.get("cause") == "busy" for job in jobs),
             "pending": bool(jobs), "queued": sum(not _active_lease(job, now) for job in jobs),
             "queue_position": min(positions) if positions else None, "sections": sections,
+            "wait_exceeded": any(section["wait_exceeded"] for section in sections.values()),
+            "max_wait_seconds": policy["manual_max_wait_seconds"],
             "updated_at": updated.isoformat() if updated else None,
             "paused": any(job.get("paused") for job in jobs), "failures": failures,
             "next_refresh_at": (updated + finance_interval).isoformat() if updated else None,
@@ -444,6 +456,7 @@ class FamilyCacheWorker:
         self.connections, self.accounts = connections, connections.accounts
         self.stopping = threading.Event()
         self.owner, self.tariffs = str(uuid4()), {}
+        self._schedule_lock = threading.Lock()
         self.thread = threading.Thread(target=self.run, name="crm-family-cache", daemon=True)
 
     def schedule(self, workspace):
@@ -470,6 +483,7 @@ class FamilyCacheWorker:
             "WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) AND state='pending' "
             "AND payload->>'connection'=CAST(:conn AS text) AND payload->>'version'=CAST(:version AS text) "
             "AND coalesce((payload->>'manual')::boolean,false) "
+            "AND coalesce((payload->>'manual_until')::timestamptz,'infinity')>clock_timestamp() "
             "AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now() "
             "AND (payload->>'available_at')::timestamptz<=now() "
             "AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-make_interval(secs=>:priority_seconds)"),
@@ -544,51 +558,39 @@ class FamilyCacheWorker:
              "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS})
 
     def claim(self, workspace):
-        quota = (TOPIC, LESSONS, TOPIC, HISTORY, GROUPS)
-        turns = getattr(self, "_turns", {})
-        preferred = quota[turns.get(workspace, 0) % len(quota)]
-        manual_streaks = getattr(self, "_manual_streaks", {})
         with self.accounts.transaction(workspace_id=workspace) as db:
+            # Shared across both scheduler slots and any other API process.
+            db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
             policy = card_loader_settings.get(db, workspace)
-            prefer_background = manual_streaks.get(workspace, 0) >= policy["manual_burst"]
-            row = db.execute(text("SELECT e.id,e.topic,e.payload FROM outbox_events e WHERE e.workspace_id=:w "
-                "AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending' AND ("
-                "(e.payload->>'available_at')::timestamptz<=now() OR (e.payload->>'error' IN "
-                "('access_denied','not_found','invalid_response','crm_unavailable') AND "
-                "(e.payload->>'force_at')::timestamptz>(e.payload->>'failed_at')::timestamptz)) "
-                "AND coalesce((e.payload->>'lease_until')::timestamptz,'epoch')<=now() AND NOT " + card_jobs.block_sql() +
-                " ORDER BY (:prefer_background AND NOT coalesce((e.payload->>'manual')::boolean,false) "
-                "AND coalesce((e.payload->>'served_at')::timestamptz,e.created_at)<now()-interval '15 minutes') DESC,"
-                "coalesce((e.payload->>'manual')::boolean,false) DESC,"
-                "coalesce((e.payload->>'priority_boost')::boolean,false) DESC,"
-                "CASE WHEN coalesce((e.payload->>'manual')::boolean,false) THEN "
-                "coalesce((e.payload->>'requested_at')::timestamptz,e.created_at) END DESC NULLS LAST,"
-                "CASE WHEN coalesce((e.payload->>'manual')::boolean,false) THEN CASE e.topic "
-                "WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :groups THEN 2 WHEN :history THEN 3 ELSE 4 END ELSE 0 END,"
-                "CASE WHEN NOT coalesce((e.payload->>'manual')::boolean,false) AND e.topic=:preferred THEN 0 ELSE 1 END,"
-                "CASE e.topic WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :groups THEN 2 WHEN :history THEN 3 ELSE 4 END,"
-                "coalesce((e.payload->>'served_at')::timestamptz,e.created_at),e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED"),
-                {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY,
-                 "groups": GROUPS, "preferred": preferred, "prefer_background": prefer_background}).mappings().one_or_none()
+            scheduler = card_queue.state(db, workspace, lock=True)
+            leased = db.execute(text("SELECT count(*) FROM outbox_events WHERE workspace_id=:w "
+                "AND topic=ANY(CAST(:topics AS text[])) AND state='pending' "
+                "AND (payload->>'lease_until')::timestamptz>clock_timestamp()"),
+                {"w": workspace, "topics": list(TOPICS)}).scalar_one()
+            if leased >= policy['parallel_card_jobs']:
+                return None
+            order, parameters = card_queue.ordering(scheduler, policy)
+            row = db.execute(text("SELECT e.id,e.topic,e.payload,e.created_at FROM outbox_events e WHERE e.workspace_id=:w AND "
+                + card_queue.eligible(policy) + " ORDER BY " + order + " LIMIT 1 FOR UPDATE OF e SKIP LOCKED"),
+                {"w": workspace, **parameters}).mappings().one_or_none()
             if not row:
                 return None
-            turns[workspace] = turns.get(workspace, 0) + 1
-            self._turns = turns
-            job = dict(row["payload"])
-            if job.get("manual"):
-                manual_streaks[workspace] = manual_streaks.get(workspace, 0) + 1
-            else:
-                manual_streaks[workspace] = 0
-            self._manual_streaks = manual_streaks
-            now = datetime.now(UTC)
-            requested = _parse_time(job.get("requested_at")) or _parse_time(job.get("created_at")) or now
-            job.update(lease_owner=self.owner, lease_until=(now + LEASE).isoformat(),
+            job = dict(row['payload'])
+            now = db.execute(text('SELECT clock_timestamp()')).scalar_one()
+            requested = _parse_time(job.get('requested_at')) or row['created_at']
+            if job.get('manual') and not job.get('manual_until'):
+                job['manual_until'] = (requested+timedelta(minutes=policy['manual_interest_minutes'])).isoformat()
+            manual_until = _parse_time(job.get('manual_until'))
+            urgent = bool(job.get('manual') and (not manual_until or manual_until > now))
+            streak = scheduler['manual_streak'] + 1 if urgent else 0
+            db.execute(text("UPDATE crm_card_loader_state SET turn=turn+1,manual_streak=:streak WHERE workspace_id=:w"),
+                       {"w": workspace, "streak": streak})
+            job.update(lease_owner=str(uuid4()), lease_until=(now + LEASE).isoformat(),
                        started_at=now.isoformat(), last_progress_at=now.isoformat(),
-                       queue_wait_ms=max(0, int((now - requested).total_seconds() * 1000)),
-                       served_at=now.isoformat())
+                       queue_wait_ms=max(0, int((now-requested).total_seconds()*1000)), served_at=now.isoformat())
             db.execute(text("UPDATE outbox_events SET payload=CAST(:p AS jsonb) WHERE workspace_id=:w AND id=:id"),
-                       {"w": workspace, "id": row["id"], "p": json.dumps(job)})
-            return {**job, "id": row["id"], "topic": row["topic"]}
+                       {"w": workspace, "id": row['id'], "p": json.dumps(job)})
+            return {**job, "id": row['id'], "topic": row['topic']}
 
     def checkpoint(self, job, owned, snapshot, today, *, started_at=None):
         scope = [job["connection"], job["version"], str(snapshot["run"]), job["branch"],
@@ -617,7 +619,7 @@ class FamilyCacheWorker:
                     "WHERE workspace_id=:w AND id=:id "
                     "AND state='pending' AND payload->>'lease_owner'=:owner "
                     "AND (payload->>'lease_until')::timestamptz>now() RETURNING id"),
-                    {"w": workspace, "id": job["id"], "owner": self.owner, "p": json.dumps(value),
+                    {"w": workspace, "id": job["id"], "owner": job["lease_owner"], "p": json.dumps(value),
                      "stage": value.get("stage", "prepare"), "page": value.get("page"),
                      "lease_seconds": int(LEASE.total_seconds())}).scalar_one_or_none()
                 if not written:
@@ -632,7 +634,7 @@ class FamilyCacheWorker:
             db.execute(text("UPDATE outbox_events SET payload=(payload-'lease_owner'-'lease_until'-'error'-'paused')"
                 "||jsonb_build_object('available_at',now()) WHERE workspace_id=:w AND id=:id AND state='pending' "
                 "AND payload->>'lease_owner'=:owner AND (payload->>'lease_until')::timestamptz>now()"),
-                {"w": workspace, "id": job["id"], "owner": self.owner})
+                {"w": workspace, "id": job["id"], "owner": job["lease_owner"]})
 
     def _source(self, db, workspace, job):
         return db.execute(text("SELECT c.contact_id,c.student_id,c.status,c.branch_id,c.external_id AS id "
@@ -658,7 +660,7 @@ class FamilyCacheWorker:
             "-'error'-'checkpoint'-'paused'-'cause'-'http_status'-'failed_at'-'stage'-'page')"
             "||jsonb_build_object('available_at',now(),'attempts',0,'rebased_at',CAST(clock_timestamp() AS text)) "
             "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:owner"),
-            {"w": workspace, "id": job["id"], "owner": self.owner})
+            {"w": workspace, "id": job["id"], "owner": job["lease_owner"]})
         if not manual:
             return
         from center_messenger.crm_api import DirectoryReader
@@ -688,13 +690,13 @@ class FamilyCacheWorker:
             with self.accounts.transaction(workspace_id=workspace) as db:
                 owned = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id "
                     "AND state='pending' AND payload->>'lease_owner'=:owner FOR UPDATE"),
-                    {"w": workspace, "id": job["id"], "owner": self.owner}).scalar_one_or_none()
+                    {"w": workspace, "id": job["id"], "owner": job["lease_owner"]}).scalar_one_or_none()
                 if owned is None:
                     return
                 if card_jobs.blocked(db, workspace, job):
                     db.execute(text("UPDATE outbox_events SET payload=payload-'lease_owner'-'lease_until' "
                         "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:o"),
-                        {"w": workspace, "id": job["id"], "o": self.owner})
+                        {"w": workspace, "id": job["id"], "o": job["lease_owner"]})
                     return
                 # Explicit opening can promote a queued automatic request,
                 # including after the last pending message has been answered.
@@ -708,7 +710,8 @@ class FamilyCacheWorker:
                            card_preference.is_pending(db, workspace, snapshot, [UUID(job["contact"])]) if snapshot else False)
                 if (not settings or not settings["secret_ciphertext"] or
                     str(settings["connection_id"]) != job["connection"] or settings["version"] != job["version"] or
-                    not source or not (job.get("manual") or pending)):
+                    not source or not (job.get("manual") or (pending or (policy["preload_active_cards"] and source["status"] == "client"))
+                    and (not policy["automatic_clients_only"] or source["status"] == "client"))):
                     self.requeue_current(db, workspace, job, owned)
                     return
                 settings, source = dict(settings), dict(source)
@@ -745,7 +748,8 @@ class FamilyCacheWorker:
             started_at = datetime.fromisoformat(checkpoint["started_at"])
             with self.connections._host_gate(settings["origin"]) as gate:
                 credentials = self.connections.vault.open(workspace, settings["connection_id"], settings["secret_ciphertext"])
-                client = self.connections.client_factory(settings["origin"], settings["api_email"], credentials, gate)
+                client = self.connections.client_factory(settings["origin"], settings["api_email"], credentials,
+                    card_queue.request_gate(self.accounts, workspace, policy, job, gate))
                 client = _TariffCache(client, self.tariffs, (str(workspace), job["connection"], job["version"]))
                 client = paged = self.checkpoint_client(client, workspace, job, checkpoint, settings, credentials,
                                                         limit=policy["requests_per_turn"])
@@ -765,7 +769,7 @@ class FamilyCacheWorker:
                     published = DirectoryReader._published(db, workspace)
                     own = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id AND "
                         "state='pending' AND payload->>'lease_owner'=:owner AND (payload->>'lease_until')::timestamptz>now() "
-                        "FOR UPDATE"), {"w": workspace, "id": job["id"], "owner": self.owner}).scalar_one_or_none()
+                        "FOR UPDATE"), {"w": workspace, "id": job["id"], "owner": job["lease_owner"]}).scalar_one_or_none()
                     if own is None:
                         return
                     if (not current or not current["secret_ciphertext"] or current["version"] != settings["version"] or
@@ -823,6 +827,8 @@ class FamilyCacheWorker:
                     card_jobs.clear_verified_denial(db, workspace, job)
                     card_preference.refresh_for_contact(db, workspace, snapshot, job['contact'])
                     self.finish(db, workspace, job)
+        except card_queue.Deferred as error:
+            self.retry(workspace, job, error=error, paged=paged)
         except card_jobs.PageYield:
             self.yield_job(workspace, job)
         except card_jobs.LostCardLease:
@@ -840,23 +846,53 @@ class FamilyCacheWorker:
         # A force refresh requested during IO must survive this worker's finish.
         now = datetime.now(UTC)
         started = _parse_time(job.get("started_at")) or now
-        db.execute(text("UPDATE outbox_events SET state=CASE WHEN (payload->>'force_at') IS DISTINCT FROM CAST(:force AS text) "
+        finished = db.execute(text("UPDATE outbox_events SET state=CASE WHEN (payload->>'force_at') IS DISTINCT FROM CAST(:force AS text) "
             "THEN 'pending' ELSE 'published' END,payload=(payload-'lease_owner'-'lease_until'-'error'-'checkpoint' "
             "-'paused'-'cause'-'http_status'-'failed_at'-'stage'-'page')||jsonb_build_object('available_at',now(),'attempts',0) "
             "||jsonb_build_object('finished_at',CAST(:finished AS text),'duration_ms',CAST(:duration AS integer)) "
             "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:owner "
             "AND (payload->>'lease_until')::timestamptz>now()"),
-            {"w": workspace, "id": job["id"], "owner": self.owner, "force": job.get("force_at"),
+            {"w": workspace, "id": job["id"], "owner": job["lease_owner"], "force": job.get("force_at"),
              "finished": now.isoformat(), "duration": max(0, int((now - started).total_seconds() * 1000))})
+
+        if finished.rowcount:
+            self.publish_snapshots(db, workspace, job)
+
+    def publish_snapshots(self, db, workspace, job):
+        if db.execute(text("SELECT EXISTS(SELECT 1 FROM outbox_events WHERE workspace_id=:w "
+            "AND state='pending' AND topic=ANY(CAST(:topics AS text[])) "
+            "AND payload->>'contact'=:contact AND payload->>'connection'=:conn AND payload->>'version'=:version)"),
+            {'w':workspace, 'topics':list(TOPICS), 'contact':job['contact'], 'conn':job['connection'],
+             'version':str(job['version'])}).scalar_one():
+            return
+        from center_messenger.crm_api import DirectoryReader
+        reader = DirectoryReader(self.connections)
+        # Plain directory cards and verified multi-contact chat families each
+        # have their own exact Customer ID/student/branch scope.
+        targets = [(UUID(job['contact']), None)]
+        rows = db.execute(text("SELECT c.contact_id,c.id FROM conversations c JOIN connections cn "
+            "ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id WHERE c.workspace_id=:w "
+            "AND c.kind='direct' AND cn.kind IN ('alfa_max_browser','max_bot') AND (c.contact_id=CAST(:contact AS uuid) "
+            "OR c.contact_id IN (SELECT (payload->>'source')::uuid FROM outbox_events WHERE workspace_id=:w "
+            "AND topic='crm.card.preference' AND state='published' AND payload->'contacts' ? CAST(:contact AS text))) LIMIT 100"),
+            {'w': workspace, 'contact': job['contact']}).all()
+        targets.extend((row[0], row[1]) for row in rows)
+        for contact, conversation in targets:
+            try:
+                with db.begin_nested():
+                    reader._detail(db, workspace, contact, conversation=conversation, publish_snapshot=True)
+            except AuthError as error:
+                if error.status != 404:
+                    raise
 
     def retry(self, workspace, job, *, busy=False, error=None, paged=None):
         with self.accounts.transaction(workspace_id=workspace) as db:
             policy = card_loader_settings.get(db, workspace)
             patch, scope = card_jobs.failure(error, job.get("attempts", 0), busy=busy, policy=policy)
             code = patch["error"]
-            if busy:
+            if busy or code in {"quota_wait", "send_pending"}:
                 patch.pop("error")
-                patch["cause"] = "busy"
+                patch["cause"] = "busy" if busy else code
             patch.update(stage=paged.stage if paged else "prepare", page=paged.page if paged else None)
             patch["last_progress_at"] = datetime.now(UTC).isoformat()
             db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
@@ -864,7 +900,7 @@ class FamilyCacheWorker:
             if not settings or settings["version"] != job["version"] or str(settings["connection_id"]) != job["connection"]:
                 owned = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id "
                     "AND state='pending' AND payload->>'lease_owner'=:owner FOR UPDATE"),
-                    {"w": workspace, "id": job["id"], "owner": self.owner}).scalar_one_or_none()
+                    {"w": workspace, "id": job["id"], "owner": job["lease_owner"]}).scalar_one_or_none()
                 if owned:
                     self.requeue_current(db, workspace, job, owned)
                 return
@@ -872,27 +908,28 @@ class FamilyCacheWorker:
                 + ("-'checkpoint' " if code in {"not_found", "invalid_response"} else "") + ")||CAST(:p AS jsonb) "
                 "WHERE workspace_id=:w AND id=:id AND state='pending' AND payload->>'lease_owner'=:owner "
                 "AND (payload->>'lease_until')::timestamptz>now() RETURNING id"),
-                {"w": workspace, "id": job["id"], "owner": self.owner, "p": json.dumps(patch)}).scalar_one_or_none()
+                {"w": workspace, "id": job["id"], "owner": job["lease_owner"], "p": json.dumps(patch)}).scalar_one_or_none()
             if written:
                 card_jobs.save_block(db, workspace, job, patch, scope)
 
     def run_next(self):
         """One workspace/job; called by the shared scheduler, without a loop."""
-        pending = getattr(self, "_pending_scopes", [])
-        if not pending:
-            with self.accounts.transaction() as db:
-                pending = list(db.execute(text("SELECT workspace_id FROM max_routes UNION "
-                    "SELECT workspace_id FROM alfa_max_sync_queue ORDER BY workspace_id")).scalars())
-            self._pending_scopes = pending
-        if not pending:
-            return False
-        workspace = pending.pop(0)
-        scheduled = getattr(self, "_scheduled_scopes", {})
-        if time.monotonic() >= scheduled.get(workspace, 0):
-            self.schedule(workspace)
-            scheduled[workspace] = time.monotonic() + 10
-            self._scheduled_scopes = scheduled
-        job = self.claim(workspace)
+        with self._schedule_lock:
+            pending = getattr(self, "_pending_scopes", [])
+            if not pending:
+                with self.accounts.transaction() as db:
+                    pending = list(db.execute(text("SELECT workspace_id FROM max_routes UNION "
+                        "SELECT workspace_id FROM alfa_max_sync_queue ORDER BY workspace_id")).scalars())
+                self._pending_scopes = pending
+            if not pending:
+                return False
+            workspace = pending.pop(0)
+            scheduled = getattr(self, "_scheduled_scopes", {})
+            if time.monotonic() >= scheduled.get(workspace, 0):
+                self.schedule(workspace)
+                scheduled[workspace] = time.monotonic() + 10
+                self._scheduled_scopes = scheduled
+            job = self.claim(workspace)
         if job:
             self.process(workspace, job)
         return bool(job)

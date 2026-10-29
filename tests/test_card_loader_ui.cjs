@@ -14,6 +14,8 @@ const settings = {
   retry_max_seconds: 1800, manual_priority_seconds: 30,
   manual_interest_minutes: 10, manual_burst: 5,
   parallel_card_jobs: 1, host_request_gap_ms: 350,
+  preload_active_cards: true, automatic_clients_only: false, pause_background_on_send: true,
+  active_interval_minutes: 720, requests_per_minute: 120, manual_max_wait_seconds: 60,
 };
 
 function setup(t, handler) {
@@ -100,6 +102,10 @@ test("card loader saves typed values and preload switches", async t => {
   const form = ui.$("#card-loader-form");
   form.elements.preload_unanswered.checked = false;
   form.elements.requests_per_turn.value = "6";
+  form.elements.parallel_card_jobs.value = "2";
+  form.elements.requests_per_minute.value = "60";
+  form.elements.active_interval_minutes.value = "360";
+  form.elements.pause_background_on_send.checked = false;
   form.dispatchEvent(new ui.window.Event("submit", { bubbles: true, cancelable: true }));
   await new Promise(resolve => setImmediate(resolve));
   const [url, options] = ui.calls.at(-1);
@@ -107,5 +113,9 @@ test("card loader saves typed values and preload switches", async t => {
   assert.equal(options.method, "PUT");
   assert.equal(options.data.preload_unanswered, false);
   assert.equal(options.data.requests_per_turn, 6);
+  assert.equal(options.data.parallel_card_jobs, 2);
+  assert.equal(options.data.requests_per_minute, 60);
+  assert.equal(options.data.active_interval_minutes, 360);
+  assert.equal(options.data.pause_background_on_send, false);
   assert.match(ui.$("#card-loader-status").textContent, /сохранено/);
 });

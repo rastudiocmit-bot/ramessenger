@@ -23,6 +23,8 @@ LABELS = {
     "invalid_response": "CRM вернула неполные или неподдерживаемые данные. Сохранён предыдущий раздел.",
     "crm_unavailable": "CRM временно недоступна. Сохранены последние сведения; повтор запланирован.",
     "busy": "Подключение занято. Ожидаем свободный канал.",
+    "quota_wait": "Достигнут лимит API загрузчика. Контрольная точка сохранена; продолжим после освобождения квоты.",
+    "send_pending": "Фоновое обновление уступило отправке сообщения. Контрольная точка сохранена.",
 }
 
 
@@ -75,6 +77,9 @@ def failure(error, attempts, *, busy=False, now=None, policy=None):
         policy["retry_initial_seconds"] * 2 ** min(max(attempts-1, 0), 12)), None
     if busy:
         code, delay = "busy", policy["busy_retry_seconds"]
+    elif original in {"quota_wait", "send_pending"}:
+        code, delay = original, error.seconds
+        attempts = int(attempts) - 1
     elif status == 401 or original == "unauthorized":
         code, delay, scope = "credentials_required", None, "connection"
     elif status == 403 or original == "forbidden":

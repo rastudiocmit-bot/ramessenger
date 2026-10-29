@@ -409,8 +409,12 @@ class MessageSyncTests(unittest.TestCase):
                                {"w": self.workspace}).mappings().all()
 
     def conversation(self):
-        return self.db.execute(text("SELECT * FROM conversations WHERE workspace_id=:w "
-                                    "AND last_inbound_at IS NOT NULL"), {"w": self.workspace}).mappings().one()
+        row = self.db.execute(text("SELECT * FROM conversations WHERE workspace_id=:w "
+            "AND last_inbound_at IS NOT NULL"), {"w": self.workspace}).mappings().one_or_none()
+        if row is None:
+            row = self.db.execute(text("SELECT * FROM conversations WHERE workspace_id=:w"),
+                                  {"w": self.workspace}).mappings().one()
+        return row
 
     def checkpoint(self, conversation):
         return HandleInput(seen_checkpoint=self.reader.history(None, self.workspace, conversation)["conversation"]["seen_checkpoint"])
@@ -2073,6 +2077,7 @@ class MessageSyncTests(unittest.TestCase):
             "WHERE workspace_id=:w AND topic='crm.card.refresh'"),{'w':self.workspace})
         self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('served_at',now()-interval '16 minutes') "
             "WHERE workspace_id=:w AND topic=:t"),{'w':self.workspace,'t':group_links.TOPIC})
+        self.db.execute(text("UPDATE crm_card_loader_state SET manual_streak=5 WHERE workspace_id=:w"), {'w':self.workspace})
         self.assertEqual(worker.claim(self.workspace)['topic'],group_links.TOPIC)
 
     def test_manual_card_pipeline_shares_one_clock_and_claims_visible_sections_first(self):
@@ -2105,7 +2110,7 @@ class MessageSyncTests(unittest.TestCase):
         with patch('center_messenger.crm_api.card_preference.refresh'), \
              patch('center_messenger.crm_api.card_preference.selected',return_value=selection), \
              patch('center_messenger.crm_api.enqueue') as queued, \
-             patch.object(reader,'detail',return_value={}):
+             patch.object(reader,'_detail',return_value={}), patch.object(reader,'detail',return_value={}):
             reader.prepare(None,self.workspace,self.contact,conversation=conversation)
         self.assertEqual(queued.call_count,2)
         contexts=[call.kwargs['manual_context'] for call in queued.call_args_list]
@@ -2144,6 +2149,10 @@ class MessageSyncTests(unittest.TestCase):
         from center_messenger.alfa_service import AlfaConnections
         from center_messenger.family_cache import FamilyCacheWorker
         reader, student = self.family_balance_fixture()
+        # Older queue regressions isolate the unanswered/on-open mode. New
+        # durability cases explicitly enable the all-active background policy.
+        from center_messenger.card_loader_settings import save, CardLoaderSettings
+        save(self.db, self.workspace, CardLoaderSettings(preload_active_cards=False))
         self.db.execute(text("INSERT INTO alfa_sync_control(workspace_id,connection_id,requested_by,published_id) "
             "VALUES (:w,:c,:u,:r)"), {'w':self.workspace,'c':self.crm,'u':self.user,'r':self.run})
         vault = Mock()
@@ -2326,6 +2335,7 @@ class MessageSyncTests(unittest.TestCase):
     def test_daily_lessons_reuse_fresh_recent_window_without_fetching_future_again(self):
         from center_messenger.family_cache import enqueue,HISTORY
         _,worker,today,lesson=self.seed_lesson_cadence()
+        self.db.execute(text("UPDATE crm_card_loader_settings SET history_interval_minutes=1440 WHERE workspace_id=:w"), {"w":self.workspace})
         before=dict(self.family_facts())
         enqueue(self.db,self.workspace,self.snapshot,topics=(HISTORY,))
         client=SimpleNamespace(call=Mock(return_value={'items':[],'total':0,'page':0}))
@@ -2342,6 +2352,7 @@ class MessageSyncTests(unittest.TestCase):
     def test_daily_lessons_fetch_future_when_recent_coverage_is_stale(self):
         from center_messenger.family_cache import enqueue,HISTORY
         _,worker,today,lesson=self.seed_lesson_cadence(recent_minutes=31)
+        self.db.execute(text("UPDATE crm_card_loader_settings SET history_interval_minutes=1440 WHERE workspace_id=:w"), {"w":self.workspace})
         enqueue(self.db,self.workspace,self.snapshot,topics=(HISTORY,))
         client=SimpleNamespace(call=Mock(return_value={'items':[],'total':0,'page':0}))
         worker.connections.client_factory.return_value=client
@@ -2745,6 +2756,7 @@ class MessageSyncTests(unittest.TestCase):
 
     def test_financial_refresh_preserves_lesson_proof_and_the_yearly_check_clock(self):
         reader,worker,_=self.family_worker_fixture()
+        self.db.execute(text("UPDATE crm_card_loader_settings SET history_interval_minutes=1440 WHERE workspace_id=:w"), {"w":self.workspace})
         self.project(self.row())
         lesson={'id':10,'date':'2026-03-01','time':'12:00','branch_id':2,'subject_id':11,'lesson_type_id':1,
                 'customer_id':7,'customer_verified':True,'subscription_id':40,'group_ids':[5],'status':3}
@@ -4038,6 +4050,7 @@ class MessageSyncTests(unittest.TestCase):
         self.assertNotIn((2, "sent", 1), self.service.browser.read_histories.call_args.args[2])
 
     def prepare_card_monitor(self):
+        self.snapshot.update(version=1)
         student = uuid4()
         self.db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES(:w,:s,'Child')"),
                         {"w": self.workspace, "s": student})

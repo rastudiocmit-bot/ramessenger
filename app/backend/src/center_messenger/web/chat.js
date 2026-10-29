@@ -1513,8 +1513,11 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
         : phase === "retry_wait" ? status
         : phase === "error" ? `Ошибка обновления · ${issue === "credentials_required" ? "проверьте ключ CRM" : issue === "access_denied" ? "ограничен доступ CRM" : issue === "not_found" ? "клиент не найден в CRM" : "Повторить"}`
         : info.updated_at ? `Карточка обновлена ${date(info.updated_at)}` : "Показаны данные справочника";
-      familySync(headline,
-        [updated, lessons, history, groups, status, waiting?.error_message, info.error].filter(Boolean).join(" · "));
+      const savedAt = info.snapshot?.updated_at || info.snapshot?.published_at;
+      const saved = savedAt ? `Сохранённая карточка от ${date(savedAt)}` : "";
+      const delayed = info.wait_exceeded && phase !== "ready" ? `Ожидание дольше ${info.max_wait_seconds || 60} с` : "";
+      familySync([saved, saved && phase === "ready" ? "" : headline, delayed].filter(Boolean).join(" · "),
+        [saved, saved ? "Состояние следующей версии:" : "", updated, lessons, history, groups, status, delayed, waiting?.error_message, info.error].filter(Boolean).join(" · "));
       familyRefreshState();
     }
     if (!family.cache) familyRefreshState();
