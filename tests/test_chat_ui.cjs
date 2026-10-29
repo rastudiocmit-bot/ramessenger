@@ -1313,7 +1313,7 @@ test('a partial bootstrap displays its dialogs before retrying the failed first 
   assert.equal(ui.$('#chat-error').textContent,'');
 });
 
-test('a failed first history read stays visible through list success and clears only on history recovery',async t=>{
+test('a temporary first history failure retries quietly through list success',async t=>{
   let clock=1000,reads=0;
   const ui=setup(t,url=>{
     if(url.pathname.endsWith('/messages')){
@@ -1322,9 +1322,9 @@ test('a failed first history read stays visible through list success and clears 
     }
   });
   ui.window.Date.now=()=>clock;
-  await ui.app.enter();assert.equal(ui.$('#chat-error').textContent,'Service unavailable');
+  await ui.app.enter();assert.equal(ui.$('#chat-error').textContent,'');
   await ui.poll();assert.equal(reads,1);
-  assert.equal(ui.$('#chat-error').textContent,'Service unavailable');
+  assert.equal(ui.$('#chat-error').textContent,'');
   clock+=9000;await ui.poll();assert.deepEqual(ui.ids(),[identifier(1)]);
   assert.equal(ui.$('#chat-error').textContent,'');
 });
@@ -1548,7 +1548,7 @@ test("cancelled outgoing message shows a warning rather than a success check", a
   assert.ok(status);
   assert.ok(status.querySelector('[data-icon="warn"]'));
   assert.equal(status.querySelector('[data-icon="check"]'), null);
-  assert.match(ui.$("#chat-history .chat-message-error").textContent, /Отправка отменена/);
+  assert.equal(ui.$("#chat-history .chat-message-error").textContent, "Сообщение не отправлено");
 });
 
 test("a missing or ambiguous MAX recipient cannot be resent into another failed bubble", async t => {
@@ -1560,7 +1560,7 @@ test("a missing or ambiguous MAX recipient cannot be resent into another failed 
     await ui.app.enter(); await flush();
     assert.equal(ui.$("#chat-history .chat-retry-send"), null);
     assert.equal(ui.$("#chat-history .chat-retry-edit"), null);
-    assert.match(ui.$("#chat-history .chat-message-error").textContent, /Проверьте адресата/);
+    assert.equal(ui.$("#chat-history .chat-message-error").textContent, "Сообщение не отправлено");
     assert.equal(ui.calls.filter(url => url.pathname.endsWith("/messages") && url.searchParams.has("request_id")).length, 0);
   }
 });
@@ -1589,4 +1589,63 @@ test('identity refresh does not repeatedly reopen an unrelated failed family req
   dockFamily(ui);await ui.app.enter();ui.$('#chat-details').click();await flush();
   assert.equal(reads,1);await ui.poll();await flush();await ui.poll();await flush();
   assert.equal(reads,1);
+});
+
+test('browser waits and uncertain sends have only clock icons and no technical notices', async t=>{
+  const states=['queued','sending','unknown','accepted'];
+  const ui=setup(t,url=>url.pathname.endsWith('/messages')?history(identifier(1),states.map((state,i)=>message(400+i,{
+    direction:'out',actor_type:'human',state,error_code:'browser_busy',error:'Браузер занят. Результат отправки неизвестен.'
+  })),{conversation:{...conversation(1),history_error:'Техническая ошибка CRM'}}):undefined);
+  ui.window.CenterIcon=name=>{const span=ui.window.document.createElement('span');span.dataset.icon=name;return span;};
+  await ui.app.enter();
+  assert.equal(ui.$('#chat-history .chat-message-error'),null);
+  assert.doesNotMatch(ui.$('#chat-history').textContent,/Браузер занят|Результат отправки неизвестен/);
+  assert.doesNotMatch(ui.$('#chat-history-note').textContent,/Техническая ошибка/);
+  assert.equal(ui.$('#chat-send-hint').hidden,true);
+  for(const state of states.slice(0,3))assert.ok(ui.$(`.state-${state} [data-icon="clock"]`));
+  assert.ok(ui.$('.state-accepted [data-icon="check"]'));
+});
+
+test('an unknown send becomes confirmed silently from source history without any send POST',async t=>{
+  let confirmed=false,posts=0;
+  const ui=setup(t,(url,args)=>{
+    if(!url.pathname.endsWith('/messages'))return;
+    if(args?.method==='POST'){posts++;return {};}
+    return history(identifier(1),[message(420,{direction:'out',actor_type:'human',text:'Ответ',state:confirmed?'accepted':'unknown',version:confirmed?2:1,error:confirmed?null:'Проверьте исходящие'})]);
+  });
+  await ui.app.enter();assert.ok(ui.$('.state-unknown'));assert.equal(ui.$('.chat-retry-send'),null);
+  confirmed=true;await ui.poll();assert.ok(ui.$('.state-accepted'));
+  assert.equal(ui.$('.chat-message-error'),null);assert.equal(ui.$('#chat-error').textContent,'');assert.equal(posts,0);
+});
+
+test('lost intake is automatically recovered with the same UUID without touching a new draft',async t=>{
+  const posts=[];let stored=null;
+  const ui=setup(t,(url,args)=>{
+    if(!url.pathname.endsWith('/messages'))return;
+    if(args?.method==='POST'){
+      posts.push(args.data);
+      if(posts.length===1)throw Object.assign(new Error('Сервис перезапускается'),{status:503});
+      stored=message(430,{direction:'out',actor_type:'human',state:'queued',request_id:args.data.request_id,text:args.data.text});
+      return {state:'queued'};
+    }
+    return history(identifier(1),stored?[stored]:[]);
+  });
+  await ui.app.enter();const input=ui.$('#chat-input');input.value='Первый ответ';
+  ui.$('#chat-compose').dispatchEvent(new ui.window.Event('submit',{cancelable:true}));await flush();
+  assert.equal(ui.$('#chat-error').textContent,'');assert.equal(ui.$('#chat-send-hint').hidden,true);
+  input.value='Новый черновик';input.dispatchEvent(new ui.window.Event('input',{bubbles:true}));
+  await ui.poll();
+  assert.equal(posts.length,2);assert.equal(posts[0].request_id,posts[1].request_id);
+  assert.equal(input.value,'Новый черновик');assert.deepEqual(ui.ids(),[identifier(430)]);
+  assert.equal(ui.$('#chat-error').textContent,'');
+});
+
+test('a queued copy never hides the definite failure of an older message with identical text',async t=>{
+  const ui=setup(t,url=>url.pathname.endsWith('/messages')?history(identifier(1),[
+    message(450,{direction:'out',actor_type:'human',text:'Ответ',state:'failed',error:'CRM rejected'}),
+    message(451,{direction:'out',actor_type:'human',text:'Ответ',state:'unknown',error:'send_unknown'})]):undefined);
+  await ui.app.enter();
+  assert.equal(ui.$('.chat-message-resent'),null);
+  assert.equal(ui.$('.chat-message-error').textContent,'Сообщение не отправлено');
+  assert.equal(ui.window.document.querySelectorAll('.chat-message-error').length,1);
 });

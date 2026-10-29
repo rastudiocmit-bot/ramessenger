@@ -258,6 +258,10 @@ class Messaging:
             {"w": job["workspace_id"], "c": command["conversation_id"]},
         )
         refresh_unread(db, job["workspace_id"], command["conversation_id"])
+        if state == "unknown" and job.get("channel_kind") == "alfa_max_browser" and self.alfa_max is not None:
+            # Wake the durable source reader, retaining its per-journal backoff,
+            # cursors and active leases. An absent/ambiguous echo is never failure.
+            self.alfa_max._schedule(db, job["workspace_id"], job["connection_id"])
         return identifier
 
     def _send(self, job, lease, *, stopping=None):

@@ -445,7 +445,10 @@ class ChatReader:
             "forwarded": payload.get("forwarded", False),
             "state": "failed" if payload.get("failed") else row["send_state"] or (
                       "accepted" if row["direction"] == "out" else "received"),
-            "error": ERRORS.get(row["last_error_code"]),
+            # Only a definite terminal failure is operator-facing. Preserve the
+            # diagnostic code for the connection monitor; unknown is not failure.
+            "error": "Сообщение не отправлено" if row["direction"] == "out" and (
+                payload.get("failed") or row["send_state"] in {"failed", "cancelled"}) else None,
             "error_code": row["last_error_code"],
             "request_id": row["client_request_id"],
             "template_name": payload.get("template_name"),
