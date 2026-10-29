@@ -100,7 +100,7 @@ const { fixture } = require('./browser_fixture.cjs');
         await page.locator('#profile-connections').click(); await page.waitForSelector('#channel-info-dialog .split');
         await page.locator('[data-close="channel-info-dialog"]').click();
         assert.ok(!data.calls.some(c => c.path.includes('/integrations/')), 'Staff must not use admin connector endpoints');
-        assert.equal(data.mutations.length, 0);
+        assert.equal(data.mutations.filter(c=>!c.path.endsWith('/notification-preferences')).length, 0);
       }
       assert.deepEqual(data.errors, []); assert.deepEqual(data.unexpected, []);
       checked.push({ role, requests: data.calls.length, mutations: data.mutations.length }); await page.close();

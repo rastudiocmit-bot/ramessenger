@@ -55,8 +55,9 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
   }
   const plural = (n, one, few, many) => { const a = Math.abs(n) % 100, b = a % 10; return a > 10 && a < 20 ? many : b === 1 ? one : b >= 2 && b <= 4 ? few : many; };
-  const store = { get(key) { try { return localStorage.getItem(key); } catch (_) { return null; } },
-    set(key, value) { try { localStorage.setItem(key, value); } catch (_) { /* Private mode. */ } } };
+  const reminderScope = key => `cm:tasks:${state.user?.id}:${state.workspace?.id}:${key}`;
+  const store = { get(key) { try { return localStorage.getItem(reminderScope(key)); } catch (_) { return null; } },
+    set(key, value) { try { localStorage.setItem(reminderScope(key), value); } catch (_) { /* Private mode. */ } } };
 
   // ── data ─────────────────────────────────────────────────────────────────
   async function context(force = false) {
@@ -78,7 +79,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
         if (ctxEpoch !== epoch) await context(true);
         const result = await api(`${base()}/tasks/summary`, { timeoutMs: 15000, track: true });
         if (epoch !== state.epoch) return null;
-        summary = result; paintBadge(); paintRows(); remind();
+        summary = result; paintBadge(); paintRows();
+        notices?.reconcileTasks?.(result.upcoming || [], {complete:(result.upcoming || []).length < 50}); remind();
         if (convId && result.conversations?.[convId]?.count !== convTasks.filter(t => t.status === "open").length) loadConversation(convId);
         return result;
       } catch (error) { if (error.name !== "AbortError" && error.status !== 403) console.warn("tasks summary", error.message); return null; }
@@ -622,7 +624,8 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   async function action(task, verb, title, data) {
     try {
       const result = await api(`${base()}/tasks/${task.id}/${verb}`, { method: "POST", data: data || {} });
-      notices?.resolve(`task:due:${task.id}`);
+      notices?.resolve(`task:reminder:${task.id}`, "Задача выполнена или перенесена");
+      notices?.resolve(`task:ask:${task.id}`, "Действие по задаче выполнено");
       if (title) notices?.notify({ type: "success", title, text: result.title, key: `task:${verb}:${task.id}`, always: true, count: false });
       await changed(); return result;
     } catch (error) { if (error.name !== "AbortError") toast(error.message, true); return null; }
@@ -710,6 +713,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   const remindedKey = task => `cm:task-reminded:${task.id}@${task.due_at}`;
   function remind() {
     if (!summary || !ctx || ctx.personal?.reminders === false) return;
+    if (!summary.overdue) notices?.resolve("task:due:many", "Просроченных задач больше нет");
     const now = Date.now(), due = (summary.upcoming || []).filter(task => new Date(task.due_at).getTime() <= now && !store.get(remindedKey(task)));
     if (due.length > 3) {
       for (const task of due) store.set(remindedKey(task), "1");
@@ -720,7 +724,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       const late = Math.round((now - new Date(task.due_at).getTime()) / 60000);
       notices?.notify({ type: "warning", strong: true, title: `Пора: ${task.title}`,
         text: [task.client_label, `срок ${clock(task.due_at)}` + (late >= 5 ? `, просрочено на ${late < 60 ? late + " мин" : Math.round(late / 60) + " ч"}` : "")].filter(Boolean).join(" · "),
-        key: `task:due:${task.id}`, always: true, sticky: true, count: false, glyph: "bell", actions: [
+        key: `task:reminder:${task.id}`, revision:`due:${task.due_at}`, always: true, sticky: true, count: false, glyph: "bell", actions: [
           { label: "Выполнено", run: () => complete(task) },
           { label: "Через 1 ч", run: () => action(task, "snooze", "Задача отложена на час", { due_at: snoozeTarget("hour") }) },
           { label: "Открыть", keep: true, run: () => task.conversation_id ? openChat(task) : openSheet({ task }) },
@@ -732,7 +736,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       if (left <= 0 || left > 15 || store.get(key) || store.get(remindedKey(task))) continue;
       store.set(key, "1");
       notices?.notify({ type: "info", glyph: "bell", title: `Скоро: ${task.title}`, text: [task.client_label, `срок ${clock(task.due_at)}, осталось ${left} мин`].filter(Boolean).join(" · "),
-        key: `task:soon:${task.id}`, always: true, count: false, actions: [{ label: "Открыть", run: () => task.conversation_id ? openChat(task) : openSheet({ task }) }] });
+        key: `task:reminder:${task.id}`, revision:`soon:${task.due_at}`, always: true, count: false, actions: [{ label: "Открыть", run: () => task.conversation_id ? openChat(task) : openSheet({ task }) }] });
     }
     digest(now);
   }
@@ -835,7 +839,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     if (!fresh.length || !first || !replySent || Date.now() - replySent > 30000 || asked.has(first.id) || readOnly()) return;
     replySent = 0; asked.add(first.id);
     notices?.notify({ type: "info", glyph: "task", title: "Ответили клиенту. Задача выполнена?", text: first.title, key: `task:ask:${first.id}`,
-      always: true, sticky: true, count: false, ttl: 10000, actions: [{ label: "Да, выполнена", run: () => complete(first, { ask: false }) }, { label: "Нет", run: () => {} }] });
+      always: true, sticky: true, count: false, ttl: 10000, actions: [{ label: "Да, выполнена", run: () => complete(first, { ask: false }) }, { label: "Нет", run: () => notices?.resolve(`task:ask:${first.id}`, "Вы оставили задачу открытой") }] });
   }
   new MutationObserver(() => { if (convId) watchReplies(); }).observe(history, { childList: true });
 
@@ -931,6 +935,14 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     dialog.showModal(); placeSheet(dialog);
   }
   const settingsDialog = $("#task-settings-dialog");
+  document.addEventListener("cm:task-reminders-change", event => {
+    if (event.detail?.epoch !== state.epoch) return;
+    if (ctx?.personal) ctx.personal.reminders = event.detail.enabled;
+    if (settingsDialog?.open) settingsDialog.querySelector('[name="reminders"]').checked = event.detail.enabled;
+  });
+  document.addEventListener("cm:notification-preferences", event => {
+    if (event.detail?.epoch === state.epoch && ctx?.personal) ctx.personal.reminders = event.detail.task_reminders;
+  });
   settingsDialog?.querySelector("form").addEventListener("submit", async event => {
     event.preventDefault();
     const form = event.target, error = settingsDialog.querySelector(".task-settings-error"), save = form.querySelector('[type="submit"]');
@@ -947,6 +959,7 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
           work_days: days, default_due: form.elements.default_due.value, visibility: form.elements.visibility.value, alfa_copy: form.elements.alfa_copy.checked } });
       }
       await context(true); settingsDialog.close();
+      document.dispatchEvent(new CustomEvent("cm:task-reminders-saved", {detail:{epoch:state.epoch}}));
       notices?.notify({ type: "success", title: "Настройки задач сохранены", key: "task:settings", count: false });
       if (state.pane === "tasks") loadLists();
     } catch (failure) { if (failure.name !== "AbortError") { error.textContent = failure.message; error.hidden = false; } }

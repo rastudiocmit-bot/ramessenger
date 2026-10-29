@@ -31,6 +31,7 @@ async function longPress(page, selector) {
       await page.goto('https://cabinet.example.test/?view=messages');
       await page.locator('.chat-select').first().tap();
       await page.waitForSelector('#chat-history .chat-bubble.msg[data-id="m1"]');
+      await page.evaluate(() => document.fonts.ready);
       await settle(page);
       const messageBeforeMenu = await page.locator('#chat-history .chat-bubble.msg[data-id="m1"]').boundingBox();
       const scrollBeforeMenu = await page.locator('#chat-stream').evaluate(node => node.scrollTop);
@@ -39,7 +40,7 @@ async function longPress(page, selector) {
       const liftedMessage = await page.locator('.chat-bubble.task-lifted').boundingBox();
       const scrollAfterMenu = await page.locator('#chat-stream').evaluate(node => node.scrollTop);
       assert.ok(Math.abs((liftedMessage.y + liftedMessage.height) - (messageBeforeMenu.y + messageBeforeMenu.height)) <= 1,
-        'long press keeps the message bottom edge fixed');
+        'long press keeps the message bottom edge fixed: '+JSON.stringify({messageBeforeMenu,liftedMessage,scrollBeforeMenu,scrollAfterMenu}));
       assert.equal(scrollAfterMenu, scrollBeforeMenu, 'long press does not move the chat');
       assert.equal(await page.evaluate(() => document.documentElement.classList.contains('voice-holding')), false, 'a long press on a message does not record');
       assert.equal(await page.locator('#voice-hold:not([hidden])').count(), 0, 'no voice layer over the menu');
@@ -94,7 +95,9 @@ async function longPress(page, selector) {
       assert.match(await page.locator('#pane-tasks .task-group-title').first().innerText(), /(Сегодня|Завтра) · 1/); // «через 1 ч» late in the evening is tomorrow
       await settle(page); await save(page, 'tasks-section');
       await page.locator('#pane-tasks .task-check').first().tap();
-      await page.waitForSelector('.notice-capsule:not([hidden]) .notice-title:has-text("Задача выполнена")');
+      await page.locator('#notification-bell').tap();
+      await page.waitForSelector('.notification-row strong:has-text("Задача выполнена")');
+      await page.getByRole('button',{name:'Закрыть уведомления',exact:true}).tap();
       assert.ok(data.mutations.some(m => m.path.endsWith('/complete')));
       await page.waitForSelector('#pane-tasks .task-empty');
       await settle(page); await save(page, 'tasks-done');
@@ -248,17 +251,20 @@ async function longPress(page, selector) {
         await page.waitForSelector('#voice-hold[data-phase="task"]');
         await save(page, 'tasks-voice-target');
         await touch('touchEnd');
-        await page.waitForSelector('.notice-capsule:not([hidden]) .notice-title:has-text("Задача создана")');
+        await page.locator('#notification-bell').tap();
+        await page.waitForSelector('.notification-row strong:has-text("Задача создана")');
         assert.equal(data.tasks.voice.length, 1); assert.equal(data.tasks.voice[0].conversation_id, 'client-0'); assert.equal(data.tasks.voice[0].create, true);
         assert.equal(await page.locator('#chat-input').inputValue(), '', 'the phrase never lands in the client draft');
-        assert.equal(await page.locator('.notice-capsule .notice-act').count(), 2);
+        assert.equal(await page.locator('.notification-row').filter({hasText:'Задача создана'}).locator('.notification-row-actions button').count(), 2);
+        await page.getByRole('button',{name:'Закрыть уведомления',exact:true}).tap();
         await page.waitForSelector('#task-strip:not([hidden])');
         await page.waitForTimeout(400); await save(page, 'tasks-voice-created');
         // Answer the client: the capsule asks whether the task is done.
         await page.locator('#chat-input').fill('Записали вас на завтра, ждём!');
         await page.locator('#chat-send').tap();
-        await page.waitForSelector('.notice-capsule:not([hidden]) .notice-title:has-text("Задача выполнена?")');
-        await page.locator('.notice-capsule .notice-act', { hasText: 'Да, выполнена' }).tap();
+        await page.locator('#notification-bell').tap();
+        await page.waitForSelector('.notification-row strong:has-text("Задача выполнена?")');
+        await page.locator('.notification-row-actions button', { hasText: 'Да, выполнена' }).tap();
         await page.waitForFunction(() => document.querySelector('#task-strip').hidden);
         assert.ok(data.mutations.some(m => m.path.endsWith('/complete')));
         assert.deepEqual(data.unexpected, []); assert.deepEqual(data.errors, []);

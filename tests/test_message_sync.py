@@ -296,6 +296,38 @@ class LoaderPlanningTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("CM_TEST_DATABASE_URL"), "isolated PostgreSQL URL required")
 class MessageSyncTests(unittest.TestCase):
+    def test_notification_preferences_are_personal_and_preserve_task_options(self):
+        from center_messenger import notification_preferences as prefs
+        user2 = uuid4()
+        self.assertFalse(prefs.read(self.db, self.workspace, self.user)['service_popups'])
+        self.db.execute(text("INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) "
+                             "VALUES(:w,:id,'tasks.preferences',:u,CAST(:p AS jsonb),'published')"),
+                        {'w':self.workspace,'id':uuid4(),'u':str(self.user),
+                         'p':json.dumps({'press':'menu','reminders':False,'digest':False})})
+        self.assertFalse(prefs.read(self.db,self.workspace,self.user)['task_reminders'])
+        prefs.save(self.db,self.workspace,self.user,{'sound_enabled':True,'volume':70,'task_reminders':True})
+        prefs.save(self.db,self.workspace,self.user,{'lead':'low'})
+        saved=prefs.read(self.db,self.workspace,self.user)
+        self.assertEqual((saved['volume'],saved['lead'],saved['sound_enabled']),(70,'low',True))
+        self.assertEqual(prefs.read(self.db,self.workspace,user2)['volume'],55)
+        task=self.db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w "
+                                  "AND topic='tasks.preferences' AND event_key=:u"),
+                             {'w':self.workspace,'u':str(self.user)}).scalar_one()
+        self.assertEqual(task,{'press':'menu','reminders':True,'digest':False})
+        state=self.db.execute(text("SELECT DISTINCT state FROM outbox_events WHERE workspace_id=:w "
+                                   "AND topic=:t"),{'w':self.workspace,'t':prefs.TOPIC}).scalar_one()
+        self.assertEqual(state,'published')
+        local_status=prefs.status(self.db,self.workspace)
+        self.assertEqual(local_status['crm']['status'],'active')
+        self.assertEqual(local_status['max']['state'],'active')
+        self.assertNotIn('session_ciphertext',str(local_status))
+        other=uuid4()
+        self.db.execute(text("INSERT INTO workspaces(id,name) VALUES(:w,'Other')"),{'w':other})
+        prefs.save(self.db,other,self.user,{'volume':10})
+        self.assertEqual(prefs.read(self.db,self.workspace,self.user)['volume'],70)
+        self.db.execute(text("UPDATE alfa_settings SET secret_ciphertext=NULL WHERE workspace_id=:w"),{'w':self.workspace})
+        self.assertEqual(prefs.status(self.db,self.workspace)['max']['state'],'reauth_required')
+
     @classmethod
     def setUpClass(cls):
         url = os.environ["CM_TEST_DATABASE_URL"].replace("postgres://", "postgresql+psycopg://", 1)
@@ -2322,8 +2354,10 @@ class MessageSyncTests(unittest.TestCase):
 
     def seed_lesson_cadence(self, *, recent_minutes=0):
         reader,worker,_=self.family_worker_fixture()
+        self.snapshot['timezone']=self.membership['timezone']
         self.project(self.row())
-        today=datetime.now(UTC).date()
+        today=self.db.execute(text("SELECT CAST(now() AT TIME ZONE timezone AS date) FROM workspaces WHERE id=:w"),
+                              {'w':self.workspace}).scalar_one()
         lesson={'id':71,'date':(today+timedelta(days=3)).isoformat(),'status':1,'branch_id':1,
             'customer_id':7,'customer_verified':True,'subject_id':1,'lesson_type_id':1}
         self.db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,settings_version,balance,lessons,"

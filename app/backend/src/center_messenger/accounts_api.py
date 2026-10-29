@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Request, Response
 
 from center_messenger.accounts import Accounts
+from center_messenger import notification_preferences
 from center_messenger.auth_security import (
     AcceptInvitationInput,
     AuthError,
@@ -163,6 +164,35 @@ def rename(workspace_id: UUID, model: WorkspaceInput, request: Request):
 @router.get("/workspaces/{workspace_id}/members")
 def members(workspace_id: UUID, request: Request):
     return {"members": service(request).members(identity(request), workspace_id)}
+
+
+@router.get("/workspaces/{workspace_id}/notification-preferences")
+def read_notification_preferences(workspace_id: UUID, request: Request):
+    accounts, actor = service(request), identity(request)
+    with accounts.transaction(actor, snapshot=True) as db:
+        accounts._workspace(db, actor, workspace_id)
+        return notification_preferences.read(db, workspace_id, actor.user_id)
+
+
+@router.get("/workspaces/{workspace_id}/notification-status")
+def read_notification_status(workspace_id: UUID, request: Request):
+    accounts, actor = service(request), identity(request)
+    with accounts.transaction(actor, snapshot=True) as db:
+        accounts._workspace(db, actor, workspace_id, manage=True)
+        result = notification_preferences.status(db, workspace_id)
+        alfa = getattr(request.app.state, "alfa", None)
+        if alfa is not None:
+            result['crm'] = (result['crm'] or {}) | {'vault_ready': alfa.vault.ready}
+        return result
+
+
+@router.patch("/workspaces/{workspace_id}/notification-preferences")
+def save_notification_preferences(workspace_id: UUID, model: notification_preferences.NotificationPreferencesInput, request: Request):
+    accounts, actor = service(request), identity(request, mutation=True)
+    data = {k: v for k, v in model.model_dump(exclude_unset=True).items() if v is not None}
+    with accounts.transaction(actor) as db:
+        accounts._workspace(db, actor, workspace_id)
+        return notification_preferences.save(db, workspace_id, actor.user_id, data)
 
 
 @router.post("/workspaces/{workspace_id}/invitations")

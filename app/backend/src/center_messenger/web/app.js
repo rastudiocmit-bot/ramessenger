@@ -11,9 +11,9 @@
     return result;
   }
   function show(element, visible = true) { element.hidden = !visible; }
-  // Light glass capsule for service notices and errors (notices.js); it can be
-  // switched off in «Настройки мессенджера», then errors stay inline as before.
-  const notices = window.CenterNotices ? window.CenterNotices({ $ }) : null;
+  const notices = window.CenterNotices ? window.CenterNotices({ $, state, api,
+    readServices: () => api(`/workspaces/${state.workspace.id}/notification-status`, {timeoutMs:10000}),
+    onServices: refreshConnectionNotices }) : null;
   // Routine successes need no notification. Errors stay in the relevant form;
   // this helper never creates a floating layer, timer or focus change.
   function feedback(message, error = false, target = null) {
@@ -21,12 +21,7 @@
     // Only a modal dialog holds the operator's attention; the family card docked beside a
     // chat (a non-modal dialog) is not where a voice or send error belongs.
     const dialog = [...document.querySelectorAll("dialog[open]")].filter(d => { try { return d.matches(":modal"); } catch (_) { return true; } }).at(-1);
-    // Errors outside an open dialog or a named form go to the notice capsule; an
-    // error inside a dialog stays next to the fields the operator is looking at.
-    if (error && !target && !dialog && notices?.notify({ type: "error", title: String(message) })) {
-      document.querySelectorAll(".action-feedback").forEach(line => line.remove());
-      return;
-    }
+    // Voice/send failures stay at their source, never in the global bell/banner.
     const pane = document.querySelector(`[data-page="${state.pane}"]:not([hidden])`);
     target ||= dialog?.querySelector("form, .family-scroll, .family-panel") || dialog
       || (state.pane === "messages" ? (!$("#chat-compose").hidden ? $("#chat-compose") : $("#chat-list-notice")) : pane)
@@ -73,6 +68,7 @@
     showLogin(message);
   }
   function clearPrivateViews() {
+    notices?.reset();
     $("#members-list").replaceChildren(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
     cabinet.reset(); cardLoader.reset();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
@@ -202,6 +198,7 @@
     show($("#no-workspaces"), !state.workspace && state.pane !== "security" && state.pane !== "profile");
     document.querySelectorAll("[data-page]").forEach(element => show(element, (Boolean(state.workspace) || ["security", "profile"].includes(state.pane)) && element.id === `pane-${state.pane}`));
     cabinet.update(sections);
+    notices?.sync();
     chat.watch();
     tasks?.sync();
     if (!state.workspace) { if (state.pane === "security") await loadSessions(); return; }
@@ -455,16 +452,29 @@
     $("#alfa-config").open = true;
     alfaButtons();
   }
-  const connectionNames = { "#alfa-connection-summary": "AlfaCRM", "#alfa-max-connection-summary": "MAX через AlfaCRM", "#alfa-history-summary": "История MAX" };
-  const connectionModes = {};
+  async function openConnectionSetup(id, field) {
+    await renderPane("connections");
+    connectionView("wizard"); syncMaster.select("connections");
+    const details = $("#" + id); details.open = true;
+    details.scrollIntoView?.({ block: "nearest" });
+    const input = field && $(field); if (input && !input.disabled && !input.closest("[hidden]")) input.focus({ preventScroll: true });
+  }
+  function refreshConnectionNotices(crm, max) {
+    if (!notices || !state.user || !state.workspace || !["owner", "admin"].includes(state.workspace.role)) return;
+    const restoring = ["checking", "reconnecting", "waiting"].includes(max?.recovery?.phase);
+    let crmIssue = null, maxIssue = null;
+    if (crm?.vault_ready === false) crmIssue = ["Не настроено хранилище подключений", "Ключи сервисов пока недоступны. Требуется настройка администратором сервера.", "vault", "Показать подробности", null];
+    else if (crm?.configured && ["unauthorized", "forbidden"].includes(crm.error_code)) crmIssue = [crm.error_code === "unauthorized" ? "Проверьте ключ AlfaCRM" : "Проверьте права в AlfaCRM", (crm.error || "Проверьте сохранённый доступ.") + " Сохранённые карточки остаются доступны.", crm.error_code, "Проверить доступ", '#alfa-form [name="email"]'];
+    if (max?.state === "otp_required") maxIssue = ["Нужен код подтверждения MAX", "Сохранённая переписка доступна. Для продолжения чтения введите код из письма AlfaCRM.", "otp", "Ввести код", "#alfa-max-otp-form input"];
+    else if (max?.configured && !restoring && ["error", "reauth_required"].includes(max.state)) maxIssue = ["Нужно восстановить вход в MAX", (max.error || "Проверьте данные входа в AlfaCRM.") + " Сохранённая переписка остаётся доступна.", max.state, "Войти заново", '#alfa-max-connect-form [name="email"]'];
+    for (const [key, issue, id] of [["connection:alfa", crmIssue, "alfa-config"], ["connection:max", maxIssue, "sync-max-config"]]) {
+      if (issue) notices.notify({category:"service",type:"warning",key,title:issue[0],text:issue[1],revision:issue[2],attention:true,action:{label:issue[3],run:()=>openConnectionSetup(id,issue[4])}});
+      else notices.resolve(key, restoring && key === "connection:max" ? "Восстанавливаем подключение автоматически" : "Подключение больше не требует вашего действия");
+    }
+  }
   function connectionSummary(selector, text, mode) {
     const label = $(selector); label.textContent = text; label.closest(".connection-tile").dataset.state = mode;
-    // A service that breaks says so once; when it is back, the notice goes away.
-    const before = connectionModes[selector]; connectionModes[selector] = mode;
     syncMaster.render();
-    if (mode === "error" && before !== "error") notices?.notify({ type: "warning", title: connectionNames[selector] || "Подключение", text,
-      key: "connection:" + selector, action: { label: "Открыть", run: () => { $("#connections-tab")?.click(); } } });
-    else if (mode === "active" && before === "error") notices?.resolve("connection:" + selector);
   }
   function connectionView(view) {
     if (!["wizard", "settings", "voice", "agents"].includes(view)) view = "wizard";
@@ -601,6 +611,7 @@
     if (workspace.id !== state.workspace?.id || loadEpoch !== state.epoch) return;
     const previousState = state.alfaMax?.state;
     state.alfaMax = payload;
+    notices?.refreshServices();
     const recovery = payload.recovery || {};
     const restoring = ["checking", "reconnecting", "waiting"].includes(recovery.phase);
     const sessionLabel = restoring ? (recovery.phase === "checking" ? "Проверяем авторизацию" : "Восстанавливаем подключение автоматически") : null;
