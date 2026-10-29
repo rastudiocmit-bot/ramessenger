@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0025_customer_phone_search"
+SCHEMA_REVISION = "0026_card_loader_settings"
 
 
 def log_database_error(logger, error, *, operation):
@@ -101,6 +101,7 @@ TENANT_TABLES = (
     "max_tombstones",
     "alfa_max_settings",
     "alfa_family_details",
+    "crm_card_loader_settings",
     "ai_settings",
     "ai_agents",
     "ai_agent_versions",

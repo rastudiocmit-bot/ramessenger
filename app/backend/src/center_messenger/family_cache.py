@@ -16,18 +16,15 @@ from sqlalchemy import text
 from center_messenger.alfa_client import AlfaError
 from center_messenger.alfa_family import FUTURE_DAYS, fetch_family_finance, fetch_family_lessons, merge_family_lessons
 from center_messenger.auth_security import AuthError
-from center_messenger import group_links, card_preference, card_jobs
+from center_messenger import group_links, card_preference, card_jobs, card_loader_settings
 
 TOPIC = "crm.card.refresh"
 LESSONS = "crm.card.lessons"
 HISTORY = "crm.card.lesson-history"
 GROUPS = group_links.TOPIC
 TOPICS = (TOPIC, LESSONS, HISTORY, GROUPS)
-INTERVAL = timedelta(minutes=30)
-HISTORY_INTERVAL = timedelta(days=1)
 LEASE = timedelta(seconds=90)
-MANUAL_INTEREST = timedelta(minutes=10)
-MANUAL_BURST = 5
+TARIFF_CACHE = timedelta(minutes=30)
 SUBSCRIPTIONS_STALE_SQL = """EXISTS(SELECT 1 FROM jsonb_array_elements(f.subscriptions) item
     WHERE NOT(item ? 'subject_ids') OR NOT(item ? 'lesson_type_ids'))"""
 LESSONS_STALE_SQL = """EXISTS(SELECT 1 FROM jsonb_array_elements(f.lessons) item
@@ -36,10 +33,10 @@ LESSONS_STALE_SQL = """EXISTS(SELECT 1 FROM jsonb_array_elements(f.lessons) item
 MAPPING_STALE_SQL = "(" + SUBSCRIPTIONS_STALE_SQL + " OR " + LESSONS_STALE_SQL + ")"
 
 SECTION_META = {
-    TOPIC: ("finance", "Баланс и абонементы", "refreshed_at", INTERVAL),
-    LESSONS: ("lessons", "Занятия", "lessons_refreshed_at", INTERVAL),
-    HISTORY: ("history", "История занятий", "lessons_full_refreshed_at", HISTORY_INTERVAL),
-    GROUPS: ("groups", "Группы", "groups_refreshed_at", timedelta(hours=6)),
+    TOPIC: ("finance", "Баланс и абонементы", "refreshed_at", "finance_interval_minutes"),
+    LESSONS: ("lessons", "Занятия", "lessons_refreshed_at", "lessons_interval_minutes"),
+    HISTORY: ("history", "История занятий", "lessons_full_refreshed_at", "history_interval_minutes"),
+    GROUPS: ("groups", "Группы", "groups_refreshed_at", "groups_interval_minutes"),
 }
 
 
@@ -59,15 +56,16 @@ def _active_lease(job, now):
     return bool(job.get("lease_owner") and lease and lease > now)
 
 
-def _manual_fields(contact, *, source_contact=None, conversation=None, inherited=None):
+def _manual_fields(contact, *, source_contact=None, conversation=None, inherited=None, policy=None):
     if contact is None:
         return {"manual": False, "requested_at": None, "manual_until": None,
                 "source_contact": None, "conversation": None,
                 "priority_boost": False, "watchdog_at": None}
     now = datetime.now(UTC)
     inherited = inherited or {}
+    policy = policy or card_loader_settings.DEFAULTS
     return {"manual": True, "requested_at": inherited.get("requested_at") or now.isoformat(),
-            "manual_until": inherited.get("manual_until") or (now + MANUAL_INTEREST).isoformat(),
+            "manual_until": inherited.get("manual_until") or (now + timedelta(minutes=policy["manual_interest_minutes"])).isoformat(),
             "source_contact": str(source_contact or inherited.get("source_contact") or contact),
             "conversation": str(conversation or inherited.get("conversation"))
                 if conversation or inherited.get("conversation") else None,
@@ -85,26 +83,27 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS
     count = 0
     # One operator action owns one clock across every section. Separate clocks
     # let the last inserted yearly-history job outrank the balance shown first.
+    policy = card_loader_settings.get(db, workspace)
     manual = _manual_fields(contact, source_contact=source_contact, conversation=conversation,
-                            inherited=manual_context)
+                            inherited=manual_context, policy=policy)
     for topic, column, interval, stale in (
-        (TOPIC, "refreshed_at", "30 minutes", SUBSCRIPTIONS_STALE_SQL),
-        (LESSONS, "lessons_refreshed_at", "30 minutes", "false"),
-        (HISTORY, "lessons_full_refreshed_at", "1 day", LESSONS_STALE_SQL),
+        (TOPIC, "refreshed_at", policy["finance_interval_minutes"], SUBSCRIPTIONS_STALE_SQL),
+        (LESSONS, "lessons_refreshed_at", policy["lessons_interval_minutes"], "false"),
+        (HISTORY, "lessons_full_refreshed_at", policy["history_interval_minutes"], LESSONS_STALE_SQL),
     ):
         if topic not in topics:
             continue
         count += _enqueue(db, workspace, snapshot, contact=contact, force=force,
                          topic=topic, column=column, interval=interval, stale=stale,
-                         manual=manual)
+                         manual=manual, preload=policy["preload_unanswered"])
     if GROUPS in topics:
         count += group_links.enqueue(db, workspace, snapshot, contact=contact, force=force,
                                     source_contact=source_contact, conversation=conversation,
-                                    manual_context=manual)
+                                    manual_context=manual, policy=policy)
     return count
 
 
-def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale, manual):
+def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale, manual, preload):
     # SQL fragments below come only from the fixed policy in enqueue().
     return db.execute(text("WITH pending_families AS MATERIALIZED (" + card_preference.pending_sql(snapshot) + ") " + f"""
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
@@ -113,7 +112,7 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
           'customer',c.external_id::text,'contact',c.contact_id::text,'student',c.student_id::text,
           'version',:version,'manual',:manual,'requested_at',CAST(:requested_at AS text),
           'manual_until',CAST(:manual_until AS text),'source_contact',CAST(:source_contact AS text),
-          'conversation',CAST(:conversation AS text),'due_at',coalesce(f.{column}+interval '{interval}',now()),
+          'conversation',CAST(:conversation AS text),'due_at',coalesce(f.{column}+make_interval(mins=>:interval),now()),
           'priority_boost',:priority_boost,'watchdog_at',CAST(:watchdog_at AS text),
           'force_at',CASE WHEN :force THEN CAST(clock_timestamp() AS text) ELSE NULL END,
           'available_at',now(),'attempts',0),'pending'
@@ -123,9 +122,9 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
         AND f.branch_id=c.branch_id AND f.customer_id=c.external_id AND f.settings_version=:version
       WHERE c.workspace_id=:w AND c.run_id=:run AND c.contact_id IS NOT NULL AND c.student_id IS NOT NULL
         AND (CAST(:contact AS uuid) IS NULL OR c.contact_id=CAST(:contact AS uuid))
-        AND (:manual OR c.contact_id IN (SELECT contact_id FROM pending_families))
+        AND (:manual OR (:preload AND c.contact_id IN (SELECT contact_id FROM pending_families)))
         AND (:finance OR f.customer_id IS NOT NULL)
-        AND (:force OR f.{column} IS NULL OR f.{column}<=now()-interval '{interval}' OR {stale})
+        AND (:force OR f.{column} IS NULL OR (:repeat AND f.{column}<=now()-make_interval(mins=>:interval)) OR {stale})
       ON CONFLICT (workspace_id,topic,event_key) DO UPDATE SET
         state='pending',payload=CASE WHEN outbox_events.state='pending'
           AND outbox_events.payload->>'version'=EXCLUDED.payload->>'version'
@@ -151,6 +150,7 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
       """), {"w": workspace, "topic": topic, "conn": snapshot["connection_id"],
                "run": snapshot["run"], "version": snapshot["version"],
                "contact": contact, "manual": contact is not None, "force": force,
+               "preload": preload, "interval": max(1, interval), "repeat": interval > 0,
                "finance": topic == TOPIC, **manual, **card_preference.params(snapshot)}).rowcount
 
 
@@ -158,6 +158,7 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
     contacts = list(contacts or [contact])
     sources = [card for student in cards for card in student["cards"]]
     now = datetime.now(UTC)
+    policy = card_loader_settings.get(db, workspace)
     jobs = list(db.execute(text("""
       WITH ranked AS (
         SELECT e.id,row_number() OVER (ORDER BY
@@ -202,11 +203,13 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
     mapping_pending = any(card.get("needs_mapping_refresh") for card in sources)
 
     sections = {}
-    for topic, (key, label, field, interval) in SECTION_META.items():
+    for topic, (key, label, field, interval_field) in SECTION_META.items():
+        interval_minutes = policy[interval_field]
+        interval = timedelta(minutes=interval_minutes) if interval_minutes else None
         section_jobs = [job for job in jobs if job["topic"] == topic]
         values = [_parse_time(card.get(field)) for card in sources]
         cached = [value for value in values if value]
-        fresh = [value for value in cached if value + interval > now]
+        fresh = [value for value in cached if interval is None or value + interval > now]
         leased = [job for job in section_jobs if _active_lease(job, now)]
         busy = [job for job in section_jobs if job.get("cause") == "busy"]
         errors = [job for job in section_jobs if job.get("error")]
@@ -244,6 +247,7 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
         error_job = errors[0] if errors else None
         sections[key] = {
             "label": label, "status": status, "updated_at": min(cached).isoformat() if cached else None,
+            "interval_minutes": interval_minutes, "refresh_once": interval is None,
             "finished_at": min(cached).isoformat() if cached else None,
             "requested_at": min(requested).isoformat() if requested else None,
             "started_at": min(started).isoformat() if started else None,
@@ -277,33 +281,38 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
     times = [value for value in times if value]
     ready = len(times) == len(sources) and bool(sources)
     updated = min(times) if ready else None
-    automatic = card_preference.is_pending(db, workspace, snapshot, contacts) if snapshot else db.execute(text(
+    automatic = policy["preload_unanswered"] and (card_preference.is_pending(db, workspace, snapshot, contacts) if snapshot else db.execute(text(
         "SELECT EXISTS(SELECT 1 FROM conversations WHERE workspace_id=:w AND contact_id=:c AND needs_reply AND kind='direct')"),
-        {"w": workspace, "c": contact}).scalar_one()
+        {"w": workspace, "c": contact}).scalar_one())
     positions = [section["queue_position"] for section in sections.values() if section["queue_position"]]
+    finance_interval = timedelta(minutes=policy["finance_interval_minutes"])
+    lessons_interval = timedelta(minutes=policy["lessons_interval_minutes"])
+    groups_interval = timedelta(minutes=policy["groups_interval_minutes"])
     return {"auto_refresh": bool(automatic), "ready": ready, "complete": complete, "incomplete": not complete,
             "state": state, "loading": loading, "refreshing": loading, "busy": any(job.get("cause") == "busy" for job in jobs),
             "pending": bool(jobs), "queued": sum(not _active_lease(job, now) for job in jobs),
             "queue_position": min(positions) if positions else None, "sections": sections,
             "updated_at": updated.isoformat() if updated else None,
             "paused": any(job.get("paused") for job in jobs), "failures": failures,
-            "next_refresh_at": (updated + INTERVAL).isoformat() if updated else None,
-            "interval_minutes": 30, "sources": len(sources), "cached_sources": len(times),
+            "next_refresh_at": (updated + finance_interval).isoformat() if updated else None,
+            "interval_minutes": policy["finance_interval_minutes"], "sources": len(sources), "cached_sources": len(times),
             "mapping_pending": mapping_pending,
             "lessons_updated_at": lessons_at.isoformat() if lessons_at else None,
             "lessons_history_updated_at": history_at.isoformat() if history_at else None,
-            "lessons_history_interval_hours": 24,
+            "lessons_interval_minutes": policy["lessons_interval_minutes"],
+            "lessons_history_interval_hours": policy["history_interval_minutes"] / 60,
+            "lessons_history_refresh_once": policy["history_interval_minutes"] == 0,
             "groups_updated_at": groups_at.isoformat() if groups_at else None,
-            "groups_interval_hours": 6,
+            "groups_interval_hours": policy["groups_interval_minutes"] / 60,
             "groups_refreshing": any(job["topic"] == GROUPS and _active_lease(job, now) for job in runnable),
             "groups_pending": any(job["topic"] == GROUPS for job in jobs),
             "lessons_refreshing": any(job["topic"] == LESSONS and _active_lease(job, now) for job in runnable),
             "lessons_pending": any(job["topic"] == LESSONS for job in jobs),
             "lessons_history_refreshing": any(job["topic"] == HISTORY and _active_lease(job, now) for job in runnable),
             "lessons_history_pending": any(job["topic"] == HISTORY for job in jobs),
-            "overdue": not ready or mapping_pending or updated + INTERVAL <= datetime.now(UTC)
-                       or lessons_at is None or lessons_at + INTERVAL <= datetime.now(UTC)
-                       or groups_at is None or groups_at + timedelta(hours=6) <= datetime.now(UTC),
+            "overdue": not ready or mapping_pending or updated + finance_interval <= now
+                       or lessons_at is None or lessons_at + lessons_interval <= now
+                       or groups_at is None or groups_at + groups_interval <= now,
             "retry_at": min(retries, default=None),
             "error": failures[0]["text"] if failures else None}
 
@@ -345,18 +354,20 @@ def current(db, workspace, connection):
 def progress(db, workspace, connection, snapshot):
     """Count families needing an answer, without multiplying branch source cards."""
     at = datetime.now(UTC).isoformat()
+    policy = card_loader_settings.get(db, workspace)
     empty = {"configured": bool(snapshot), "total": 0, "ready": 0, "cached": 0,
              "queued": 0, "manual_queued": 0, "background_queued": 0, "loading": 0,
              "busy": 0, "stalled": 0, "oldest_wait_seconds": 0,
-             "errors": 0, "next_retry_at": None, "interval_minutes": 30, "as_of": at}
+             "errors": 0, "next_retry_at": None,
+             "interval_minutes": policy["finance_interval_minutes"], "as_of": at}
     if not snapshot or snapshot["connection_id"] != connection:
         return empty
     row = db.execute(text("""
       WITH pending_families AS MATERIALIZED (""" + card_preference.pending_sql(snapshot) + """), families AS (
         SELECT c.contact_id,
           bool_and(f.customer_id IS NOT NULL) AS cached,
-          bool_and(f.customer_id IS NOT NULL AND f.refreshed_at>now()-interval '30 minutes'
-            AND f.lessons_refreshed_at>now()-interval '30 minutes'
+          bool_and(f.customer_id IS NOT NULL AND f.refreshed_at>now()-make_interval(mins=>:finance_interval)
+            AND f.lessons_refreshed_at>now()-make_interval(mins=>:lessons_interval)
             AND NOT """ + MAPPING_STALE_SQL + """) AS ready
         FROM alfa_customers c JOIN alfa_branches b ON b.workspace_id=c.workspace_id
           AND b.connection_id=:conn AND b.external_id=c.branch_id AND b.available
@@ -382,6 +393,8 @@ def progress(db, workspace, connection, snapshot):
         (SELECT min((payload->>'available_at')::timestamptz) FROM jobs WHERE payload ? 'error') AS next_retry_at
     """), {"w": workspace, "conn": connection, "run": snapshot["run"],
              "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
+             "finance_interval": policy["finance_interval_minutes"],
+             "lessons_interval": policy["lessons_interval_minutes"],
              **card_preference.params(snapshot)}).mappings().one()
     queue = dict(db.execute(text("""
       SELECT count(*) FILTER(WHERE coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()) AS queue_depth,
@@ -392,7 +405,7 @@ def progress(db, workspace, connection, snapshot):
         count(*) FILTER(WHERE coalesce((payload->>'lease_until')::timestamptz,'epoch')>now()) AS loading,
         count(*) FILTER(WHERE payload->>'cause'='busy') AS busy,
         count(*) FILTER(WHERE (coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()
-          AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-interval '30 seconds')
+          AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-make_interval(secs=>:priority_seconds))
           OR (coalesce((payload->>'lease_until')::timestamptz,'epoch')>now()
             AND coalesce((payload->>'last_progress_at')::timestamptz,
               (payload->>'started_at')::timestamptz,created_at)<now()-interval '60 seconds')) AS stalled,
@@ -402,7 +415,8 @@ def progress(db, workspace, connection, snapshot):
         AND state='pending' AND payload->>'connection'=CAST(:conn AS text)
         AND payload->>'version'=CAST(:version AS text)
     """), {"w": workspace, "conn": connection, "version": snapshot["version"],
-             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS}).mappings().one())
+             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
+             "priority_seconds": policy["manual_priority_seconds"]}).mappings().one())
     return empty | dict(row) | queue | {"groups": group_links.progress(db, workspace, snapshot)}
 
 
@@ -421,7 +435,7 @@ class _TariffCache:
         data = self.client.call(path, body)
         if len(self.cache) >= 256:
             self.cache.clear()
-        self.cache[key] = (time.monotonic() + INTERVAL.total_seconds(), data)
+        self.cache[key] = (time.monotonic() + TARIFF_CACHE.total_seconds(), data)
         return data
 
 
@@ -450,6 +464,7 @@ class FamilyCacheWorker:
 
     def watchdog(self, db, workspace, snapshot):
         """Make an opened card recoverable when it waited without a lease."""
+        policy = card_loader_settings.get(db, workspace)
         db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object("
             "'priority_boost',true,'watchdog_at',CAST(clock_timestamp() AS text)) "
             "WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) AND state='pending' "
@@ -457,9 +472,10 @@ class FamilyCacheWorker:
             "AND coalesce((payload->>'manual')::boolean,false) "
             "AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now() "
             "AND (payload->>'available_at')::timestamptz<=now() "
-            "AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-interval '30 seconds'"),
+            "AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-make_interval(secs=>:priority_seconds)"),
             {"w": workspace, "conn": snapshot["connection_id"], "version": snapshot["version"],
-             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS})
+             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
+             "priority_seconds": policy["manual_priority_seconds"]})
 
     def reconcile_manual(self, db, workspace, snapshot):
         """Recover an incomplete open card even if an obsolete job was retired."""
@@ -532,8 +548,9 @@ class FamilyCacheWorker:
         turns = getattr(self, "_turns", {})
         preferred = quota[turns.get(workspace, 0) % len(quota)]
         manual_streaks = getattr(self, "_manual_streaks", {})
-        prefer_background = manual_streaks.get(workspace, 0) >= MANUAL_BURST
         with self.accounts.transaction(workspace_id=workspace) as db:
+            policy = card_loader_settings.get(db, workspace)
+            prefer_background = manual_streaks.get(workspace, 0) >= policy["manual_burst"]
             row = db.execute(text("SELECT e.id,e.topic,e.payload FROM outbox_events e WHERE e.workspace_id=:w "
                 "AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending' AND ("
                 "(e.payload->>'available_at')::timestamptz<=now() OR (e.payload->>'error' IN "
@@ -582,7 +599,7 @@ class FamilyCacheWorker:
                      "responses": {}, "pages": 0}
         return saved
 
-    def checkpoint_client(self, client, workspace, job, checkpoint, settings, credentials):
+    def checkpoint_client(self, client, workspace, job, checkpoint, settings, credentials, *, limit=3):
         def persist(value):
             with self.accounts.transaction(workspace_id=workspace) as db:
                 db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
@@ -595,17 +612,20 @@ class FamilyCacheWorker:
                     raise card_jobs.LostCardLease()
                 written = db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object("
                     "'checkpoint',CAST(:p AS jsonb),'stage',CAST(:stage AS text),'page',CAST(:page AS integer),"
-                    "'last_progress_at',CAST(clock_timestamp() AS text)) WHERE workspace_id=:w AND id=:id "
+                    "'last_progress_at',CAST(clock_timestamp() AS text),'lease_until',"
+                    "CAST(clock_timestamp()+make_interval(secs=>:lease_seconds) AS text)) "
+                    "WHERE workspace_id=:w AND id=:id "
                     "AND state='pending' AND payload->>'lease_owner'=:owner "
                     "AND (payload->>'lease_until')::timestamptz>now() RETURNING id"),
                     {"w": workspace, "id": job["id"], "owner": self.owner, "p": json.dumps(value),
-                     "stage": value.get("stage", "prepare"), "page": value.get("page")}).scalar_one_or_none()
+                     "stage": value.get("stage", "prepare"), "page": value.get("page"),
+                     "lease_seconds": int(LEASE.total_seconds())}).scalar_one_or_none()
                 if not written:
                     raise card_jobs.LostCardLease()
                 db.execute(text("UPDATE alfa_settings SET secret_ciphertext=:s WHERE workspace_id=:w AND version=:v"),
                     {"w": workspace, "v": job["version"],
                      "s": self.connections.vault.seal(workspace, settings["connection_id"], credentials)})
-        return card_jobs.CheckpointClient(client, checkpoint, persist)
+        return card_jobs.CheckpointClient(client, checkpoint, persist, limit=limit)
 
     def yield_job(self, workspace, job):
         with self.accounts.transaction(workspace_id=workspace) as db:
@@ -683,7 +703,9 @@ class FamilyCacheWorker:
                 source = self._source(db, workspace, job)
                 from center_messenger.crm_api import DirectoryReader
                 snapshot = DirectoryReader._published(db, workspace)
-                pending = card_preference.is_pending(db, workspace, snapshot, [UUID(job["contact"])]) if snapshot else False
+                policy = card_loader_settings.get(db, workspace)
+                pending = (policy["preload_unanswered"] and
+                           card_preference.is_pending(db, workspace, snapshot, [UUID(job["contact"])]) if snapshot else False)
                 if (not settings or not settings["secret_ciphertext"] or
                     str(settings["connection_id"]) != job["connection"] or settings["version"] != job["version"] or
                     not source or not (job.get("manual") or pending)):
@@ -698,12 +720,14 @@ class FamilyCacheWorker:
                     self.finish(db, workspace, job)
                     return
                 column = {TOPIC: "refreshed_at", LESSONS: "lessons_refreshed_at", HISTORY: "lessons_full_refreshed_at"}[job["topic"]]
-                interval = HISTORY_INTERVAL if job["topic"] == HISTORY else INTERVAL
+                interval_minutes = policy[SECTION_META[job["topic"]][3]]
+                interval = timedelta(minutes=interval_minutes) if interval_minutes else None
                 metadata_stale = saved and (any("subject_ids" not in item or "lesson_type_ids" not in item
                     for item in saved["subscriptions"]) if job["topic"] == TOPIC else job["topic"] == HISTORY and
                     any(any(field not in item for field in ("branch_id", "subject_id", "lesson_type_id", "customer_id", "customer_verified"))
                         for item in saved["lessons"]))
-                if saved and saved[column] and saved[column] + interval > datetime.now(UTC) and not metadata_stale and not job.get("force_at"):
+                if (saved and saved[column] and (interval is None or saved[column] + interval > datetime.now(UTC))
+                    and not metadata_stale and not job.get("force_at")):
                     self.finish(db, workspace, job)
                     return
                 today = db.execute(text("SELECT CAST(now() AT TIME ZONE timezone AS date) FROM workspaces WHERE id=:w"),
@@ -716,14 +740,15 @@ class FamilyCacheWorker:
                 if job["topic"] == HISTORY and "history_only" not in checkpoint:
                     recent_at = saved["lessons_refreshed_at"] if saved else None
                     checkpoint["history_only"] = bool(recent_at and not metadata_stale
-                        and recent_at + INTERVAL > datetime.fromisoformat(checkpoint["started_at"])
+                        and recent_at + timedelta(minutes=policy["lessons_interval_minutes"]) > datetime.fromisoformat(checkpoint["started_at"])
                         and recent_at.astimezone(ZoneInfo(snapshot.get("timezone", "UTC"))).date() == today)
             started_at = datetime.fromisoformat(checkpoint["started_at"])
             with self.connections._host_gate(settings["origin"]) as gate:
                 credentials = self.connections.vault.open(workspace, settings["connection_id"], settings["secret_ciphertext"])
                 client = self.connections.client_factory(settings["origin"], settings["api_email"], credentials, gate)
                 client = _TariffCache(client, self.tariffs, (str(workspace), job["connection"], job["version"]))
-                client = paged = self.checkpoint_client(client, workspace, job, checkpoint, settings, credentials)
+                client = paged = self.checkpoint_client(client, workspace, job, checkpoint, settings, credentials,
+                                                        limit=policy["requests_per_turn"])
                 source["branch_id"] = int(job["branch"])
                 observed_customers = []
                 if job["topic"] == TOPIC:
@@ -825,14 +850,15 @@ class FamilyCacheWorker:
              "finished": now.isoformat(), "duration": max(0, int((now - started).total_seconds() * 1000))})
 
     def retry(self, workspace, job, *, busy=False, error=None, paged=None):
-        patch, scope = card_jobs.failure(error, job.get("attempts", 0), busy=busy)
-        code = patch["error"]
-        if busy:
-            patch.pop("error")
-            patch["cause"] = "busy"
-        patch.update(stage=paged.stage if paged else "prepare", page=paged.page if paged else None)
-        patch["last_progress_at"] = datetime.now(UTC).isoformat()
         with self.accounts.transaction(workspace_id=workspace) as db:
+            policy = card_loader_settings.get(db, workspace)
+            patch, scope = card_jobs.failure(error, job.get("attempts", 0), busy=busy, policy=policy)
+            code = patch["error"]
+            if busy:
+                patch.pop("error")
+                patch["cause"] = "busy"
+            patch.update(stage=paged.stage if paged else "prepare", page=paged.page if paged else None)
+            patch["last_progress_at"] = datetime.now(UTC).isoformat()
             db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
             settings = self.connections._row(db, workspace)
             if not settings or settings["version"] != job["version"] or str(settings["connection_id"]) != job["connection"]:

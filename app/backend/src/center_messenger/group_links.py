@@ -1,4 +1,4 @@
-"""Light six-hour CGI refreshes for active Customer IDs, separate from finance."""
+"""Configurable CGI refreshes for active Customer IDs, separate from finance."""
 
 import json
 from datetime import UTC, datetime
@@ -9,18 +9,19 @@ from center_messenger.alfa_client import AlfaError
 from center_messenger.alfa_family import pages
 from center_messenger.crm_directory import positive_id, source_date, source_name
 from center_messenger.auth_security import AuthError
-from center_messenger import card_jobs
+from center_messenger import card_jobs, card_loader_settings
 
 TOPIC = "crm.customer.groups"
 
 
 def progress(db, workspace, snapshot):
     """One active Customer ID, with all its available branch observations."""
+    policy = card_loader_settings.get(db, workspace)
     return dict(db.execute(text("""
       WITH clients AS (
         SELECT c.external_id,
           bool_and(coalesce(e.payload->>'checked_run'=CAST(:r AS text)
-            AND (e.payload->>'refreshed_at')::timestamptz>now()-interval '6 hours',false)) AS ready,
+            AND (e.payload->>'refreshed_at')::timestamptz>now()-make_interval(mins=>:interval),false)) AS ready,
           bool_or(coalesce(e.state='pending',false)) AS queued,
           bool_or(coalesce(e.state='pending' AND e.payload ? 'error',false)) AS error,
           bool_or(c.contact_id IS NULL OR c.student_id IS NULL) AS unlinked
@@ -36,14 +37,16 @@ def progress(db, workspace, snapshot):
       ) SELECT count(*) AS total,count(*) FILTER(WHERE ready) AS ready,
         count(*) FILTER(WHERE queued) AS queued,count(*) FILTER(WHERE error) AS errors,
         count(*) FILTER(WHERE unlinked) AS unlinked FROM clients
-    """), {"w": workspace, "conn": snapshot["connection_id"], "r": snapshot["run"], "topic": TOPIC}).mappings().one())
+    """), {"w": workspace, "conn": snapshot["connection_id"], "r": snapshot["run"], "topic": TOPIC,
+             "interval": policy["groups_interval_minutes"]}).mappings().one())
 
 
 def enqueue(db, workspace, snapshot, *, contact=None, force=False,
-            source_contact=None, conversation=None, manual_context=None):
+            source_contact=None, conversation=None, manual_context=None, policy=None):
     from center_messenger.family_cache import _manual_fields
+    policy = policy or card_loader_settings.get(db, workspace)
     manual = manual_context or _manual_fields(contact, source_contact=source_contact,
-                                               conversation=conversation)
+                                               conversation=conversation, policy=policy)
     return db.execute(text("""
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
       SELECT :w,gen_random_uuid(),:topic,concat(:conn,':',c.branch_id,':',c.external_id),
@@ -60,11 +63,11 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False,
         AND e.event_key=concat(:conn,':',c.branch_id,':',c.external_id)
       WHERE c.workspace_id=:w AND c.run_id=:r AND c.contact_id IS NOT NULL AND c.student_id IS NOT NULL
         AND (CAST(:contact AS uuid) IS NULL OR c.contact_id=CAST(:contact AS uuid))
-        AND (:manual OR c.status='client')
+        AND (:manual OR (:preload_active AND c.status='client'))
         AND (:force OR e.id IS NULL OR e.payload->>'version'<>CAST(:v AS text)
           OR e.payload->>'contact'<>c.contact_id::text OR e.payload->>'student'<>c.student_id::text
           OR e.payload->>'checked_run' IS DISTINCT FROM CAST(:r AS text)
-          OR (e.payload->>'refreshed_at')::timestamptz<=now()-interval '6 hours')
+          OR (e.payload->>'refreshed_at')::timestamptz<=now()-make_interval(mins=>:interval))
       ON CONFLICT(workspace_id,topic,event_key) DO UPDATE SET state='pending',payload=CASE
         WHEN outbox_events.state='pending' AND outbox_events.payload->>'version'=EXCLUDED.payload->>'version'
           AND outbox_events.payload->>'contact'=EXCLUDED.payload->>'contact'
@@ -91,6 +94,8 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False,
         OR :force
     """), {"w": workspace, "conn": snapshot["connection_id"], "r": snapshot["run"], "v": snapshot["version"],
              "topic": TOPIC, "contact": contact, "manual": contact is not None, "force": force,
+             "preload_active": policy["preload_active_groups"],
+             "interval": policy["groups_interval_minutes"],
              **manual}).rowcount
 
 
@@ -145,9 +150,11 @@ def process(worker, workspace, job):
             settings = worker.connections._row(db, workspace)
             snapshot = DirectoryReader._published(db, workspace)
             source = worker._source(db, workspace, job)
+            policy = card_loader_settings.get(db, workspace)
             if (not settings or not settings["secret_ciphertext"] or not snapshot or not source
                 or str(settings["connection_id"]) != job["connection"] or settings["version"] != job["version"]
-                or snapshot["connection_id"] != settings["connection_id"] or not (job["manual"] or source["status"] == "client")):
+                or snapshot["connection_id"] != settings["connection_id"]
+                or not (job["manual"] or (policy["preload_active_groups"] and source["status"] == "client"))):
                 worker.requeue_current(db, workspace, job, owned)
                 return
             settings, snapshot = dict(settings), dict(snapshot)
@@ -157,7 +164,8 @@ def process(worker, workspace, job):
             client = worker.connections.client_factory(settings["origin"], settings["api_email"], credentials, gate)
             if not job["force_at"]:
                 client = _TariffCache(client, worker.tariffs, (str(workspace), job["connection"], job["version"]))
-            client = paged = worker.checkpoint_client(client, workspace, job, checkpoint, settings, credentials)
+            client = paged = worker.checkpoint_client(client, workspace, job, checkpoint, settings, credentials,
+                                                      limit=policy["requests_per_turn"])
             groups, memberships = fetch(client, int(job["branch"]), int(job["customer"]))
             with worker.accounts.transaction(workspace_id=workspace) as db:
                 db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
@@ -169,9 +177,11 @@ def process(worker, workspace, job):
                 current = worker.connections._row(db, workspace)
                 published = DirectoryReader._published(db, workspace)
                 source = worker._source(db, workspace, job)
+                policy = card_loader_settings.get(db, workspace)
                 if (not current or not current["secret_ciphertext"] or current["version"] != settings["version"]
                     or str(current["connection_id"]) != job["connection"] or not published or published["run"] != snapshot["run"]
-                    or not source or not (own.get("manual") or source["status"] == "client")):
+                    or not source or not (own.get("manual")
+                        or (policy["preload_active_groups"] and source["status"] == "client"))):
                     worker.requeue_current(db, workspace, job, own)
                     return
                 params = {"w": workspace, "r": snapshot["run"], "b": int(job["branch"]), "customer": int(job["customer"])}
