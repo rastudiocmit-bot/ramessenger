@@ -100,7 +100,7 @@ def _lesson(raw, customer_id):
     }
 
 
-def fetch_family_finance(client, branch_id, customer_id, *, source_customer):
+def fetch_family_finance(client, branch_id, customer_id, *, source_customer, on_customer=None):
     """Read live totals/subscriptions without waiting for lesson history."""
     branch_id = positive_id(branch_id)
     root = f"/v2api/{positive_id(branch_id)}"
@@ -127,6 +127,10 @@ def fetch_family_finance(client, branch_id, customer_id, *, source_customer):
             break
     if customer is None:
         raise AlfaError("not_found")
+    if on_customer:
+        # Reuse the already required exact-ID request. Do not put raw customer
+        # data into the finance result or the checkpoint's public progress.
+        on_customer(dict(customer), state == 2)
     money = source_balance(customer.get("balance"))
     paid = source_lessons(customer.get("paid_lesson_count"))
     raw_subscriptions = pages(

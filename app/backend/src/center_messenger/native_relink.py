@@ -11,6 +11,33 @@ from center_messenger import alfa_shared_parent
 from center_messenger.alfa_repair import resolve_customer
 from center_messenger.chat_store import changed
 from center_messenger.history_receipts import customer_ids
+from center_messenger.message_order import visible_message
+
+
+def history_compatible(rows, previous, item):
+    """One reassigned row is not proof for unrelated old incoming messages."""
+    peer = item.get('max_user_id') or previous['payload'].get('max_user_id')
+    peers = {r['peer'] for r in rows if r['peer']}
+    if len(peers) > 1 or (peer and peers - {peer}):
+        return False
+    for row in rows:
+        if row['conversation_id'] != previous['conversation_id']:
+            continue
+        exact = str(row['record']) == str(item['record_id']) and row['occurred_at'] == item['occurred_at']
+        if not exact and (not peer or row['peer'] != peer):
+            return False
+    return True
+
+
+def history_proven(db, workspace, channel, previous, item, contacts):
+    rows = db.execute(text("SELECT m.payload->>'max_user_id' AS peer,m.payload->>'crm_record_id' AS record,"
+        "m.occurred_at,m.conversation_id FROM messages m JOIN conversations c "
+        "ON c.workspace_id=m.workspace_id AND c.id=m.conversation_id WHERE c.workspace_id=:w "
+        "AND c.connection_id=:channel AND (c.contact_id=ANY(CAST(:contacts AS uuid[])) OR c.id=:previous) "
+        "AND m.direction='in' AND m.actor_type='contact' AND " + visible_message('m') +
+        " AND coalesce(m.payload->>'crm_mirror','false')<>'true'"),
+        {'w': workspace, 'channel': channel, 'contacts': contacts, 'previous': previous['conversation_id']}).mappings().all()
+    return history_compatible(rows, previous, item)
 
 
 def previous_rows(db, workspace, channel, branch, records):
@@ -31,7 +58,8 @@ def previous_rows(db, workspace, channel, branch, records):
 
 
 def association_pair(previous, item, branch):
-    if not previous or item['direction'] != 'in' or item['actor_type'] != 'contact':
+    if (not previous or not item.get('source_metadata_refresh')
+            or item['direction'] != 'in' or item['actor_type'] != 'contact'):
         return None
     old = previous['payload']
     if str(old.get('branch_id')) != str(branch) or str(old.get('crm_record_id')) != str(item['record_id']):
@@ -92,6 +120,8 @@ def prove(db, workspace, channel, snapshot, branch, item, previous, resolved, di
     family = alfa_shared_parent.members(db, workspace, channel, snapshot,
                                        old['contact_id'], old['primary_phone'])
     if previous['contact_id'] not in family:
+        return None
+    if not history_proven(db, workspace, channel, previous, item, list(set(family) | {new['contact_id']})):
         return None
     return alfa_shared_parent.prove(db, workspace, channel, snapshot, [old, new],
         source=f"relink:in:{branch}:{item['record_id']}",

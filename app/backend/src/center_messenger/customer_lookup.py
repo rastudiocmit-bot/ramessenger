@@ -144,6 +144,7 @@ class CustomerLookupWorker:
             branch, owner = usable[0], str(uuid4())
             value.update(state="running", owner=owner, lease_until=(now + timedelta(seconds=60)).isoformat())
             _write(db, workspace, key, value)
+            observed_at = db.execute(text('SELECT clock_timestamp()')).scalar_one()
         error_code, retry_after, rows, archive = None, None, [], False
         try:
             with self.connections._host_gate(settings["origin"]) as gate:
@@ -197,7 +198,8 @@ class CustomerLookupWorker:
             elif rows:
                 # Identity and messages become visible atomically; finance and
                 # lessons stay in the regular card cache queue.
-                fact = apply_customer(db, workspace, settings, snapshot, dict(rows[0], _branch=branch), archive=archive)
+                fact = apply_customer(db, workspace, settings, snapshot, dict(rows[0], _branch=branch),
+                                      archive=archive, observed_at=observed_at, source='lookup')
                 channels = db.execute(text("SELECT connection_id FROM alfa_max_settings WHERE workspace_id=:w "
                     "AND crm_connection_id=:c"), {"w": workspace, "c": settings["connection_id"]}).scalars().all()
                 for channel in channels:

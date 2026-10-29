@@ -1,6 +1,7 @@
 """Independent AlfaCRM native-MAX connection and durable inbox synchronization."""
 
 import json
+import hashlib
 import logging
 import re
 import threading
@@ -908,6 +909,15 @@ class AlfaMaxConnections:
                         and (m["payload"].get("customer_id") is None or
                              (m["payload"].get("customer_branch_id"), m["payload"].get("customer_id"))
                              in recipient_cards)), None)
+                    previous_row = previous.get(str(item['record_id']))
+                    if (existing is None and previous_row and not previous_row['crm_link_manual'] and customer
+                            and snapshot and snapshot.get('version') is not None and customer.get('global_id_verified')
+                            and native_relink.relink_pair(previous_row, item, branch) ==
+                            (int(previous_row['payload'].get('customer_id') or 0), customer['customer_id'])):
+                        # Correct this exact source row even when the rest of
+                        # the old dialog cannot be proved to belong to the same
+                        # messenger peer. This does not merge the other history.
+                        existing = next((m for m in candidates if m['id'] == previous_row['id']), None)
                 if existing:
                     source_id = existing["source_key"]
                 elif not any(m["source_key"] == base_source_id for m in candidates):
@@ -1293,7 +1303,7 @@ class AlfaMaxConnections:
             if len(peers) > 1:
                 raise AlfaBrowserError("multiple_recipients")
             peer = next(iter(peers), None)
-        phone = None
+        phone, routing_guard = None, None
         snapshot = DirectoryReader._published(db, workspace) if row.get('crm_connection_id') else None
         if snapshot and snapshot['connection_id'] == row['current_crm_connection_id']:
             directory = customer_directory(db, workspace, snapshot, [int(target['customer_id'])])
@@ -1301,6 +1311,11 @@ class AlfaMaxConnections:
             target = native_relink.reply_target(db, workspace, connection, snapshot, target, directory)
             if target['customer_id'] != original_id:
                 directory = customer_directory(db, workspace, snapshot, [int(target['customer_id'])])
+            routing_guard = hashlib.sha256(json.dumps([
+                str(snapshot['connection_id']), str(snapshot.get('run')), snapshot.get('version'),
+                sorted((r['branch_id'], str(r.get('contact_id')), r.get('primary_phone'), r.get('available'))
+                       for r in directory.get(int(target['customer_id']), []))
+            ], sort_keys=True).encode()).hexdigest()
             if peer is None:
                 # Use this exact CRM contact's native phone row. A different
                 # Customer ID is allowed only by an exact-source relink witness
@@ -1321,6 +1336,7 @@ class AlfaMaxConnections:
             "customer": int(target["customer_id"]),
             "max_user_id": peer,
             "contact_phone": phone,
+            "routing_guard": routing_guard,
             "session_snapshot": dict(row),
         }
 

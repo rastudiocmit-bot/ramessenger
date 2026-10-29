@@ -758,6 +758,22 @@ class NativeSessionTests(unittest.TestCase):
         self.assertEqual(self.setting()['session_ciphertext'], original)
         self.assertEqual(self.setting()['state'], 'active')
 
+    def test_primary_contact_change_is_fenced_even_when_the_explicit_max_peer_is_unchanged(self):
+        self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79000000001\"]' WHERE workspace_id=:w"),
+                        {'w': self.workspace})
+        messaging, command = self.queue_operator_reply(dict(self.row(), max_user_id='77'))
+        posted = []
+        def send(*args, **options):
+            self.db.execute(text("UPDATE alfa_customers SET phones='[\"+79000000002\"]' WHERE workspace_id=:w"),
+                            {'w': self.workspace})
+            options['before_post']()
+            posted.append(True)
+        self.service.browser.send.side_effect = send
+        messaging.run_next('send', 'alfa_max_browser')
+        self.assertEqual(posted, [])
+        self.assertEqual(self.native_command(command)['state'], 'queued')
+        self.assertEqual(self.native_command(command)['last_error_code'], 'settings_changed')
+
     def test_session_generation_change_prevents_post_and_preserves_new_session(self):
         messaging, command = self.queue_operator_reply()
         posted = []

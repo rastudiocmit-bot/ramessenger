@@ -12,8 +12,8 @@ from sqlalchemy import text
 from center_messenger.accounts import audit, context
 from center_messenger.alfa_client import ERRORS, AlfaError
 from center_messenger.auth_security import AuthError, InputModel
+from center_messenger import customer_updates
 from center_messenger.crm_directory import (
-    customer_row,
     page_rows,
     positive_id,
     project_directory,
@@ -359,6 +359,7 @@ class AlfaSync:
                 return
             job = self._job(db, control, settings)
             settings = dict(settings)
+            observed_at = db.execute(text('SELECT clock_timestamp()')).scalar_one()
             cursor, stats = dict(job["cursor"]), dict(job["stats"])
             if cursor["phase"] == "publish":
                 self._publish(db, control, job)
@@ -432,7 +433,8 @@ class AlfaSync:
                     received = cursor["received"] + len(items)
                     if received > total or (not items and received < total):
                         raise AlfaError("invalid_response")
-                    self._store_page(db, workspace, job["id"], cursor, items)
+                    self._store_page(db, workspace, job["id"], cursor, items,
+                                     observation=(settings['connection_id'], observed_at, settings['version']))
                     phase = cursor["phase"]
                     stats[phase] = stats.get(phase, 0) + len(items)
                     if phase == "customers" and stats[phase] > 50000:
@@ -512,7 +514,7 @@ class AlfaSync:
             )
 
     @staticmethod
-    def _store_page(db, workspace, job, cursor, items):
+    def _store_page(db, workspace, job, cursor, items, *, observation=None):
         if not items:
             return
         phase, branch = cursor["phase"], cursor["branches"][cursor["bi"]]["id"]
@@ -550,10 +552,18 @@ class AlfaSync:
         if duplicate:
             raise AlfaError("invalid_response")
         base = {"workspace_id": workspace, "run_id": job, "branch_id": branch}
+        previous = {}
+        if phase == 'customers' and observation:
+            previous = {r['external_id']: r for r in db.execute(text(
+                "SELECT a.* FROM alfa_customers a JOIN alfa_sync_control c ON c.workspace_id=a.workspace_id "
+                "AND c.published_id=a.run_id WHERE a.workspace_id=:w AND c.connection_id=:crm "
+                "AND a.branch_id=:b AND a.external_id=ANY(CAST(:ids AS bigint[]))"),
+                {'w': workspace, 'crm': observation[0], 'b': branch, 'ids': params['ids']}).mappings()}
         rows = []
         for item in items:
             if phase == "customers":
-                row = customer_row(item, archive=cursor["part"] == 1)
+                row = customer_updates.merge_fields(item, previous.get(positive_id(item['id'])),
+                                                    archive=cursor["part"] == 1)
                 for key in ("phones", "emails", "lead_status_ids"):
                     row[key] = json.dumps(row[key])
             elif phase == "groups":
@@ -590,6 +600,12 @@ class AlfaSync:
         db.execute(
             text(f"INSERT INTO {table}({','.join(columns)}) VALUES ({','.join(values)})"), rows
         )
+        if phase == 'customers' and observation:
+            connection, at, version = observation
+            for row, item in zip(rows, items, strict=True):
+                customer_updates.record(db, workspace, {'connection_id': connection, 'run': job, 'version': version},
+                                        branch, row['external_id'], at, source='directory', saved={},
+                                        fields=customer_updates.observed_fields(item, cursor['part'] == 1))
 
     def _publish(self, db, control, job):
         workspace, run, connection = job["workspace_id"], job["id"], job["connection_id"]
@@ -605,12 +621,15 @@ class AlfaSync:
         previous = list(
             db.execute(
                 text(
-                    "SELECT external_id,student_id FROM alfa_customers "
-                    "WHERE workspace_id=:w AND run_id=:r"
+                    "SELECT a.* FROM alfa_customers a JOIN alfa_sync_runs r "
+                    "ON r.workspace_id=a.workspace_id AND r.id=a.run_id "
+                    "WHERE a.workspace_id=:w AND a.run_id=:r AND r.connection_id=:connection"
                 ),
-                {"w": workspace, "r": control["published_id"]},
+                {"w": workspace, "r": control["published_id"], 'connection': connection},
             ).mappings()
         )
+        rows = customer_updates.carry_forward(db, workspace, connection, run,
+            control['published_id'], rows, previous, job['created_at'], job['settings_version'])
         contacts, students, bindings = project_directory(connection, rows, previous)
         for chunk_start in range(0, len(contacts), 500):
             chunk = contacts[chunk_start : chunk_start + 500]
@@ -725,6 +744,7 @@ class AlfaSync:
                 ),
                 {"w": workspace, "keep": keep},
             )
+        customer_updates.cleanup(db, workspace, connection, keep)
         audit(
             db,
             "alfa_directory_published",

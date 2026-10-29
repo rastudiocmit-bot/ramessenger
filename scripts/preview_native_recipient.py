@@ -19,6 +19,7 @@ FILES = (
     'app/backend/src/center_messenger/alfa_repair.py',
     'app/backend/src/center_messenger/native_relink.py',
     'app/backend/src/center_messenger/alfa_max.py',
+    'app/backend/src/center_messenger/customer_updates.py',
     'scripts/diagnose_max_recipients.py',
 )
 BOOTSTRAP = '''import json,sys,types
