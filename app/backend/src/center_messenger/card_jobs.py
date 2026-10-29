@@ -64,14 +64,17 @@ def blocked(db, workspace, job):
         "WHERE e.workspace_id=:w AND e.id=:id"), {"w": workspace, "id": job["id"]}).scalar_one_or_none())
 
 
-def failure(error, attempts, *, busy=False, now=None):
+def failure(error, attempts, *, busy=False, now=None, policy=None):
+    policy = policy or {"busy_retry_seconds": 5, "retry_initial_seconds": 30,
+                        "retry_max_seconds": 1800}
     now = now or datetime.now(UTC)
     original = getattr(error, "code", "unexpected_" + type(error).__name__ if error is not None else "unexpected")
     status = getattr(error, "status", None)
     attempts = int(attempts) + (not busy)
-    code, delay, scope = "crm_unavailable", min(1800, 30 * 2 ** min(max(attempts-1, 0), 6)), None
+    code, delay, scope = "crm_unavailable", min(policy["retry_max_seconds"],
+        policy["retry_initial_seconds"] * 2 ** min(max(attempts-1, 0), 12)), None
     if busy:
-        code, delay = "busy", 5
+        code, delay = "busy", policy["busy_retry_seconds"]
     elif status == 401 or original == "unauthorized":
         code, delay, scope = "credentials_required", None, "connection"
     elif status == 403 or original == "forbidden":
@@ -82,7 +85,7 @@ def failure(error, attempts, *, busy=False, now=None):
     elif original == "not_found":
         code, delay = "not_found", 86400
     elif original in {"invalid_response", "import_limit", "unsafe_address"}:
-        code, delay = "invalid_response", 1800
+        code, delay = "invalid_response", policy["retry_max_seconds"]
     if delay is not None:
         delay = min(delay, (datetime.max.replace(tzinfo=UTC)-now).total_seconds()-1)
     return {"error": code, "cause": original, "http_status": status, "attempts": attempts,

@@ -21,7 +21,7 @@ import urllib.error
 REPO = "rastudiocmit-bot/ramessenger"
 ROOT = Path("/opt/center-messenger-github")
 EXPECTED_DB_VOLUME = "center-messenger_database"
-EXPECTED_DB_REVISION = "0025_customer_phone_search"
+EXPECTED_DB_REVISION = "0026_card_loader_settings"
 READY_LOCAL = "http://127.0.0.1:8100/health/ready"
 
 def public_url():

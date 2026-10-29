@@ -59,6 +59,18 @@ class CardJobPolicyTests(unittest.TestCase):
         self.assertGreater(two["available_at"], one["available_at"])
         self.assertEqual(failure(None,3,busy=True)[0]["attempts"],3)
 
+    def test_workspace_retry_policy_controls_busy_and_exponential_delays(self):
+        policy = {"busy_retry_seconds": 7, "retry_initial_seconds": 20, "retry_max_seconds": 65}
+        now = datetime(2026, 10, 29, tzinfo=UTC)
+        busy, _ = failure(None, 4, busy=True, now=now, policy=policy)
+        first, _ = failure(AlfaError("network"), 0, now=now, policy=policy)
+        capped, _ = failure(AlfaError("network"), 9, now=now, policy=policy)
+        invalid, _ = failure(AlfaError("invalid_response"), 0, now=now, policy=policy)
+        self.assertEqual(datetime.fromisoformat(busy["available_at"]), now + timedelta(seconds=7))
+        self.assertEqual(datetime.fromisoformat(first["available_at"]), now + timedelta(seconds=20))
+        self.assertEqual(datetime.fromisoformat(capped["available_at"]), now + timedelta(seconds=65))
+        self.assertEqual(datetime.fromisoformat(invalid["available_at"]), now + timedelta(seconds=65))
+
     def test_paged_sections_yield_and_resume_without_refetching_saved_pages(self):
         saved = {"responses": {}}
         wire = Mock()

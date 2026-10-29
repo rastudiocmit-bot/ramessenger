@@ -18,6 +18,7 @@ from center_messenger.crm_directory import normalized_name, phone_number
 from center_messenger.family_cache import enqueue, cache_status, _manual_fields
 from center_messenger.group_links import TOPIC as GROUPS_TOPIC
 from center_messenger import card_preference
+from center_messenger import card_loader_settings
 from center_messenger.crm_review import cached_status as current_review_status
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}/directory")
@@ -506,8 +507,9 @@ class DirectoryReader:
             elif not cached_only:
                 card_preference.refresh(db, workspace, snapshot, [contact_id])
                 selection = card_preference.selected(db, workspace, snapshot, conversation, contact_id)
+                policy = card_loader_settings.get(db, workspace)
                 manual_context = _manual_fields(contact_id, source_contact=contact_id,
-                                                conversation=conversation)
+                                                conversation=conversation, policy=policy)
                 for target in selection["contacts"] if selection else [contact_id]:
                     enqueue(db, workspace, snapshot, contact=target, force=force,
                             source_contact=contact_id, conversation=conversation,
@@ -665,6 +667,22 @@ def sync_start(workspace_id: UUID, model: SyncOptions, request: Request):
 def sync_stop(workspace_id: UUID, request: Request):
     service(request)
     request.app.state.alfa_sync.stop(identity(request, mutation=True), workspace_id)
+
+
+@router.get("/card-loader")
+def card_loader_get(workspace_id: UUID, request: Request):
+    actor = identity(request)
+    with request.app.state.accounts.transaction(workspace_id=workspace_id) as db:
+        request.app.state.accounts._workspace(db, actor, workspace_id, manage=True)
+        return card_loader_settings.public(card_loader_settings.get(db, workspace_id))
+
+
+@router.put("/card-loader")
+def card_loader_put(workspace_id: UUID, model: card_loader_settings.CardLoaderSettings, request: Request):
+    actor = identity(request, mutation=True)
+    with request.app.state.accounts.transaction(workspace_id=workspace_id) as db:
+        request.app.state.accounts._workspace(db, actor, workspace_id, manage=True)
+        return card_loader_settings.public(card_loader_settings.save(db, workspace_id, model))
 
 
 @router.get("")

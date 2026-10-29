@@ -74,7 +74,7 @@
   }
   function clearPrivateViews() {
     $("#members-list").replaceChildren(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
-    cabinet.reset();
+    cabinet.reset(); cardLoader.reset();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
     ["#user-name", "#user-email", "#user-avatar", "#workspace-role", "#workspace-timezone"].forEach(selector => { $(selector).textContent = ""; });
     $("#invite-url").value = "";
@@ -148,7 +148,7 @@
     const previousWorkspace = state.workspace?.id;
     state.epoch += 1; state.user = payload.user; state.csrf = payload.csrf; state.workspaces = payload.workspaces; state.chatProtocol = payload.chat_protocol || 1;
     state.workspace = state.workspaces.find(item => item.id === state.workspace?.id) || state.workspaces[0] || null;
-    if (previousWorkspace !== state.workspace?.id) { resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset(); }
+    if (previousWorkspace !== state.workspace?.id) { resetAlfa(); resetAlfaMax(); cardLoader.reset(); directory.reset(); chat.reset(); }
   }
   async function enter(payload) {
     setSession(payload);
@@ -182,6 +182,9 @@
     return { overview: granted.has("overview"), team: false, messages: granted.has("messages"), tasks: granted.has("messages") && granted.has("tasks"), clients: ["branch_manager", "observer"].includes(workspace.role) && granted.has("messages"), connections: false, security: granted.has("security") };
   }
   const cabinet = window.CenterCabinet({ $, state, api, node, show, roles, renderPane });
+  const cardLoader = window.CenterCardLoader
+    ? window.CenterCardLoader({ $, state, api, show })
+    : { load: async () => {}, reset: () => {} };
   async function renderPane(pane) {
     state.pane = pane === "queue" ? "messages" : pane;
     const sections = grantedSections();
@@ -207,7 +210,7 @@
     form.elements.name.disabled = !manage;
     show($("button[type=submit]", form), Boolean(manage));
     show($("#workspace-readonly"), !manage);
-    if (state.pane === "connections") await Promise.allSettled([ai.load(), loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
+    if (state.pane === "connections") await Promise.allSettled([ai.load(), cardLoader.load(), loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
     if (state.pane === "messages") { chat.setView(state.chatView || "all", false); await chat.enter(); }
     if (state.pane === "tasks") await tasks?.enter();
     if (state.pane === "summary") await cabinet.summary();
