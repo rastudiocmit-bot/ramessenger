@@ -50,7 +50,7 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    assert.equal(await page.locator('#ai-agent-form [name=provider][value=mimo_plan]').isChecked(),true);
    assert.equal(await page.locator('#ai-agent-form [name=task]').inputValue(),'text_processing');
    await page.locator('#connections-agents-tab').focus();await page.keyboard.press('Home');
-   assert.equal(await page.locator('#connections-monitor-tab').getAttribute('aria-selected'),'true');
+   assert.equal(await page.locator('#connections-wizard-tab').getAttribute('aria-selected'),'true');
    await page.keyboard.press('End');assert.equal(await page.locator('#connections-agents-tab').getAttribute('aria-selected'),'true');
    assert.deepEqual(data.errors,[]);assert.deepEqual(data.unexpected,[]);
    checks.push({width,gateway_saved:true,capability_checks_independent:true,routes_saved:true,mimo_agent_retained:true,keyboard_tabs:true,no_page_overflow:true});
