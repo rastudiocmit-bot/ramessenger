@@ -3,7 +3,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs');
 (async()=>{
  const checks=[];
- for(const width of [1440,390]){
+ for(const width of [1440,390,320]){
   const browser=await chromium.launch({executablePath:process.env.CM_TEST_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--disable-dev-shm-usage',...JSON.parse(process.env.CM_TEST_CHROMIUM_ARGS||'[]')]});
   try{
    const context=await browser.newContext({viewport:{width,height:1000},isMobile:width<720,hasTouch:width<720,reducedMotion:'reduce'});
@@ -15,6 +15,26 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    await page.waitForSelector('.chat-bubble');
    if(width<720){await page.locator('#more-tab').click();await page.locator('#navigation-options [data-pane="connections"]').click();}
    else await page.locator('#connections-tab').click();
+   const layouts=[];
+   for(const view of ['wizard','settings','voice','agents']){
+    await page.locator('#connections-'+view+'-tab').click();
+    const panel=page.locator('#connections-'+view+'-view');
+    await panel.waitFor({state:'visible'});
+    layouts.push(await panel.evaluate(el=>{
+     const b=el.getBoundingClientRect(),head=el.querySelector('.connection-page-header'),cs=getComputedStyle(head.querySelector('h2'));
+     return {left:b.left,width:b.width,titleSize:cs.fontSize,titleMargin:cs.margin,overflow:el.scrollWidth-el.clientWidth};
+    }));
+    assert.equal(await panel.locator('.connection-page-header').count(),1);
+    if(view!=='wizard')assert.equal(await panel.locator(':scope > .connection-help').count(),1);
+    const tab=page.locator('#connections-'+view+'-tab');
+    assert.ok(await tab.evaluate(el=>{const b=el.getBoundingClientRect();return b.left>=0&&b.right<=innerWidth&&b.height>=44;}),'all tabs visible and tappable');
+    if(process.env.CM_TEST_SCREENSHOTS){fs.mkdirSync(process.env.CM_TEST_SCREENSHOTS,{recursive:true});await page.locator('#pane-connections > .scroll').evaluate(el=>el.scrollTop=0);await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`connections-${view}-${width}.png`)});}
+   }
+   for(const layout of layouts){
+    assert.ok(Math.abs(layout.left-layouts[0].left)<1&&Math.abs(layout.width-layouts[0].width)<1,'same outer left edge and width');
+    assert.equal(layout.titleSize,layouts[0].titleSize);assert.equal(layout.titleMargin,layouts[0].titleMargin);
+    assert.ok(layout.overflow<=1,'no panel overflow');
+   }
    await page.locator('#connections-voice-tab').click();await page.waitForSelector('#ai-cloud-card');
    assert.match(await page.locator('#connections-voice-tab').innerText(),/ИИ-шлюзы/);
    const card=page.locator('[data-gateway="mimo_plan"]');
@@ -40,7 +60,9 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
    assert.ok(await page.evaluate(()=>{const providers=document.querySelector('.ai-providers').getBoundingClientRect(),routes=document.querySelector('.gateway-routes').getBoundingClientRect(),options=document.querySelector('.gateway-options-grid').getBoundingClientRect();return Math.abs(providers.left-routes.left)<1&&Math.abs(providers.right-routes.right)<1&&Math.abs(options.left-routes.left)<1&&Math.abs(options.right-routes.right)<1;}),'all three sections must share the same left and right edges');
    if(process.env.CM_TEST_SCREENSHOTS){fs.mkdirSync(process.env.CM_TEST_SCREENSHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`ai-gateways-${width}.png`)});}
-   await page.locator('#connections-agents-tab').click();await page.locator('#ai-agent-new').click();
+   await page.locator('#connections-agents-tab').click();
+   assert.ok(await page.locator('#ai-agents-card').evaluate(el=>{const b=el.getBoundingClientRect(),view=el.closest('.connection-view'),cs=getComputedStyle(view),left=view.getBoundingClientRect().left+parseFloat(cs.paddingLeft);return Math.abs(b.left-left)<1&&Math.abs(b.width-(view.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight)))<2;}),'agents card shares the full content width and left edge');
+   await page.locator('#ai-agent-new').click();
    await page.locator('#ai-agent-form [name=provider][value=mimo_plan]').check();
    assert.equal(await page.locator('#ai-agent-form [name=model]').inputValue(),'mimo-plan-v2.6-pro');
    await page.locator('#ai-agent-form [name=task]').selectOption('text_processing');
@@ -53,7 +75,13 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    assert.equal(await page.locator('#connections-wizard-tab').getAttribute('aria-selected'),'true');
    await page.keyboard.press('End');assert.equal(await page.locator('#connections-agents-tab').getAttribute('aria-selected'),'true');
    assert.deepEqual(data.errors,[]);assert.deepEqual(data.unexpected,[]);
-   checks.push({width,gateway_saved:true,capability_checks_independent:true,routes_saved:true,mimo_agent_retained:true,keyboard_tabs:true,no_page_overflow:true});
+   await page.evaluate(()=>document.documentElement.dataset.theme='dark');
+   for(const view of ['wizard','settings','voice','agents']){
+    await page.locator('#connections-'+view+'-tab').click();
+    assert.ok(await page.locator('#connections-'+view+'-view').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'no dark theme overflow');
+    if(process.env.CM_TEST_SCREENSHOTS){await page.locator('#pane-connections > .scroll').evaluate(el=>el.scrollTop=0);await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`connections-${view}-dark-${width}.png`)});}
+   }
+   checks.push({width,consistent_four_sections:true,gateway_saved:true,capability_checks_independent:true,routes_saved:true,mimo_agent_retained:true,keyboard_tabs:true,no_page_overflow:true});
   }finally{await browser.close();}
  }
  console.log(JSON.stringify({checks,ok:true},null,2));

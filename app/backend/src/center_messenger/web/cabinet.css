@@ -2046,3 +2046,75 @@ body:has(#cabinet[hidden]){overflow:auto}
  #sync-master-policy-panel .card-loader-footer{padding:12px 16px}
 }
 @media(prefers-reduced-motion:reduce){.sync-master-tabs button{transition:none}}
+
+/* One layout for the synchronization master, services, gateways and agents. */
+#pane-connections{--connections-width:1280px;--connection-radius:14px;--connection-padding:18px}
+#pane-connections .connection-view{width:100%;min-width:0;max-width:var(--connections-width)}
+#pane-connections .connection-page-header{margin:0 0 14px}
+#pane-connections .connection-page-header h2{margin:0;font-size:20px;line-height:1.35;letter-spacing:-.3px}
+#pane-connections .connection-page-header p{margin:5px 0 0;max-width:85ch;font-size:12px;line-height:1.6;color:var(--muted)}
+#pane-connections .connection-help{margin:0 0 16px}
+#pane-connections .connection-help dd{max-width:90ch}
+#pane-connections .connection-tabs{display:grid;grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(0,1fr));gap:4px;max-width:var(--connections-width);overflow:visible;border-bottom:0;margin-bottom:16px;padding-bottom:0}
+#pane-connections .connection-tabs button{justify-content:center;min-width:0;min-height:46px;padding:9px 12px;white-space:normal;line-height:1.4;text-align:center;background:var(--surface-2);border:1px solid transparent;border-radius:10px;box-shadow:none;font-size:12px}
+#pane-connections .connection-tabs button[aria-selected=true]{background:var(--primary-tint);color:var(--primary-ink);border-color:color-mix(in srgb,var(--primary) 22%,var(--line))}
+#pane-connections .connection-tabs svg{flex:none}
+#pane-connections .connection-tabs button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+#pane-connections .connection-view>.settings-card,
+#pane-connections .ai-providers>.settings-card,
+#pane-connections .gateway-options-grid>.settings-card,
+#pane-connections .gateway-routes,
+#pane-connections .wizard-service-card{min-width:0;border:1px solid var(--line);border-radius:var(--connection-radius);box-shadow:var(--card-soft);background:var(--surface)}
+#pane-connections .connection-view>.settings-card{margin:0}
+#connections-settings-view>.max-setup{width:100%;margin:0}
+#connections-settings-view>.max-setup>.card-h{display:flex}
+#connections-settings-view>.max-setup>.card-b{border:0;border-radius:0;background:transparent}
+#connections-agents-view #ai-agents-card{width:100%;max-width:none}
+#connections-voice-view{--gateway-width:100%}
+#connections-voice-view :is(.gateway-section,.gateway-current,.ai-services){width:100%;max-width:none}
+#pane-connections :is(#connections-settings-view,#connections-voice-view,#connections-agents-view) .card-h{padding:16px var(--connection-padding);gap:10px;flex-wrap:wrap;min-width:0}
+#pane-connections :is(#connections-settings-view,#connections-voice-view,#connections-agents-view) .card-h :is(h2,h3){margin:0;font-size:15px;line-height:1.45}
+#pane-connections :is(#connections-settings-view,#connections-voice-view,#connections-agents-view) .card-b{padding:16px var(--connection-padding);min-width:0}
+#pane-connections .gateway-section{margin:0 0 18px}
+#pane-connections .gateway-section-heading{gap:10px;margin-bottom:12px}
+#pane-connections .gateway-section-heading h3{font-size:15px;line-height:1.45}
+#pane-connections .gateway-section-heading p{line-height:1.6}
+#pane-connections .gateway-current{margin:0 0 16px;padding:11px 14px;border:1px solid var(--line);border-radius:10px}
+#pane-connections .ai-providers{gap:12px}
+#pane-connections .gateway-options-grid{gap:12px}
+#pane-connections .gateway-provider-caption{margin:0 0 12px;min-height:0}
+#pane-connections .gateway-provider-actions{gap:8px}
+#pane-connections .gateway-capability{padding:10px 0}
+#pane-connections :is(.gateway-credentials,#max-add){margin-top:14px;padding-top:10px;border-top:1px solid var(--line)}
+#pane-connections :is(.gateway-credentials,#max-add)>summary{padding:7px 0;font-size:12px;font-weight:600;line-height:1.5;color:var(--primary-ink);cursor:pointer}
+#pane-connections :is(.gateway-credentials,#max-add)>summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+#pane-connections #max-add[open]>summary{margin-bottom:12px}
+#pane-connections :is(input,select,textarea){max-width:100%;min-width:0}
+#pane-connections .fld{min-width:0}
+#pane-connections .fld>small{font-size:11.5px;line-height:1.55;color:var(--muted)}
+#pane-connections .small-tag{background:var(--surface-2);color:var(--muted)}
+#pane-connections .btn-row{flex-wrap:wrap}
+#pane-connections .connection-inline-tip{margin:0 0 10px;font-size:12px;line-height:1.6;color:var(--muted)}
+#pane-connections .ai-agent-form{margin-top:16px;padding-top:16px}
+#pane-connections .ai-agent-test{border-radius:10px}
+#pane-connections .ai-agent-list{border-radius:10px}
+#pane-connections .ai-agent{box-shadow:none}
+#pane-connections .ai-provider-choice .check-label{min-height:36px}
+@media(max-width:1000px){
+ #pane-connections .connection-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:719px){
+ #pane-connections{--connection-padding:14px}
+ #pane-connections .connection-page-header h2{font-size:18px}
+ #pane-connections .connection-tabs{gap:5px;margin-bottom:14px}
+ #pane-connections .connection-tabs button{min-height:48px;padding:8px;font-size:11px;gap:6px}
+ #pane-connections .connection-tabs svg{width:15px;height:15px}
+ #pane-connections .connection-help{margin-bottom:12px;padding:0 12px}
+ #pane-connections .ai-providers{grid-template-columns:minmax(0,1fr)}
+ #pane-connections :is(#connections-settings-view,#connections-voice-view,#connections-agents-view) .card-h{padding-top:14px;padding-bottom:14px}
+ #pane-connections .gateway-provider-actions .btn{min-height:40px;white-space:normal;text-align:left}
+ #pane-connections .gateway-capability{flex-wrap:wrap;align-items:center}
+ #pane-connections .gateway-capability>span{flex:1;min-width:120px}
+ #pane-connections :is(.gateway-credentials,#max-add)>summary{min-height:44px;display:list-item;align-content:center}
+ #pane-connections .ai-agent .ai-agent-main strong{overflow-wrap:anywhere}
+}
