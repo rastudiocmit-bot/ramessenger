@@ -9,6 +9,12 @@ from center_messenger.card_loader_settings import CardLoaderSettings, public
 
 
 class CardLoaderSettingsTests(unittest.TestCase):
+    def test_runtime_grant_is_added_after_table_creation(self):
+        root = Path(__file__).resolve().parents[1]
+        migration = (root / "app/backend/migrations/versions/0027_card_loader_grant.py").read_text()
+        self.assertIn("GRANT SELECT,INSERT,UPDATE,DELETE ON crm_card_loader_settings TO cm_app", migration)
+        self.assertIn("nullif(current_setting('app.workspace_id',true),'')::uuid", migration)
+
     def test_defaults_keep_old_history_immutable(self):
         value = CardLoaderSettings()
         self.assertEqual(value.history_interval_minutes, 0)
