@@ -128,6 +128,8 @@ def resume_settings(db, workspace, connection, version):
     """Same CRM/account, new credentials: retain facts and requeue unfinished work."""
     db.execute(text("UPDATE alfa_family_details SET settings_version=:v WHERE workspace_id=:w AND connection_id=:c"),
                {"w": workspace, "c": connection, "v": version})
+    db.execute(text("UPDATE crm_family_snapshots SET settings_version=:v WHERE workspace_id=:w AND connection_id=:c"),
+               {"w": workspace, "c": connection, "v": version})
     db.execute(text("UPDATE outbox_events SET payload=(payload-'checkpoint'-'lease_owner'-'lease_until' "
         "-'error'-'cause'-'http_status'-'failed_at'-'stage'-'page'-'paused')||jsonb_build_object("
         "'version',:v,'attempts',0,'available_at',now(),'force_at',clock_timestamp()) "

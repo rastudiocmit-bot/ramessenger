@@ -352,7 +352,7 @@ class MessageSyncTests(unittest.TestCase):
                                  "VALUES (:w,:c,:b,:name)"),
                             {"w": self.workspace, "c": self.crm, "b": branch, "name": f"Branch {branch}"})
         self.add_customer(self.contact, 1, 7)
-        self.snapshot = {"run": self.run, "connection_id": self.crm}
+        self.snapshot = {"run": self.run, "connection_id": self.crm, "version": 1}
         published = patch.object(DirectoryReader, "_published", return_value=self.snapshot)
         self.published = published.start()
         self.addCleanup(published.stop)
@@ -2364,6 +2364,7 @@ class MessageSyncTests(unittest.TestCase):
     def test_late_yearly_result_preserves_a_newer_recent_cancellation(self):
         from center_messenger.family_cache import enqueue,HISTORY
         _,worker,today,lesson=self.seed_lesson_cadence(recent_minutes=31)
+        self.db.execute(text("UPDATE crm_card_loader_settings SET history_interval_minutes=1440 WHERE workspace_id=:w"), {'w':self.workspace})
         enqueue(self.db,self.workspace,self.snapshot,topics=(HISTORY,))
         old={**lesson,'id':70,'status':3,'date':(today-timedelta(days=100)).isoformat()}
         def fetch(*args,**kwargs):
@@ -2391,6 +2392,8 @@ class MessageSyncTests(unittest.TestCase):
     def test_cached_only_repairs_missing_local_preference_without_enqueuing_crm(self):
         policy,reader,worker,active,_,conversation=self.preferred_card_fixture()
         self.assertIsNone(policy.selected(self.db,self.workspace,self.snapshot,conversation,self.contact))
+        self.db.execute(text('SET CONSTRAINTS ALL IMMEDIATE'))
+        self.db.execute(text('SET CONSTRAINTS ALL DEFERRED'))
         before=self.db.execute(text("SELECT card_revision FROM chat_read_versions WHERE workspace_id=:w"),
                                {'w':self.workspace}).scalar_one()
         value=reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True)
@@ -4570,10 +4573,13 @@ class MessageSyncTests(unittest.TestCase):
         later_path=ROOT/'app/backend/migrations/versions/0020_lesson_history_coverage.py'
         later_spec=importlib.util.spec_from_file_location(later_path.stem,later_path)
         later=importlib.util.module_from_spec(later_spec);later_spec.loader.exec_module(later)
+        cache_path=ROOT/'app/backend/migrations/versions/0028_card_loader_snapshots.py'
+        cache_spec=importlib.util.spec_from_file_location(cache_path.stem,cache_path)
+        cache=importlib.util.module_from_spec(cache_spec);cache_spec.loader.exec_module(cache)
         with Operations.context(MigrationContext.configure(self.db)):
             # The later status trigger depends on the version function. Roll it
             # back before its parent, as Alembic does in the actual graph.
-            later.downgrade();module.downgrade();module.upgrade();later.upgrade()
+            cache.downgrade();later.downgrade();module.downgrade();module.upgrade();later.upgrade();cache.upgrade()
         self.assertEqual([m['id'] for m in self.messages()],before)
         self.assertEqual(self.reader.history(None,self.workspace,self.conversation()['id'])['total'],1)
         self.assertTrue(self.db.execute(text("SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() AND indexname='messages_chat_order_idx')")).scalar_one())

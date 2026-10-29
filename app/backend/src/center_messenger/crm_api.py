@@ -683,7 +683,7 @@ def sync_stop(workspace_id: UUID, request: Request):
 @router.get("/card-loader")
 def card_loader_get(workspace_id: UUID, request: Request):
     actor = identity(request)
-    with request.app.state.accounts.transaction(workspace_id=workspace_id) as db:
+    with request.app.state.accounts.transaction(actor, workspace_id=workspace_id) as db:
         request.app.state.accounts._workspace(db, actor, workspace_id, manage=True)
         return card_loader_settings.public(card_loader_settings.get(db, workspace_id))
 
@@ -691,7 +691,7 @@ def card_loader_get(workspace_id: UUID, request: Request):
 @router.put("/card-loader")
 def card_loader_put(workspace_id: UUID, model: card_loader_settings.CardLoaderSettings, request: Request):
     actor = identity(request, mutation=True)
-    with request.app.state.accounts.transaction(workspace_id=workspace_id) as db:
+    with request.app.state.accounts.transaction(actor, workspace_id=workspace_id) as db:
         request.app.state.accounts._workspace(db, actor, workspace_id, manage=True)
         return card_loader_settings.public(card_loader_settings.save(db, workspace_id, model))
 

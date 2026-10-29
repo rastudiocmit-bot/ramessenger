@@ -11,15 +11,15 @@ QUOTA = ("crm.card.refresh", "crm.card.lessons", "crm.card.refresh", "crm.card.l
 def manual(alias='e'):
     return (f"(coalesce(({alias}.payload->>'manual')::boolean,false) AND coalesce("
             f"({alias}.payload->>'manual_until')::timestamptz,coalesce(({alias}.payload->>'requested_at')::timestamptz,"
-            f"{alias}.created_at)+make_interval(mins=>:interest_minutes))>clock_timestamp())")
+            f"{alias}.created_at)+make_interval(mins=>:interest_minutes))>statement_timestamp())")
 
 
 def sends(alias='e'):
     return (f"EXISTS(SELECT 1 FROM message_jobs mj JOIN send_commands sc ON sc.workspace_id=mj.workspace_id "
             f"AND sc.id=mj.subject_id WHERE mj.workspace_id={alias}.workspace_id AND mj.kind='send' "
             "AND mj.channel_kind='alfa_max_browser' "
-            "AND sc.state IN ('queued','sending') AND (mj.due_at<=clock_timestamp() "
-            "OR mj.lease_until>clock_timestamp()))")
+            "AND sc.state IN ('queued','sending') AND (mj.due_at<=statement_timestamp() "
+            "OR mj.lease_until>statement_timestamp()))")
 
 
 def state(db, workspace, *, lock=False):
@@ -32,9 +32,9 @@ def state(db, workspace, *, lock=False):
 
 def ordering(value, policy):
     urgent = manual()
-    old = "coalesce((e.payload->>'served_at')::timestamptz,e.created_at)<clock_timestamp()-interval '15 minutes'"
+    old = "coalesce((e.payload->>'served_at')::timestamptz,e.created_at)<statement_timestamp()-interval '15 minutes'"
     requested = "coalesce((e.payload->>'requested_at')::timestamptz,e.created_at)"
-    overdue = f"({urgent} AND {requested}<clock_timestamp()-make_interval(secs=>:max_wait))"
+    overdue = f"({urgent} AND {requested}<statement_timestamp()-make_interval(secs=>:max_wait))"
     order = (f"(:background_turn AND NOT {urgent} AND {old}) DESC,{urgent} DESC,{overdue} DESC,"
              f"CASE WHEN {overdue} THEN {requested} END ASC NULLS LAST,"
              f"({urgent} AND coalesce((e.payload->>'priority_boost')::boolean,false)) DESC,"
@@ -52,25 +52,28 @@ def ordering(value, policy):
 
 def eligible(policy):
     topics = ','.join("'" + topic + "'" for topic in card_jobs.TOPICS)
+    # Keep the source lookup parameterized by this exact job. Without OFFSET 0,
+    # stale statistics can turn this into a nested semi-join that scans every
+    # customer for every queued card, exceeding the normal API query budget.
     return (f"e.state='pending' AND e.topic IN ({topics}) "
         "AND EXISTS(SELECT 1 FROM alfa_settings a WHERE a.workspace_id=e.workspace_id "
-        "AND a.connection_id::text=e.payload->>'connection' AND a.version::text=e.payload->>'version' "
+        "AND a.connection_id=CAST(e.payload->>'connection' AS uuid) AND a.version=CAST(e.payload->>'version' AS integer) "
         "AND a.secret_ciphertext IS NOT NULL) "
         "AND EXISTS(SELECT 1 FROM alfa_sync_control sc JOIN alfa_customers c ON c.workspace_id=sc.workspace_id "
         "AND c.run_id=sc.published_id JOIN alfa_branches b ON b.workspace_id=c.workspace_id "
         "AND b.connection_id=sc.connection_id AND b.external_id=c.branch_id AND b.available "
-        "WHERE sc.workspace_id=e.workspace_id AND sc.connection_id::text=e.payload->>'connection' "
-        "AND c.branch_id::text=e.payload->>'branch' AND c.external_id::text=e.payload->>'customer' "
-        "AND c.contact_id::text=e.payload->>'contact' AND c.student_id::text=e.payload->>'student') "
-        "AND ((e.payload->>'available_at')::timestamptz<=clock_timestamp() OR "
+        "WHERE sc.workspace_id=e.workspace_id AND sc.connection_id=CAST(e.payload->>'connection' AS uuid) "
+        "AND c.branch_id=CAST(e.payload->>'branch' AS bigint) AND c.external_id=CAST(e.payload->>'customer' AS bigint) "
+        "AND c.contact_id=CAST(e.payload->>'contact' AS uuid) AND c.student_id=CAST(e.payload->>'student' AS uuid) OFFSET 0) "
+        "AND ((e.payload->>'available_at')::timestamptz<=statement_timestamp() OR "
         "(e.payload->>'error' IN ('access_denied','not_found','invalid_response','crm_unavailable') "
         "AND (e.payload->>'force_at')::timestamptz>(e.payload->>'failed_at')::timestamptz)) "
-        "AND coalesce((e.payload->>'lease_until')::timestamptz,'epoch')<=clock_timestamp() "
+        "AND coalesce((e.payload->>'lease_until')::timestamptz,'epoch')<=statement_timestamp() "
         "AND NOT " + card_jobs.block_sql() +
-        f" AND NOT EXISTS(SELECT 1 FROM outbox_events sibling WHERE sibling.workspace_id=e.workspace_id "
-        f"AND sibling.topic IN ({topics}) AND sibling.state='pending' AND sibling.event_key=e.event_key "
-        "AND (sibling.payload->>'lease_until')::timestamptz>clock_timestamp()) "
-        + (f"AND ({manual()} OR NOT {sends()}) " if policy['pause_background_on_send'] else ""))
+        f" AND e.event_key NOT IN(SELECT sibling.event_key FROM outbox_events sibling WHERE sibling.workspace_id=:w "
+        f"AND sibling.topic IN ({topics}) AND sibling.state='pending' "
+        "AND (sibling.payload->>'lease_until')::timestamptz>statement_timestamp()) "
+        + (f"AND ({manual()} OR NOT {sends().replace('e.workspace_id', ':w')}) " if policy['pause_background_on_send'] else ""))
 
 
 class Deferred(Exception):
