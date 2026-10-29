@@ -23,7 +23,9 @@ def complete(family):
 def publish(db, workspace, snapshot, family):
     if not complete(family):
         return False
-    payload = {'students': family['students'], 'updated_at': family['cache']['updated_at']}
+    from center_messenger.chat_card_view import compact_card
+    payload = {'students': family['students'], 'updated_at': family['cache']['updated_at'],
+               'compact_students': compact_card(family)['students']}
     encoded = json.dumps(payload, ensure_ascii=False)
     if len(encoded.encode()) > 8 * 1024 * 1024:
         return False  # Keep the previous complete view; staging data is still durable.
@@ -37,14 +39,25 @@ def publish(db, workspace, snapshot, family):
     return True
 
 
-def visible(db, workspace, snapshot, family):
-    saved = db.execute(text("SELECT payload,published_at FROM crm_family_snapshots "
-        "WHERE workspace_id=:w AND connection_id=:c AND scope_key=:key AND settings_version=:v"),
+def load(db, workspace, snapshot, family, *, compact=False):
+    # Projection happens in PostgreSQL: chat reads do not deserialize a year's
+    # raw lessons just to throw them away. Legacy snapshots remain readable.
+    students = "payload->'students'"
+    if compact:
+        students = """coalesce(payload->'compact_students',(
+          SELECT jsonb_agg((person-'cards')||jsonb_build_object('cards',(
+            SELECT jsonb_agg((card-'lessons'-'subscriptions')||jsonb_build_object(
+              'lessons_ready',coalesce(jsonb_typeof(card->'lessons')='array',false),
+              'subscriptions_ready',coalesce(jsonb_typeof(card->'subscriptions')='array',false)) ORDER BY ordinal)
+            FROM jsonb_array_elements(person->'cards') WITH ORDINALITY AS cards(card,ordinal))) ORDER BY ordinal)
+          FROM jsonb_array_elements(payload->'students') WITH ORDINALITY AS people(person,ordinal)))"""
+    saved = db.execute(text("SELECT " + students + " AS students,payload->>'updated_at' AS updated_at,published_at "
+        "FROM crm_family_snapshots WHERE workspace_id=:w AND connection_id=:c "
+        "AND scope_key=:key AND settings_version=:v"),
         {'w': workspace, 'c': snapshot['connection_id'], 'v': snapshot['version'], 'key': scope(family)}).mappings().one_or_none()
-    family['cache']['snapshot'] = None
     if saved is None:
-        return family
-    people = copy.deepcopy(saved['payload']['students'])
+        return None
+    people = copy.deepcopy(saved['students'])
     current = {str(person['id']): person for person in family['students']}
     for person in people:
         live = current[str(person['id'])]
@@ -53,7 +66,13 @@ def visible(db, workspace, snapshot, family):
         for card in person['cards']:
             live_card = cards[(str(card['branch_id']), str(card['id']))]
             card.update({key: live_card[key] for key in ('status', 'study_status', 'legal_name', 'branch_name', 'url') if key in live_card})
-    family['students'] = people
-    family['cache']['snapshot'] = {'published_at': saved['published_at'].isoformat(),
-                                    'updated_at': saved['payload']['updated_at'], 'complete': True}
+    return {**family, 'students': people, 'cache': {**family.get('cache', {}), 'snapshot': {
+        'published_at': saved['published_at'].isoformat(), 'updated_at': saved['updated_at'], 'complete': True}}}
+
+
+def visible(db, workspace, snapshot, family):
+    saved = load(db, workspace, snapshot, family)
+    if saved is not None:
+        return saved
+    family['cache']['snapshot'] = None
     return family

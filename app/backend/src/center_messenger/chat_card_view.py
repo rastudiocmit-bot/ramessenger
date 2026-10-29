@@ -16,8 +16,8 @@ def compact_card(family):
         student["cards"] = []
         for source in person["cards"]:
             card = {key: value for key, value in source.items() if key not in {"lessons", "subscriptions"}}
-            card["lessons_ready"] = isinstance(source.get("lessons"), list)
-            card["subscriptions_ready"] = isinstance(source.get("subscriptions"), list)
+            card["lessons_ready"] = isinstance(source.get("lessons"), list) or source.get("lessons_ready", False)
+            card["subscriptions_ready"] = isinstance(source.get("subscriptions"), list) or source.get("subscriptions_ready", False)
             student["cards"].append(card)
         result["students"].append(student)
     return result

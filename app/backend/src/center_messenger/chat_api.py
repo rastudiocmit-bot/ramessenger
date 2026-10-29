@@ -1168,7 +1168,7 @@ def history(
 
 @router.get("/chats/{conversation_id}/family")
 def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request, auto: bool = False,
-                cached_only: bool = False, compact: bool = False,
+                cached_only: bool = False, compact: bool = False, diagnostics: bool = False,
                 known_version: str | None = Query(default=None, pattern="^[0-9a-f]{64}$")):
     _, reader = components(request)
     actor = identity(request)
@@ -1180,7 +1180,7 @@ def chat_family(workspace_id: UUID, conversation_id: UUID, request: Request, aut
                 raise AuthError(404, "Диалог пока не связан с карточкой CRM.")
     with family_read_stage("family.prepare"):
         return request.app.state.directory.prepare(actor, workspace_id, contact, conversation=conversation, auto=auto,
-                                                   cached_only=cached_only, compact=compact, known_version=known_version)
+                                                   cached_only=cached_only, compact=compact, known_version=known_version, diagnostics=diagnostics)
 
 
 @router.post("/chats/{conversation_id}/family/refresh", status_code=202)
