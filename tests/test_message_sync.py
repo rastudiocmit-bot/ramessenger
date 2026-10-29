@@ -4559,10 +4559,9 @@ class MessageSyncTests(unittest.TestCase):
                 compact=True,known_version=result['version'])
         self.db.execute(text("UPDATE contacts SET display_name='Changed family' WHERE workspace_id=:w AND id=:c"),
             {'w':self.workspace,'c':self.contact})
-        with patch.object(reader,'detail',wraps=reader.detail) as full:
-            reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True,
-                compact=True,known_version=result['version'])
-            full.assert_called_once()
+        same=reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True,
+            compact=True,known_version=result['version'])
+        self.assertTrue(same['not_modified'])
 
     def test_read_version_migration_is_reversible_and_backfills_existing_message_counts(self):
         self.project(self.row())

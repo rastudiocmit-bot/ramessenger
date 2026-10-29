@@ -92,6 +92,11 @@ class CardViewTests(unittest.TestCase):
         self.assertTrue(student["cards"][0]["lessons_ready"])
         self.assertEqual(len(original["students"][0]["cards"][0]["lessons"]), 1000)
 
+    def test_compacting_a_published_compact_snapshot_preserves_readiness(self):
+        value = compact_card(compact_card(family()))
+        self.assertTrue(value['students'][0]['cards'][0]['lessons_ready'])
+        self.assertTrue(value['students'][0]['cards'][0]['subscriptions_ready'])
+
     def test_missing_facts_remain_missing_instead_of_claiming_an_empty_history(self):
         value = family()
         del value["students"][0]["cards"][0]["lessons"]

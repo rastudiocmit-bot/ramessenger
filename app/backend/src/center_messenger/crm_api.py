@@ -258,13 +258,13 @@ class DirectoryReader:
             result["has_more"] = (page + 1) * 30 < result["total"]
             return result
 
-    def detail(self, actor, workspace, contact_id, *, branch=None, conversation=None):
-        source_contact = contact_id
+    def detail(self, actor, workspace, contact_id, *, branch=None, conversation=None, diagnostics=False):
         transaction = self.connections.chat_transaction if conversation else self.connections._transaction
         with transaction(actor, workspace, snapshot=True) as db:
-            return self._detail(db, workspace, contact_id, branch=branch, conversation=conversation)
+            return self._detail(db, workspace, contact_id, branch=branch, conversation=conversation, diagnostics=diagnostics)
 
-    def _detail(self, db, workspace, contact_id, *, branch=None, conversation=None, publish_snapshot=False):
+    def _detail(self, db, workspace, contact_id, *, branch=None, conversation=None, publish_snapshot=False,
+                compact=False, diagnostics=True, publish_missing=False):
         source_contact = contact_id
         if conversation and not db.execute(text(
             "SELECT 1 FROM conversations c JOIN connections cn ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id "
@@ -331,28 +331,6 @@ class DirectoryReader:
         )
         if not cards:
             raise AuthError(404, "Контакт недоступен.")
-        members = list(
-            db.execute(
-                text(
-                    "SELECT c.student_id,c.external_id AS customer_id,"
-                    "g.external_id,g.name,g.branch_id,m.b_date,m.e_date,"
-                    "b.name AS branch_name FROM alfa_customers c "
-                    "JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND "
-                    "b.external_id=c.branch_id "
-                    "AND b.connection_id=:conn JOIN alfa_memberships m ON "
-                    "m.workspace_id=c.workspace_id "
-                    "AND m.run_id=c.run_id AND m.branch_id=c.branch_id AND "
-                    "m.customer_id=c.external_id "
-                    "JOIN alfa_groups g ON g.workspace_id=m.workspace_id AND g.run_id=m.run_id "
-                    "AND g.branch_id=m.branch_id AND g.external_id=m.group_id WHERE "
-                    + scope
-                    + " AND (m.b_date IS NULL OR m.b_date<=:today) AND (m.e_date IS NULL OR "
-                    "m.e_date>=:today) "
-                    "ORDER BY g.name,g.external_id LIMIT 5000"
-                ),
-                params,
-            ).mappings()
-        )
         people = {}
         for row in cards[:1000]:
             key = str(row["student_id"])
@@ -383,6 +361,39 @@ class DirectoryReader:
                     ),
                 }
             )
+        # Identity and access were checked against the current publication above.
+        # A complete durable view can now be returned without reading raw lesson
+        # arrays, rebuilding subscription links or ranking the workspace queue.
+        from center_messenger import family_snapshots
+        if not publish_snapshot and len(cards) <= 1000:
+            saved = family_snapshots.load(db, workspace, snapshot, {
+                "id": str(contact_id), "students": list(people.values())}, compact=compact)
+            if saved is not None:
+                return self._saved_detail(db, workspace, snapshot, saved, source_contact, contact,
+                                          selection, cards, params, diagnostics=diagnostics)
+
+        members = list(
+            db.execute(
+                text(
+                    "SELECT c.student_id,c.external_id AS customer_id,"
+                    "g.external_id,g.name,g.branch_id,m.b_date,m.e_date,"
+                    "b.name AS branch_name FROM alfa_customers c "
+                    "JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND "
+                    "b.external_id=c.branch_id "
+                    "AND b.connection_id=:conn JOIN alfa_memberships m ON "
+                    "m.workspace_id=c.workspace_id "
+                    "AND m.run_id=c.run_id AND m.branch_id=c.branch_id AND "
+                    "m.customer_id=c.external_id "
+                    "JOIN alfa_groups g ON g.workspace_id=m.workspace_id AND g.run_id=m.run_id "
+                    "AND g.branch_id=m.branch_id AND g.external_id=m.group_id WHERE "
+                    + scope
+                    + " AND (m.b_date IS NULL OR m.b_date<=:today) AND (m.e_date IS NULL OR "
+                    "m.e_date>=:today) "
+                    "ORDER BY g.name,g.external_id LIMIT 5000"
+                ),
+                params,
+            ).mappings()
+        )
         cached = {
             (row["branch_id"], row["customer_id"]): row
             for row in db.execute(
@@ -480,7 +491,7 @@ class DirectoryReader:
             "max_bot_connected": bool(contact["max_bot_connected"]),
             "students": list(people.values()),
             "cache": cache_status(db, workspace, snapshot["connection_id"], list(people.values()), contact_id, snapshot["version"],
-                                  contacts=family_contacts, snapshot=snapshot),
+                                  contacts=family_contacts, snapshot=snapshot, diagnostics=diagnostics),
             "snapshot_at": snapshot["finished_at"].isoformat()
             if snapshot["finished_at"]
             else None,
@@ -488,15 +499,98 @@ class DirectoryReader:
             "has_more": len(cards) > 1000 or len(members) == 5000,
         }
 
-        from center_messenger import family_snapshots
         if publish_snapshot:
             family_snapshots.publish(db, workspace, snapshot, result)
             return result
+        if publish_missing:
+            family_snapshots.publish(db, workspace, snapshot, result)
         return family_snapshots.visible(db, workspace, snapshot, result)
 
-    def prepare(self, actor, workspace, contact_id, *, conversation, auto=False, force=False, cached_only=False, compact=False, known_version=None):
+    def _saved_detail(self, db, workspace, snapshot, family, source_contact, contact, selection,
+                      cards, params, *, diagnostics):
+        # Read only scalar freshness fields. Staging lesson/subscription arrays
+        # are neither transferred nor recalculated on the snapshot path.
+        times = {(row["branch_id"], row["customer_id"]): row for row in db.execute(text(
+            "SELECT f.branch_id,f.customer_id,f.refreshed_at,f.lessons_refreshed_at,"
+            "f.lessons_full_refreshed_at FROM alfa_family_details f JOIN alfa_customers c "
+            "ON c.workspace_id=f.workspace_id AND c.branch_id=f.branch_id AND c.external_id=f.customer_id "
+            "WHERE f.workspace_id=:w AND f.connection_id=:conn AND f.settings_version=:version "
+            "AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[]))"),
+            params | {"version": snapshot["version"]}).mappings()}
+        group_times = {(row["branch_id"], row["external_id"]): row["refreshed_at"] for row in db.execute(text(
+            "SELECT c.branch_id,c.external_id,e.payload->>'refreshed_at' AS refreshed_at FROM alfa_customers c "
+            "JOIN outbox_events e ON e.workspace_id=c.workspace_id AND e.topic=:topic "
+            "AND e.event_key=concat(CAST(:conn AS text),':',c.branch_id,':',c.external_id) "
+            "WHERE c.workspace_id=:w AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[])) "
+            "AND e.payload->>'version'=CAST(:version AS text) AND e.payload->>'student'=c.student_id::text "
+            "AND e.payload->>'contact'=c.contact_id::text AND e.payload->>'checked_run'=CAST(:r AS text)"),
+            params | {"topic": GROUPS_TOPIC, "version": snapshot["version"]}).mappings()}
+        freshness = []
+        for person in family["students"]:
+            item = {"id": person["id"], "cards": []}
+            for card in person["cards"]:
+                key = (int(card["branch_id"]), int(card["id"]))
+                source = times.get(key)
+                item["cards"].append({"id": card["id"], "branch_id": card["branch_id"],
+                    **{field: source[field].isoformat() if source and source[field] else None
+                       for field in ("refreshed_at", "lessons_refreshed_at", "lessons_full_refreshed_at")},
+                    "groups_refreshed_at": group_times.get(key),
+                    "needs_mapping_refresh": card.get("needs_mapping_refresh", False)})
+            freshness.append(item)
+        cached = cache_status(db, workspace, snapshot["connection_id"], freshness, UUID(family["id"]),
+                              snapshot["version"], contacts=params["family_contacts"], snapshot=snapshot,
+                              diagnostics=diagnostics)
+        cached["snapshot"] = family["cache"]["snapshot"]
+        return {**family, "source_contact_id": str(source_contact), "selection": card_preference.public(selection),
+                "name": selection["name"] if selection else contact["display_name"],
+                "phones": contact["phones"], "emails": contact["emails"],
+                **current_review_status(db, workspace, snapshot, cards, selection=selection),
+                "max_connected": bool(contact["max_connected"] or selection),
+                "max_bot_connected": bool(contact["max_bot_connected"]), "cache": cached,
+                "snapshot_at": snapshot["finished_at"].isoformat() if snapshot["finished_at"] else None,
+                "today": snapshot["today"].isoformat(), "has_more": False}
+
+    def _cached_view(self, actor, workspace, contact_id, conversation, *, auto, force,
+                     compact, known_version, diagnostics):
+        from center_messenger.chat_queue import state
+        with self.connections.chat_transaction(actor, workspace, snapshot=True) as db:
+            linked = db.execute(text("SELECT c.crm_link_manual,cn.kind AS channel_kind FROM conversations c "
+                "JOIN connections cn ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id "
+                "WHERE c.workspace_id=:w AND c.id=:c AND c.contact_id=:contact AND c.kind='direct'"),
+                {"w": workspace, "c": conversation, "contact": contact_id}).mappings().one_or_none()
+            if not linked:
+                raise AuthError(404, "Контакт недоступен в этом диалоге.")
+            if auto and not state(db, workspace, conversation)["needs_reply"]:
+                return {"deferred": True}
+            if force:
+                self.connections.accounts._workspace(db, actor, workspace, manage=True)
+            snapshot = self._published(db, workspace)
+            if snapshot is None:
+                raise AuthError(404, "Контакт недоступен.")
+            repair = (linked["channel_kind"] == "alfa_max_browser" and not linked["crm_link_manual"]
+                      and card_preference.selected(db, workspace, snapshot, conversation, contact_id) is None)
+            if not repair:
+                family = self._detail(db, workspace, contact_id, conversation=conversation,
+                                      compact=compact, diagnostics=diagnostics)
+                return self._card_reply(actor, workspace, contact_id, conversation, family, known_version) if compact else family
+        # Uncommon local identity repair requires a write transaction. Do not
+        # hold a workspace lock (or acquire two connections) for normal reads.
+        with self.connections.chat_transaction(actor, workspace) as db:
+            snapshot = self._published(db, workspace)
+            if snapshot is None:
+                raise AuthError(404, "Контакт недоступен.")
+            card_preference.ensure_selected(db, workspace, snapshot, conversation, contact_id)
+        if compact:
+            return self.prepared_view(actor, workspace, contact_id, conversation,
+                                      known_version=known_version, diagnostics=diagnostics)
+        return self.detail(actor, workspace, contact_id, conversation=conversation, diagnostics=diagnostics)
+
+    def prepare(self, actor, workspace, contact_id, *, conversation, auto=False, force=False, cached_only=False, compact=False, known_version=None, diagnostics=False):
         # An ordinary chat selection must not prepare a read client's full card.
         # Both cache hits and requests retain the same chat membership checks.
+        if cached_only:
+            return self._cached_view(actor, workspace, contact_id, conversation, auto=auto, force=force,
+                                     compact=compact, known_version=known_version, diagnostics=diagnostics)
         from center_messenger.chat_queue import state
         with self.connections.chat_transaction(actor, workspace) as db:
             linked = db.execute(text("SELECT c.crm_link_manual,cn.kind AS channel_kind FROM conversations c "
@@ -512,40 +606,35 @@ class DirectoryReader:
             snapshot = self._published(db, workspace)
             if snapshot is None:
                 raise AuthError(404, "Контакт недоступен.")
-            if cached_only and linked["channel_kind"] == "alfa_max_browser" and not linked["crm_link_manual"]:
-                card_preference.ensure_selected(db, workspace, snapshot, conversation, contact_id)
-            if not cached_only:
-                card_preference.refresh(db, workspace, snapshot, [contact_id])
-                selection = card_preference.selected(db, workspace, snapshot, conversation, contact_id)
-                self._detail(db, workspace, contact_id, conversation=conversation, publish_snapshot=True)
-                policy = card_loader_settings.get(db, workspace)
-                manual_context = _manual_fields(contact_id, source_contact=contact_id,
-                                                conversation=conversation, policy=policy)
-                for target in selection["contacts"] if selection else [contact_id]:
-                    enqueue(db, workspace, snapshot, contact=target, force=force,
-                            source_contact=contact_id, conversation=conversation,
-                            manual_context=manual_context)
+            card_preference.refresh(db, workspace, snapshot, [contact_id])
+            selection = card_preference.selected(db, workspace, snapshot, conversation, contact_id)
+            # Legacy/missing complete snapshots are assembled only by this
+            # separate preparation request, never rebuilt on a cache hit.
+            self._detail(db, workspace, contact_id, conversation=conversation,
+                         compact=compact, diagnostics=False, publish_missing=True)
+            policy = card_loader_settings.get(db, workspace)
+            manual_context = _manual_fields(contact_id, source_contact=contact_id,
+                                            conversation=conversation, policy=policy)
+            for target in selection["contacts"] if selection else [contact_id]:
+                enqueue(db, workspace, snapshot, contact=target, force=force,
+                        source_contact=contact_id, conversation=conversation,
+                        manual_context=manual_context)
         if compact:
-            return self.prepared_view(actor, workspace, contact_id, conversation, known_version=known_version)
-        return self.detail(actor, workspace, contact_id, conversation=conversation)
+            return self.prepared_view(actor, workspace, contact_id, conversation, known_version=known_version, diagnostics=diagnostics)
+        return self.detail(actor, workspace, contact_id, conversation=conversation, diagnostics=diagnostics)
 
-    def prepared_view(self, actor, workspace, contact_id, conversation, *, known_version=None):
-        from center_messenger.chat_revision import versions
+    def prepared_view(self, actor, workspace, contact_id, conversation, *, known_version=None, diagnostics=False):
+        # A version belongs to this verified family, not to every card in the
+        # workspace. Every read, including not_modified, rechecks access/IDs in
+        # one database snapshot; no cached response can bypass revocation.
         with self.connections.chat_transaction(actor, workspace, snapshot=True) as db:
-            if not db.execute(text("SELECT 1 FROM conversations c JOIN connections cn ON "
-                "cn.workspace_id=c.workspace_id AND cn.id=c.connection_id WHERE c.workspace_id=:w "
-                "AND c.id=:c AND c.contact_id=:contact AND c.kind='direct' "
-                "AND cn.kind IN ('max_bot','alfa_max_browser')"),
-                {"w": workspace, "c": conversation, "contact": contact_id}).scalar_one_or_none():
-                raise AuthError(404, "Контакт недоступен в этом диалоге.")
-            snapshot = self._published(db, workspace)
-            if snapshot is None:
-                raise AuthError(404, "Контакт недоступен.")
-            key = (str(workspace), str(getattr(actor, "user_id", None)), str(conversation), str(contact_id),
-                   versions(db, workspace)[1], str(snapshot["run"]), snapshot["version"], str(snapshot["today"]))
-        value = self.card_views.get(key)
-        if value is None:
-            value = self.card_views.put(key, self.detail(actor, workspace, contact_id, conversation=conversation))
+            family = self._detail(db, workspace, contact_id, conversation=conversation,
+                                  compact=True, diagnostics=diagnostics)
+        return self._card_reply(actor, workspace, contact_id, conversation, family, known_version)
+
+    def _card_reply(self, actor, workspace, contact_id, conversation, family, known_version):
+        key = (str(workspace), str(getattr(actor, "user_id", None)), str(conversation), str(contact_id))
+        value = self.card_views.put(key, family)
         return self.card_views.reply(value, known_version)
 
     def refresh_card(self, actor, workspace, contact_id, student_id, branch_id, customer_id):

@@ -95,7 +95,7 @@ class CardLoaderDurabilityTests(unittest.TestCase):
         # still applies; neither reading a card nor claiming it scans N x N sources.
         self.db.execute(text("SET LOCAL statement_timeout='2500ms'"))
         worker.reconcile_manual(self.db, self.workspace, self.snapshot)
-        status = reader.detail(None, self.workspace, self.contact)['cache']
+        status = reader.detail(None, self.workspace, self.contact, diagnostics=True)['cache']
         self.assertEqual(status['sections']['finance']['queue_position'], 1)
         self.assertEqual(worker.claim(self.workspace)['customer'], '7')
 
@@ -132,6 +132,186 @@ class CardLoaderDurabilityTests(unittest.TestCase):
                 'version':1,'student':str(student),'contact':str(self.contact),'checked_run':str(self.run),
                 'refreshed_at':datetime.now(UTC).isoformat()})})
         self.assertTrue(family_snapshots.complete(reader._detail(self.db,self.workspace,self.contact,publish_snapshot=True)))
+
+    def test_cold_snapshot_path_skips_raw_facts_links_and_global_queue_ranking(self):
+        from center_messenger.crm_api import DirectoryReader
+        from sqlalchemy import event
+        reader, _, student = self.family_worker_fixture(include_groups=True)
+        self.seed_complete(reader, student)
+        self.project(self.row())
+        conversation = self.conversation()['id']
+        # A fresh process has no RAM view. A large staged history must not even
+        # cross the DB connection when a complete compact view already exists.
+        self.db.execute(text("UPDATE alfa_family_details SET lessons=CAST(:p AS jsonb) WHERE workspace_id=:w"),
+                        {'w': self.workspace, 'p': json.dumps([{'id': i} for i in range(3000)])})
+        reader = DirectoryReader(reader.connections)
+        queries = []
+        def capture(conn, cursor, statement, parameters, context, executemany):
+            queries.append(statement)
+        event.listen(self.db, 'before_cursor_execute', capture)
+        try:
+            with patch('center_messenger.crm_api.group_facts', side_effect=AssertionError('link rebuild')), \
+                 patch('center_messenger.crm_api.customer_subscriptions', side_effect=AssertionError('subscription rebuild')), \
+                 patch.object(card_queue, 'ordering', side_effect=AssertionError('workspace rank')):
+                first = reader.prepare(None, self.workspace, self.contact, conversation=conversation,
+                                       cached_only=True, compact=True)
+                # The separate scheduling request also reuses the complete view.
+                second = reader.prepare(None, self.workspace, self.contact, conversation=conversation, compact=True)
+        finally:
+            event.remove(self.db, 'before_cursor_execute', capture)
+        self.assertEqual(first['students'][0]['balance'], '100.00')
+        self.assertTrue(first['cache']['snapshot']['complete'])
+        self.assertTrue(first['students'][0]['cards'][0]['lessons_ready'])
+        self.assertNotIn('lessons', first['students'][0]['cards'][0])
+        self.assertFalse(second['cache']['queue_diagnostics'])
+        self.assertFalse(any('SELECT f.*' in query or 'row_number()' in query for query in queries))
+
+    def test_repeated_snapshot_read_uses_one_read_transaction_without_workspace_writes(self):
+        reader, _, student = self.family_worker_fixture(include_groups=True)
+        self.seed_complete(reader, student)
+        self.project(self.row())
+        conversation = self.conversation()['id']
+        reader.prepare(None, self.workspace, self.contact, conversation=conversation, cached_only=True, compact=True)
+        with patch.object(reader.connections, 'chat_transaction', wraps=reader.connections.chat_transaction) as transaction, \
+             patch('center_messenger.crm_api.card_preference.ensure_selected', side_effect=AssertionError('unnecessary repair')):
+            reader.prepare(None, self.workspace, self.contact, conversation=conversation, cached_only=True, compact=True)
+        transaction.assert_called_once_with(None, self.workspace, snapshot=True)
+
+    def test_family_version_ignores_other_clients_but_observes_own_lease_and_new_snapshot(self):
+        reader, worker, student = self.family_worker_fixture(include_groups=True)
+        self.seed_complete(reader, student)
+        self.project(self.row())
+        conversation = self.conversation()['id']
+        def read(version=None):
+            return reader.prepare(None, self.workspace, self.contact, conversation=conversation,
+                                  cached_only=True, compact=True, known_version=version)
+        first = read()
+        other = uuid4(); self.add_customer(other, 1, 8)
+        self.db.execute(text("UPDATE contacts SET display_name='Another client' WHERE workspace_id=:w AND id=:c"),
+                        {'w': self.workspace, 'c': other})
+        family_cache.enqueue(self.db, self.workspace, self.snapshot, contact=other, topics=(family_cache.TOPIC,))
+        self.db.execute(text('SET CONSTRAINTS ALL IMMEDIATE'))
+        self.assertTrue(read(first['version'])['not_modified'])
+        # Own job state is current even when the complete facts stay unchanged.
+        family_cache.enqueue(self.db, self.workspace, self.snapshot, contact=self.contact, force=True,
+                             topics=(family_cache.TOPIC,))
+        queued = read(first['version'])
+        self.assertNotEqual(queued['version'], first['version'])
+        self.assertEqual(queued['cache']['sections']['finance']['status'], 'queued')
+        job = worker.claim(self.workspace)
+        running = read(queued['version'])
+        self.assertTrue(running['cache']['loading'])
+        self.assertNotEqual(running['version'], queued['version'])
+        self.db.execute(text("UPDATE outbox_events SET state='published',payload=payload-'lease_owner'-'lease_until' "
+                             "WHERE id=:id"), {'id': job['id']})
+        self.db.execute(text("UPDATE alfa_family_details SET balance=250 WHERE workspace_id=:w AND customer_id=7"),
+                        {'w': self.workspace})
+        reader._detail(self.db, self.workspace, self.contact, publish_snapshot=True)
+        updated = read(first['version'])
+        self.assertEqual(updated['students'][0]['balance'], '250.00')
+        self.assertNotEqual(updated['version'], first['version'])
+
+    def test_snapshot_hit_rechecks_customer_student_branch_and_labels_before_reply(self):
+        reader, _, student = self.family_worker_fixture(include_groups=True)
+        self.seed_complete(reader, student)
+        self.project(self.row())
+        conversation = self.conversation()['id']
+        first = reader.prepare(None, self.workspace, self.contact, conversation=conversation,
+                               cached_only=True, compact=True)
+        self.db.execute(text("UPDATE alfa_customers SET name='Renamed child',legal_name='Renamed parent',"
+                             "status='client' WHERE workspace_id=:w"), {'w': self.workspace})
+        renamed = reader.prepare(None, self.workspace, self.contact, conversation=conversation,
+                                 cached_only=True, compact=True, known_version=first['version'])
+        self.assertEqual(renamed['students'][0]['name'], 'Renamed child')
+        self.assertEqual(renamed['students'][0]['cards'][0]['legal_name'], 'Renamed parent')
+        self.assertTrue(renamed['cache']['snapshot']['complete'])
+        replacement = uuid4()
+        self.db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES(:w,:s,'Replacement')"),
+                        {'w': self.workspace, 's': replacement})
+        self.db.execute(text("UPDATE alfa_customers SET student_id=:s WHERE workspace_id=:w"),
+                        {'w': self.workspace, 's': replacement})
+        replaced = reader.prepare(None, self.workspace, self.contact, conversation=conversation,
+                                  cached_only=True, compact=True, known_version=renamed['version'])
+        self.assertIsNone(replaced['cache']['snapshot'])
+        self.db.execute(text("UPDATE alfa_branches SET available=false WHERE workspace_id=:w"), {'w': self.workspace})
+        from center_messenger.auth_security import AuthError
+        with self.assertRaises(AuthError) as denied:
+            reader.prepare(None, self.workspace, self.contact, conversation=conversation,
+                           cached_only=True, compact=True, known_version=renamed['version'])
+        self.assertEqual(denied.exception.status, 404)
+
+    def test_snapshot_not_modified_cannot_bypass_revoked_session_or_membership_under_rls(self):
+        from center_messenger.accounts import Accounts
+        from center_messenger.auth_security import Identity, AuthError
+        from center_messenger.config import Settings
+        from center_messenger.crm_api import DirectoryReader
+        reader, _, student = self.family_worker_fixture(include_groups=True)
+        self.seed_complete(reader, student)
+        self.project(self.row())
+        conversation = self.conversation()['id']
+        session = uuid4()
+        self.db.execute(text("INSERT INTO workspace_memberships(workspace_id,user_id,role,sections) "
+                             "VALUES(:w,:u,'operator',ARRAY['messages'])"), {'w': self.workspace, 'u': self.user})
+        self.db.execute(text("INSERT INTO auth_sessions(id,user_id,token_hash,auth_epoch,device_label,expires_at) "
+                             "VALUES(:s,:u,:token,0,'Test',now()+interval '1 day')"),
+                        {'s': session, 'u': self.user, 'token': 'b'*64})
+        outer = self
+        class Engine:
+            @contextmanager
+            def begin(self):
+                with outer.db.begin_nested():
+                    yield outer.db
+        accounts = Accounts(Engine(), Settings())
+        class Connections:
+            @contextmanager
+            def chat_transaction(self, actor, workspace, **options):
+                # The test already owns its outer transaction. Exercise real
+                # session/membership/RLS checks without changing its isolation.
+                with accounts.transaction(actor) as db:
+                    accounts._workspace_chat(db, actor, workspace)
+                    yield db
+        reader = DirectoryReader(Connections())
+        actor = Identity(self.user, session, 'test@example.test', 'Test', False, 0, 'test')
+        self.db.execute(text(f'GRANT USAGE ON SCHEMA "{self.schema}" TO cm_app'))
+        with self.db.begin_nested():
+            self.db.execute(text('SET LOCAL ROLE cm_app'))
+            first = reader.prepared_view(actor, self.workspace, self.contact, conversation)
+            self.assertTrue(first['cache']['snapshot']['complete'])
+            self.assertTrue(reader.prepared_view(actor, self.workspace, self.contact, conversation,
+                                                known_version=first['version'])['not_modified'])
+            with self.assertRaises(AuthError) as denied:
+                reader.prepared_view(actor, uuid4(), self.contact, conversation, known_version=first['version'])
+            self.assertEqual(denied.exception.status, 404)
+            self.db.execute(text('RESET ROLE'))
+            self.db.execute(text("UPDATE workspace_memberships SET sections='{}' WHERE workspace_id=:w"), {'w': self.workspace})
+            self.db.execute(text('SET LOCAL ROLE cm_app'))
+            with self.assertRaises(AuthError) as denied:
+                reader.prepared_view(actor, self.workspace, self.contact, conversation, known_version=first['version'])
+            self.assertEqual(denied.exception.status, 403)
+            self.db.execute(text('RESET ROLE'))
+            self.db.execute(text("UPDATE auth_sessions SET revoked_at=now() WHERE id=:s"), {'s': session})
+            self.db.execute(text('SET LOCAL ROLE cm_app'))
+            with self.assertRaises(AuthError) as denied:
+                reader.prepared_view(actor, self.workspace, self.contact, conversation, known_version=first['version'])
+            self.assertEqual(denied.exception.status, 401)
+
+    def test_legacy_snapshot_and_explicit_queue_diagnostics_keep_complete_facts(self):
+        reader, _, student = self.family_worker_fixture(include_groups=True)
+        self.seed_complete(reader, student)
+        self.db.execute(text("UPDATE crm_family_snapshots SET payload=payload-'compact_students' WHERE workspace_id=:w"),
+                        {'w': self.workspace})
+        self.project(self.row())
+        conversation = self.conversation()['id']
+        family_cache.enqueue(self.db, self.workspace, self.snapshot, contact=self.contact, force=True)
+        fast = reader.prepare(None, self.workspace, self.contact, conversation=conversation,
+                              cached_only=True, compact=True)
+        detailed = reader.prepare(None, self.workspace, self.contact, conversation=conversation,
+                                  cached_only=True, compact=True, diagnostics=True)
+        self.assertTrue(fast['cache']['snapshot']['complete'])
+        self.assertTrue(fast['students'][0]['cards'][0]['lessons_ready'])
+        self.assertIsNone(fast['cache']['queue_position'])
+        self.assertEqual(detailed['cache']['queue_position'], 1)
+        self.assertEqual(fast['students'], detailed['students'])
 
     def test_full_snapshot_hides_staging_and_replaces_all_parts_atomically(self):
         reader, _, student = self.family_worker_fixture(include_groups=True)
@@ -182,7 +362,7 @@ class CardLoaderDurabilityTests(unittest.TestCase):
         self.open_job(worker)
         self.db.execute(text("UPDATE outbox_events SET payload=(payload-'lease_owner'-'lease_until')||jsonb_build_object("
             "'requested_at',clock_timestamp()-interval '70 seconds') WHERE workspace_id=:w"),{'w':self.workspace})
-        status=reader.detail(None,self.workspace,self.contact)['cache']
+        status=reader.detail(None,self.workspace,self.contact,diagnostics=True)['cache']
         self.assertTrue(status['wait_exceeded']);self.assertFalse(status['loading'])
 
     def test_replaced_customer_or_student_cannot_read_the_previous_full_snapshot(self):
@@ -226,13 +406,13 @@ class CardLoaderDurabilityTests(unittest.TestCase):
         reader, worker, _ = self.family_worker_fixture(include_groups=True)
         self.policy(preload_active_cards=False)
         family_cache.enqueue(self.db,self.workspace,self.snapshot,contact=self.contact)
-        status=reader.detail(None,self.workspace,self.contact)['cache']
+        status=reader.detail(None,self.workspace,self.contact,diagnostics=True)['cache']
         first=worker.claim(self.workspace)
         labels={family_cache.TOPIC:'finance',family_cache.LESSONS:'lessons',family_cache.HISTORY:'history',family_cache.GROUPS:'groups'}
         self.assertEqual(status['sections'][labels[first['topic']]]['queue_position'],1)
         worker.yield_job(self.workspace,first)
         self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('available_at',clock_timestamp()+interval '1 hour','error','crm_unavailable') WHERE id=:id"),{'id':first['id']})
-        status=reader.detail(None,self.workspace,self.contact)['cache']
+        status=reader.detail(None,self.workspace,self.contact,diagnostics=True)['cache']
         self.assertIsNone(status['sections'][labels[first['topic']]]['queue_position'])
 
     def test_expired_manual_interest_loses_priority_without_losing_the_request(self):

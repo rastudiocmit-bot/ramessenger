@@ -162,31 +162,40 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
                "finance": topic == TOPIC, **manual, **card_preference.params(snapshot)}).rowcount
 
 
-def cache_status(db, workspace, connection, cards, contact, version, *, contacts=None, snapshot=None):
+def cache_status(db, workspace, connection, cards, contact, version, *, contacts=None, snapshot=None, diagnostics=True):
     contacts = list(contacts or [contact])
     sources = [card for student in cards for card in student["cards"]]
+    identities = {(str(card["branch_id"]), str(card["id"])): str(student["id"])
+                  for student in cards for card in student["cards"]}
+    event_keys = [f"{connection}:{branch}:{customer}" for branch, customer in identities]
     now = datetime.now(UTC)
     policy = card_loader_settings.get(db, workspace)
-    order, ordering = card_queue.ordering(card_queue.state(db, workspace), policy)
-    jobs = list(db.execute(text("""
-      WITH ranked AS (
-        SELECT e.id,row_number() OVER (ORDER BY """ + order + ") AS position FROM outbox_events e "
-        "WHERE e.workspace_id=:w AND " + card_queue.eligible(policy) + """
-      )
+    # Queue ranking is an explicit diagnostic, not a dependency of card reads.
+    # Normal reads query only this family's durable events and scalar freshness.
+    ordering, ranked, join, position = {}, "", "", "NULL"
+    if diagnostics:
+        order, ordering = card_queue.ordering(card_queue.state(db, workspace), policy)
+        ranked = ("WITH ranked AS (SELECT e.id,row_number() OVER (ORDER BY " + order +
+                  ") AS position FROM outbox_events e WHERE e.workspace_id=:w AND " +
+                  card_queue.eligible(policy) + ") ")
+        join, position = " LEFT JOIN ranked ON ranked.id=e.id ", "ranked.position"
+    jobs = list(db.execute(text(ranked + """
       SELECT (e.payload-'checkpoint')||jsonb_build_object('topic',e.topic,'job_id',CAST(e.id AS text),
-        'created_at',e.created_at,'queue_position',ranked.position,'checkpoint_pages',
+        'created_at',e.created_at,'queue_position',""" + position + """,'checkpoint_pages',
         coalesce((e.payload->'checkpoint'->>'pages')::integer,0))
-      FROM outbox_events e LEFT JOIN ranked ON ranked.id=e.id
+      FROM outbox_events e """ + join + """
       WHERE e.workspace_id=:w AND e.topic IN (:finance,:lessons,:history,:groups)
         AND e.state='pending' AND e.payload->>'connection'=:conn AND e.payload->>'version'=:v
         AND e.payload->>'contact'=ANY(CAST(:contacts AS text[]))
+        AND e.event_key=ANY(CAST(:event_keys AS text[]))
+      ORDER BY e.topic,e.event_key
     """), {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
-         "conn": str(connection), "v": str(version), "contacts": list(map(str, contacts)), **ordering}).scalars())
+         "conn": str(connection), "v": str(version), "contacts": list(map(str, contacts)),
+         "event_keys": event_keys, **ordering}).scalars())
     # Outbox JSON keeps source identifiers as strings.  Normalising both sides
     # is essential: otherwise a real queued/leased job disappears from the
     # public status when the prepared card contains integer AlfaCRM IDs.
-    keys = {(str(card["branch_id"]), str(card["id"])) for card in sources}
-    jobs = [job for job in jobs if (job["branch"], job["customer"]) in keys]
+    jobs = [job for job in jobs if identities.get((job["branch"], job["customer"])) == job.get("student")]
     active_blocks = card_jobs.blocks(db, workspace, connection, version) if jobs else []
     jobs = [card_jobs.effective_job(job, active_blocks) for job in jobs]
     if jobs and policy['pause_background_on_send'] and db.execute(text(
@@ -302,6 +311,7 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
             "state": state, "loading": loading, "refreshing": loading, "busy": any(job.get("cause") == "busy" for job in jobs),
             "pending": bool(jobs), "queued": sum(not _active_lease(job, now) for job in jobs),
             "queue_position": min(positions) if positions else None, "sections": sections,
+            "queue_diagnostics": diagnostics,
             "wait_exceeded": any(section["wait_exceeded"] for section in sections.values()),
             "max_wait_seconds": policy["manual_max_wait_seconds"],
             "updated_at": updated.isoformat() if updated else None,
