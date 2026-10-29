@@ -459,13 +459,10 @@
     else if (mode === "active" && before === "error") notices?.resolve("connection:" + selector);
   }
   function connectionView(view) {
-    if (!["monitor", "wizard", "settings", "voice", "agents"].includes(view)) view = "monitor";
+    if (!["wizard", "settings", "voice", "agents"].includes(view)) view = "wizard";
     state.connectionsView = view;
-    // One live monitor, no duplicate IDs, timers or request streams.
-    const monitor = $("#connection-monitor-content");
-    (view === "wizard" ? $("#wizard-monitor-slot") : $("#connections-monitor-view")).append(monitor);
     if (view === "wizard") void cardLoader.load();
-    for (const name of ["monitor", "wizard", "settings", "voice", "agents"]) {
+    for (const name of ["wizard", "settings", "voice", "agents"]) {
       show($("#connections-" + name + "-view"), name === view);
       $("#connections-" + name + "-tab").setAttribute("aria-selected", String(name === view));
       $("#connections-" + name + "-tab").tabIndex = name === view ? 0 : -1;
@@ -475,9 +472,9 @@
   $(".connection-tabs").addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const names = ["wizard", "monitor", "settings", "voice", "agents"];
+    const names = ["wizard", "settings", "voice", "agents"];
     const focusedView = event.target.closest("[data-connection-view]")?.dataset.connectionView;
-    const index = names.indexOf(focusedView || state.connectionsView || "monitor");
+    const index = names.indexOf(focusedView || state.connectionsView || "wizard");
     const view = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
       : names[(index + (event.key === "ArrowLeft" ? names.length - 1 : 1)) % names.length];
     connectionView(view); $("#connections-" + view + "-tab").focus();
@@ -557,7 +554,7 @@
   function resetAlfaMax() {
     clearTimeout(alfaSessionTimer); alfaSessionTimer = null; alfaReconnectEditing = false;
     alfaMaxProgress.reset();
-    connectionView("monitor"); show($("#history-monitor-empty"), false);
+    connectionView("wizard"); show($("#history-monitor-empty"), false);
     state.alfaMax = null; state.alfaMaxBusy = false;
     $("#alfa-max-connect-form").reset(); $("#alfa-max-otp-form").reset();
     $("#alfa-max-status").textContent = "Не подключено";

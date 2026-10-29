@@ -31,7 +31,7 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    await page.locator('#ai-agent-list .ai-agent').click();
    assert.equal(await page.locator('#ai-agent-form [name=provider][value=deepseek]').isChecked(),true);
    await page.locator('#connections-agents-tab').focus();await page.keyboard.press('Home');
-   assert.equal(await page.locator('#connections-monitor-tab').getAttribute('aria-selected'),'true');
+   assert.equal(await page.locator('#connections-wizard-tab').getAttribute('aria-selected'),'true');
    await page.keyboard.press('End');assert.equal(await page.locator('#connections-agents-tab').getAttribute('aria-selected'),'true');
    assert.deepEqual(data.errors,[]);assert.deepEqual(data.unexpected,[]);
    checks.push({width,duration_saved:true,deepseek_selected_and_retained:true,keyboard_tabs:true,no_page_overflow:true});

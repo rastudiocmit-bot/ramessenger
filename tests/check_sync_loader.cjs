@@ -92,7 +92,7 @@ const cases=[[1440,"light"],[390,"light"],[320,"dark"]];
       if(process.env.CM_TEST_SCREENSHOT_DIR){
         fs.mkdirSync(process.env.CM_TEST_SCREENSHOT_DIR,{recursive:true});
         await page.goto("about:blank");
-        await page.setContent('<!doctype html><html lang="ru" data-theme="'+theme+'"><head><base href="https://synthetic.example.test/"><link rel="stylesheet" href="/assets/app.css"><link rel="stylesheet" href="/assets/cabinet.css"><style>html,body{height:auto!important;min-height:0!important;overflow:visible!important}body{margin:0;padding:16px;background:var(--bg)}#connections-monitor-view{display:block}</style></head><body><section id="connections-monitor-view">'+node+'</section></body></html>');
+        await page.setContent('<!doctype html><html lang="ru" data-theme="'+theme+'"><head><base href="https://synthetic.example.test/"><link rel="stylesheet" href="/assets/app.css"><link rel="stylesheet" href="/assets/cabinet.css"><style>html,body{height:auto!important;min-height:0!important;overflow:visible!important}body{margin:0;padding:16px;background:var(--bg)}#connections-wizard-view{display:block}</style></head><body><section id="connections-wizard-view">'+node+'</section></body></html>');
         await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOT_DIR,"loader-"+width+"-"+theme+".png"),fullPage:true});
       }
       assert.deepEqual(errors,[]);
