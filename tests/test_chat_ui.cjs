@@ -1110,6 +1110,22 @@ test('card queue, active lease and busy channel have distinct labels and polling
   assert.ok([...ui.timers.values()].some(timer=>timer.delay===10000));
 });
 
+test('full cached snapshot has its own timestamp while a delayed replacement is queued', async t=>{
+  const family=preparedFamily(1);
+  family.cache={...family.cache,state:'queued',pending:true,incomplete:true,loading:false,
+    queue_position:1,wait_exceeded:true,max_wait_seconds:60,
+    snapshot:{updated_at:'2026-10-24T00:00:00Z',complete:true}};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return structuredClone(family);
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.match(ui.$('#chat-details-sync').textContent,/Сохранённая карточка от .*В очереди.*Ожидание дольше 60 с/);
+  assert.equal(ui.$('#chat-details-dialog').classList.contains('is-refreshing'),false);
+});
+
 test('preferred CRM child opens first while an operator child choice survives card polling', async t=>{
   const first=preparedFamily(1),second=preparedFamily(2);
   const family={...first,id:identifier(99),source_contact_id:identifier(91),

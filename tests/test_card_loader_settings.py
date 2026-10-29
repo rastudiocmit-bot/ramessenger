@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from html.parser import HTMLParser
 
 from pydantic import ValidationError
 
@@ -32,6 +33,27 @@ class CardLoaderSettingsTests(unittest.TestCase):
         payload = public(CardLoaderSettings().model_dump())
         self.assertEqual(payload["parallel_card_jobs"], 1)
         self.assertEqual(payload["host_request_gap_ms"], 350)
+
+    def test_html_defaults_match_every_server_setting(self):
+        class Defaults(HTMLParser):
+            inside = False
+            selected = None
+            fields = {}
+            def handle_starttag(self, tag, attributes):
+                attrs = dict(attributes)
+                if tag == 'form' and attrs.get('id') == 'card-loader-form': self.inside = True
+                if not self.inside: return
+                if tag == 'input':
+                    self.fields[attrs['name']] = 'checked' in attrs if attrs.get('type') == 'checkbox' else int(attrs['value'])
+                if tag == 'select': self.selected = attrs['name']
+                if tag == 'option' and self.selected and (self.selected not in self.fields or 'selected' in attrs):
+                    self.fields[self.selected] = int(attrs['value'])
+            def handle_endtag(self, tag):
+                if tag == 'select': self.selected = None
+                if tag == 'form': self.inside = False
+        parser = Defaults()
+        parser.feed((Path(__file__).resolve().parents[1] / 'app/backend/src/center_messenger/web/index.html').read_text())
+        self.assertEqual(parser.fields, CardLoaderSettings().model_dump())
 
 
 if __name__ == "__main__":

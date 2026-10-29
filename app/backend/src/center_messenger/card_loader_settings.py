@@ -9,6 +9,13 @@ from center_messenger.auth_security import InputModel
 class CardLoaderSettings(InputModel):
     preload_unanswered: bool = True
     preload_active_groups: bool = True
+    preload_active_cards: bool = True
+    active_interval_minutes: int = Field(default=720, ge=360, le=1440)
+    automatic_clients_only: bool = False
+    parallel_card_jobs: int = Field(default=1, ge=1, le=2)
+    requests_per_minute: int = Field(default=120, ge=6, le=170)
+    pause_background_on_send: bool = True
+    manual_max_wait_seconds: int = Field(default=60, ge=30, le=300)
     finance_interval_minutes: int = Field(default=30, ge=15, le=1440)
     lessons_interval_minutes: int = Field(default=30, ge=15, le=1440)
     groups_interval_minutes: int = Field(default=360, ge=60, le=10080)
@@ -29,6 +36,8 @@ class CardLoaderSettings(InputModel):
             raise ValueError("History refresh must be disabled or at least six hours")
         if self.retry_max_seconds < self.retry_initial_seconds:
             raise ValueError("Maximum retry must not be shorter than the first retry")
+        if self.manual_max_wait_seconds < self.manual_priority_seconds:
+            raise ValueError("Maximum wait must not be shorter than priority promotion")
         return self
 
 
@@ -44,6 +53,7 @@ def get(db, workspace):
 
 
 def save(db, workspace, value: CardLoaderSettings):
+    db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
     payload = value.model_dump()
     columns = ",".join(FIELDS)
     values = ",".join(":" + field for field in FIELDS)
@@ -55,4 +65,4 @@ def save(db, workspace, value: CardLoaderSettings):
 
 
 def public(value):
-    return dict(value, parallel_card_jobs=1, host_request_gap_ms=350)
+    return dict(value, host_request_gap_ms=350)

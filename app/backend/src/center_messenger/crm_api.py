@@ -262,227 +262,237 @@ class DirectoryReader:
         source_contact = contact_id
         transaction = self.connections.chat_transaction if conversation else self.connections._transaction
         with transaction(actor, workspace, snapshot=True) as db:
-            if conversation and not db.execute(text(
-                "SELECT 1 FROM conversations c JOIN connections cn ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id "
-                "WHERE c.workspace_id=:w AND c.id=:conversation AND c.contact_id=:contact AND c.kind='direct' "
-                "AND cn.kind IN ('max_bot','alfa_max_browser')"
-            ), {"w": workspace, "conversation": conversation, "contact": contact_id}).scalar_one_or_none():
-                raise AuthError(404, "Контакт недоступен в этом диалоге.")
-            snapshot = self._published(db, workspace)
-            if snapshot is None:
-                raise AuthError(404, "Контакт недоступен.")
-            selection = card_preference.selected(db, workspace, snapshot, conversation, source_contact)
-            contact_id = UUID(selection["contact"]) if selection else contact_id
-            family_contacts = [UUID(value) for value in selection["contacts"]] if selection else [contact_id]
-            params = {
-                "w": workspace,
-                "r": snapshot["run"],
-                "id": contact_id,
-                "conn": snapshot["connection_id"],
-                "branch": branch,
-                "today": snapshot["today"],
-                "family_contacts": family_contacts,
-            }
-            contact = (
-                db.execute(
-                    text(
-                        "SELECT d.*,("
-                        + MAX_CONNECTED
-                        + ") AS max_connected,("
-                        + MAX_BOT_CONNECTED
-                        + ") AS max_bot_connected FROM alfa_directory d WHERE d.workspace_id=:w "
-                        "AND d.run_id=:r AND d.contact_id=:id"
-                    ),
-                    params,
-                )
-                .mappings()
-                .one_or_none()
+            return self._detail(db, workspace, contact_id, branch=branch, conversation=conversation)
+
+    def _detail(self, db, workspace, contact_id, *, branch=None, conversation=None, publish_snapshot=False):
+        source_contact = contact_id
+        if conversation and not db.execute(text(
+            "SELECT 1 FROM conversations c JOIN connections cn ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id "
+            "WHERE c.workspace_id=:w AND c.id=:conversation AND c.contact_id=:contact AND c.kind='direct' "
+            "AND cn.kind IN ('max_bot','alfa_max_browser')"
+        ), {"w": workspace, "conversation": conversation, "contact": contact_id}).scalar_one_or_none():
+            raise AuthError(404, "Контакт недоступен в этом диалоге.")
+        snapshot = self._published(db, workspace)
+        if snapshot is None:
+            raise AuthError(404, "Контакт недоступен.")
+        selection = card_preference.selected(db, workspace, snapshot, conversation, source_contact)
+        contact_id = UUID(selection["contact"]) if selection else contact_id
+        family_contacts = [UUID(value) for value in selection["contacts"]] if selection else [contact_id]
+        params = {
+            "w": workspace,
+            "r": snapshot["run"],
+            "id": contact_id,
+            "conn": snapshot["connection_id"],
+            "branch": branch,
+            "today": snapshot["today"],
+            "family_contacts": family_contacts,
+        }
+        contact = (
+            db.execute(
+                text(
+                    "SELECT d.*,("
+                    + MAX_CONNECTED
+                    + ") AS max_connected,("
+                    + MAX_BOT_CONNECTED
+                    + ") AS max_bot_connected FROM alfa_directory d WHERE d.workspace_id=:w "
+                    "AND d.run_id=:r AND d.contact_id=:id"
+                ),
+                params,
             )
-            if contact is None:
-                raise AuthError(404, "Контакт недоступен.")
-            scope = (
-                "c.workspace_id=:w AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[])) AND b.available "
-                "AND b.connection_id=:conn" + self._filter(branch, None)
-            )
-            if selection and selection.get("hidden_customers"):
-                scope += " AND NOT(c.external_id=ANY(CAST(:hidden_customers AS bigint[])))"
-                params["hidden_customers"] = list(map(int, selection["hidden_customers"]))
-            cards = list(
-                db.execute(
-                    text(
-                        "SELECT c.*,b.name AS branch_name,s.name AS study_status FROM "
-                        "alfa_customers c "
-                        "JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND "
-                        "b.external_id=c.branch_id "
-                        "AND b.connection_id=:conn LEFT JOIN alfa_statuses s ON "
-                        "s.workspace_id=c.workspace_id "
-                        "AND s.run_id=c.run_id AND s.branch_id=c.branch_id AND "
-                        "s.kind='study-status' "
-                        "AND s.external_id=c.study_status_id WHERE "
-                        + scope
-                        + " ORDER BY c.name,c.student_id,c.branch_id,c.external_id LIMIT 1001"
-                    ),
-                    params,
-                ).mappings()
-            )
-            if not cards:
-                raise AuthError(404, "Контакт недоступен.")
-            members = list(
-                db.execute(
-                    text(
-                        "SELECT c.student_id,c.external_id AS customer_id,"
-                        "g.external_id,g.name,g.branch_id,m.b_date,m.e_date,"
-                        "b.name AS branch_name FROM alfa_customers c "
-                        "JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND "
-                        "b.external_id=c.branch_id "
-                        "AND b.connection_id=:conn JOIN alfa_memberships m ON "
-                        "m.workspace_id=c.workspace_id "
-                        "AND m.run_id=c.run_id AND m.branch_id=c.branch_id AND "
-                        "m.customer_id=c.external_id "
-                        "JOIN alfa_groups g ON g.workspace_id=m.workspace_id AND g.run_id=m.run_id "
-                        "AND g.branch_id=m.branch_id AND g.external_id=m.group_id WHERE "
-                        + scope
-                        + " AND (m.b_date IS NULL OR m.b_date<=:today) AND (m.e_date IS NULL OR "
-                        "m.e_date>=:today) "
-                        "ORDER BY g.name,g.external_id LIMIT 5000"
-                    ),
-                    params,
-                ).mappings()
-            )
-            people = {}
-            for row in cards[:1000]:
-                key = str(row["student_id"])
-                person = people.setdefault(
-                    key,
-                    {
-                        "id": key,
-                        "name": row["name"],
-                        "dob": row["dob"].isoformat() if row["dob"] else None,
-                        "cards": [],
-                        "groups": [],
-                    },
-                )
-                person["cards"].append(
-                    {
-                        "id": str(row["external_id"]),
-                        "branch_id": str(row["branch_id"]),
-                        "branch_name": row["branch_name"],
-                        "status": row["status"],
-                        "study_status": row["study_status"],
-                        "legal_name": row["legal_name"],
-                        "balance": str(row["balance"]) if row["balance"] is not None else None,
-                        "balance_updated_at": snapshot["finished_at"].isoformat() if snapshot["finished_at"] else None,
-                        "paid_lesson_count": row["paid_lesson_count"],
-                        "url": (
-                            f"{snapshot['origin']}/company/{row['branch_id']}/customer/view"
-                            f"?id={row['external_id']}"
-                        ),
-                    }
-                )
-            cached = {
-                (row["branch_id"], row["customer_id"]): row
-                for row in db.execute(
-                    text(
-                        "SELECT f.* FROM alfa_family_details f JOIN alfa_customers c ON "
-                        "c.workspace_id=f.workspace_id AND c.branch_id=f.branch_id "
-                        "AND c.external_id=f.customer_id WHERE f.workspace_id=:w "
-                        "AND f.connection_id=:conn AND f.settings_version=:version "
-                        "AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[]))"
-                    ),
-                    {**params, "version": snapshot["version"]},
-                ).mappings()
-            }
-            group_states = {(row["branch_id"], row["external_id"]): row["payload"] for row in db.execute(text(
-                "SELECT c.branch_id,c.external_id,e.payload FROM alfa_customers c JOIN outbox_events e "
-                "ON e.workspace_id=c.workspace_id AND e.topic=:topic AND e.event_key=concat(CAST(:conn AS text),':',c.branch_id,':',c.external_id) "
-                "WHERE c.workspace_id=:w AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[])) AND e.payload->>'version'=CAST(:version AS text) "
-                "AND e.payload->>'student'=c.student_id::text AND e.payload->>'contact'=c.contact_id::text "
-                "AND e.payload->>'checked_run'=CAST(:r AS text)"),
-                {**params, "topic": GROUPS_TOPIC, "version": snapshot["version"]}).mappings()}
-            for person in people.values():
-                for card in person["cards"]:
-                    card["groups_refreshed_at"] = group_states.get((int(card["branch_id"]), int(card["id"])), {}).get("refreshed_at")
-                    source = cached.get((int(card["branch_id"]), int(card["id"])))
-                    if source:
-                        if snapshot["finished_at"] is None or source["refreshed_at"] >= snapshot["finished_at"]:
-                            card.update(
-                                balance=str(source["balance"]) if source["balance"] is not None else None,
-                                paid_lesson_count=source["paid_lesson_count"],
-                                balance_updated_at=source["refreshed_at"].isoformat(),
-                            )
-                        card.update(
-                            subscriptions=source["subscriptions"],
-                            lessons=source["lessons"],
-                            refreshed_at=source["refreshed_at"].isoformat(),
-                            lessons_refreshed_at=source["lessons_refreshed_at"].isoformat() if source["lessons_refreshed_at"] else None,
-                            lessons_full_refreshed_at=source["lessons_full_refreshed_at"].isoformat() if source["lessons_full_refreshed_at"] else None,
-                            lessons_history_through=source["lessons_history_through"].isoformat() if source["lessons_history_through"] else None,
-                        )
-                        zone = ZoneInfo(snapshot.get("timezone", "UTC"))
-                        card["lessons_recent_day"] = source["lessons_refreshed_at"].astimezone(zone).date().isoformat() if source["lessons_refreshed_at"] else None
-                        card["lessons_full_day"] = source["lessons_full_refreshed_at"].astimezone(zone).date().isoformat() if source["lessons_full_refreshed_at"] else None
-                    card["needs_mapping_refresh"] = mapping_pending(card)
-                    card["needs_refresh"] = card["needs_mapping_refresh"] or source is None or source["refreshed_at"] < datetime.now(
-                        UTC
-                    ) - timedelta(minutes=30)
-            for row in members:
-                person = people.get(str(row["student_id"]))
-                group = {
-                    "id": str(row["external_id"]),
+            .mappings()
+            .one_or_none()
+        )
+        if contact is None:
+            raise AuthError(404, "Контакт недоступен.")
+        scope = (
+            "c.workspace_id=:w AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[])) AND b.available "
+            "AND b.connection_id=:conn" + self._filter(branch, None)
+        )
+        if selection and selection.get("hidden_customers"):
+            scope += " AND NOT(c.external_id=ANY(CAST(:hidden_customers AS bigint[])))"
+            params["hidden_customers"] = list(map(int, selection["hidden_customers"]))
+        cards = list(
+            db.execute(
+                text(
+                    "SELECT c.*,b.name AS branch_name,s.name AS study_status FROM "
+                    "alfa_customers c "
+                    "JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND "
+                    "b.external_id=c.branch_id "
+                    "AND b.connection_id=:conn LEFT JOIN alfa_statuses s ON "
+                    "s.workspace_id=c.workspace_id "
+                    "AND s.run_id=c.run_id AND s.branch_id=c.branch_id AND "
+                    "s.kind='study-status' "
+                    "AND s.external_id=c.study_status_id WHERE "
+                    + scope
+                    + " ORDER BY c.name,c.student_id,c.branch_id,c.external_id LIMIT 1001"
+                ),
+                params,
+            ).mappings()
+        )
+        if not cards:
+            raise AuthError(404, "Контакт недоступен.")
+        members = list(
+            db.execute(
+                text(
+                    "SELECT c.student_id,c.external_id AS customer_id,"
+                    "g.external_id,g.name,g.branch_id,m.b_date,m.e_date,"
+                    "b.name AS branch_name FROM alfa_customers c "
+                    "JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND "
+                    "b.external_id=c.branch_id "
+                    "AND b.connection_id=:conn JOIN alfa_memberships m ON "
+                    "m.workspace_id=c.workspace_id "
+                    "AND m.run_id=c.run_id AND m.branch_id=c.branch_id AND "
+                    "m.customer_id=c.external_id "
+                    "JOIN alfa_groups g ON g.workspace_id=m.workspace_id AND g.run_id=m.run_id "
+                    "AND g.branch_id=m.branch_id AND g.external_id=m.group_id WHERE "
+                    + scope
+                    + " AND (m.b_date IS NULL OR m.b_date<=:today) AND (m.e_date IS NULL OR "
+                    "m.e_date>=:today) "
+                    "ORDER BY g.name,g.external_id LIMIT 5000"
+                ),
+                params,
+            ).mappings()
+        )
+        people = {}
+        for row in cards[:1000]:
+            key = str(row["student_id"])
+            person = people.setdefault(
+                key,
+                {
+                    "id": key,
                     "name": row["name"],
+                    "dob": row["dob"].isoformat() if row["dob"] else None,
+                    "cards": [],
+                    "groups": [],
+                },
+            )
+            person["cards"].append(
+                {
+                    "id": str(row["external_id"]),
                     "branch_id": str(row["branch_id"]),
                     "branch_name": row["branch_name"],
+                    "status": row["status"],
+                    "study_status": row["study_status"],
+                    "legal_name": row["legal_name"],
+                    "balance": str(row["balance"]) if row["balance"] is not None else None,
+                    "balance_updated_at": snapshot["finished_at"].isoformat() if snapshot["finished_at"] else None,
+                    "paid_lesson_count": row["paid_lesson_count"],
                     "url": (
-                        f"{snapshot['origin']}/company/{row['branch_id']}/group/view"
+                        f"{snapshot['origin']}/company/{row['branch_id']}/customer/view"
                         f"?id={row['external_id']}"
                     ),
                 }
-                if person:
-                    existing = next(
-                        (
-                            item
-                            for item in person["groups"]
-                            if item["id"] == group["id"] and item["branch_id"] == group["branch_id"]
-                        ),
-                        None,
+            )
+        cached = {
+            (row["branch_id"], row["customer_id"]): row
+            for row in db.execute(
+                text(
+                    "SELECT f.* FROM alfa_family_details f JOIN alfa_customers c ON "
+                    "c.workspace_id=f.workspace_id AND c.branch_id=f.branch_id "
+                    "AND c.external_id=f.customer_id WHERE f.workspace_id=:w "
+                    "AND f.connection_id=:conn AND f.settings_version=:version "
+                    "AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[]))"
+                ),
+                {**params, "version": snapshot["version"]},
+            ).mappings()
+        }
+        group_states = {(row["branch_id"], row["external_id"]): row["payload"] for row in db.execute(text(
+            "SELECT c.branch_id,c.external_id,e.payload FROM alfa_customers c JOIN outbox_events e "
+            "ON e.workspace_id=c.workspace_id AND e.topic=:topic AND e.event_key=concat(CAST(:conn AS text),':',c.branch_id,':',c.external_id) "
+            "WHERE c.workspace_id=:w AND c.run_id=:r AND c.contact_id=ANY(CAST(:family_contacts AS uuid[])) AND e.payload->>'version'=CAST(:version AS text) "
+            "AND e.payload->>'student'=c.student_id::text AND e.payload->>'contact'=c.contact_id::text "
+            "AND e.payload->>'checked_run'=CAST(:r AS text)"),
+            {**params, "topic": GROUPS_TOPIC, "version": snapshot["version"]}).mappings()}
+        for person in people.values():
+            for card in person["cards"]:
+                card["groups_refreshed_at"] = group_states.get((int(card["branch_id"]), int(card["id"])), {}).get("refreshed_at")
+                source = cached.get((int(card["branch_id"]), int(card["id"])))
+                if source:
+                    if snapshot["finished_at"] is None or source["refreshed_at"] >= snapshot["finished_at"]:
+                        card.update(
+                            balance=str(source["balance"]) if source["balance"] is not None else None,
+                            paid_lesson_count=source["paid_lesson_count"],
+                            balance_updated_at=source["refreshed_at"].isoformat(),
+                        )
+                    card.update(
+                        subscriptions=source["subscriptions"],
+                        lessons=source["lessons"],
+                        refreshed_at=source["refreshed_at"].isoformat(),
+                        lessons_refreshed_at=source["lessons_refreshed_at"].isoformat() if source["lessons_refreshed_at"] else None,
+                        lessons_full_refreshed_at=source["lessons_full_refreshed_at"].isoformat() if source["lessons_full_refreshed_at"] else None,
+                        lessons_history_through=source["lessons_history_through"].isoformat() if source["lessons_history_through"] else None,
                     )
-                    if existing is None:
-                        group["customer_ids"] = [str(row["customer_id"])]
-                        group["memberships"] = []
-                        person["groups"].append(group)
-                        existing = group
-                    elif str(row["customer_id"]) not in existing["customer_ids"]:
-                        existing["customer_ids"].append(str(row["customer_id"]))
-                    period = {"customer_id": str(row["customer_id"]),
-                              "begin": row["b_date"].isoformat() if row["b_date"] else None,
-                              "end": row["e_date"].isoformat() if row["e_date"] else None}
-                    if period not in existing["memberships"]:
-                        existing["memberships"].append(period)
-            for person in people.values():
-                person["balance"] = customer_balance(person["cards"])
-                person["paid_lesson_count"] = customer_paid_lessons(person["cards"])
-                person["subscriptions"] = customer_subscriptions(person["cards"], groups=person["groups"])
-                group_facts(person["groups"], person["cards"], today=snapshot["today"], subscriptions=person["subscriptions"])
-            review = current_review_status(db, workspace, snapshot, cards, selection=selection)
-            return {
-                "id": str(contact_id),
-                "source_contact_id": str(source_contact),
-                "selection": card_preference.public(selection),
-                "name": selection["name"] if selection else contact["display_name"],
-                "phones": contact["phones"],
-                "emails": contact["emails"],
-                **review,
-                "max_connected": bool(contact["max_connected"] or selection),
-                "max_bot_connected": bool(contact["max_bot_connected"]),
-                "students": list(people.values()),
-                "cache": cache_status(db, workspace, snapshot["connection_id"], list(people.values()), contact_id, snapshot["version"],
-                                      contacts=family_contacts, snapshot=snapshot),
-                "snapshot_at": snapshot["finished_at"].isoformat()
-                if snapshot["finished_at"]
-                else None,
-                "today": snapshot["today"].isoformat(),
-                "has_more": len(cards) > 1000 or len(members) == 5000,
+                    zone = ZoneInfo(snapshot.get("timezone", "UTC"))
+                    card["lessons_recent_day"] = source["lessons_refreshed_at"].astimezone(zone).date().isoformat() if source["lessons_refreshed_at"] else None
+                    card["lessons_full_day"] = source["lessons_full_refreshed_at"].astimezone(zone).date().isoformat() if source["lessons_full_refreshed_at"] else None
+                card["needs_mapping_refresh"] = mapping_pending(card)
+                card["needs_refresh"] = card["needs_mapping_refresh"] or source is None or source["refreshed_at"] < datetime.now(
+                    UTC
+                ) - timedelta(minutes=30)
+        for row in members:
+            person = people.get(str(row["student_id"]))
+            group = {
+                "id": str(row["external_id"]),
+                "name": row["name"],
+                "branch_id": str(row["branch_id"]),
+                "branch_name": row["branch_name"],
+                "url": (
+                    f"{snapshot['origin']}/company/{row['branch_id']}/group/view"
+                    f"?id={row['external_id']}"
+                ),
             }
+            if person:
+                existing = next(
+                    (
+                        item
+                        for item in person["groups"]
+                        if item["id"] == group["id"] and item["branch_id"] == group["branch_id"]
+                    ),
+                    None,
+                )
+                if existing is None:
+                    group["customer_ids"] = [str(row["customer_id"])]
+                    group["memberships"] = []
+                    person["groups"].append(group)
+                    existing = group
+                elif str(row["customer_id"]) not in existing["customer_ids"]:
+                    existing["customer_ids"].append(str(row["customer_id"]))
+                period = {"customer_id": str(row["customer_id"]),
+                          "begin": row["b_date"].isoformat() if row["b_date"] else None,
+                          "end": row["e_date"].isoformat() if row["e_date"] else None}
+                if period not in existing["memberships"]:
+                    existing["memberships"].append(period)
+        for person in people.values():
+            person["balance"] = customer_balance(person["cards"])
+            person["paid_lesson_count"] = customer_paid_lessons(person["cards"])
+            person["subscriptions"] = customer_subscriptions(person["cards"], groups=person["groups"])
+            group_facts(person["groups"], person["cards"], today=snapshot["today"], subscriptions=person["subscriptions"])
+        review = current_review_status(db, workspace, snapshot, cards, selection=selection)
+        result = {
+            "id": str(contact_id),
+            "source_contact_id": str(source_contact),
+            "selection": card_preference.public(selection),
+            "name": selection["name"] if selection else contact["display_name"],
+            "phones": contact["phones"],
+            "emails": contact["emails"],
+            **review,
+            "max_connected": bool(contact["max_connected"] or selection),
+            "max_bot_connected": bool(contact["max_bot_connected"]),
+            "students": list(people.values()),
+            "cache": cache_status(db, workspace, snapshot["connection_id"], list(people.values()), contact_id, snapshot["version"],
+                                  contacts=family_contacts, snapshot=snapshot),
+            "snapshot_at": snapshot["finished_at"].isoformat()
+            if snapshot["finished_at"]
+            else None,
+            "today": snapshot["today"].isoformat(),
+            "has_more": len(cards) > 1000 or len(members) == 5000,
+        }
+
+        from center_messenger import family_snapshots
+        if publish_snapshot:
+            family_snapshots.publish(db, workspace, snapshot, result)
+            return result
+        return family_snapshots.visible(db, workspace, snapshot, result)
 
     def prepare(self, actor, workspace, contact_id, *, conversation, auto=False, force=False, cached_only=False, compact=False, known_version=None):
         # An ordinary chat selection must not prepare a read client's full card.
@@ -504,9 +514,10 @@ class DirectoryReader:
                 raise AuthError(404, "Контакт недоступен.")
             if cached_only and linked["channel_kind"] == "alfa_max_browser" and not linked["crm_link_manual"]:
                 card_preference.ensure_selected(db, workspace, snapshot, conversation, contact_id)
-            elif not cached_only:
+            if not cached_only:
                 card_preference.refresh(db, workspace, snapshot, [contact_id])
                 selection = card_preference.selected(db, workspace, snapshot, conversation, contact_id)
+                self._detail(db, workspace, contact_id, conversation=conversation, publish_snapshot=True)
                 policy = card_loader_settings.get(db, workspace)
                 manual_context = _manual_fields(contact_id, source_contact=contact_id,
                                                 conversation=conversation, policy=policy)

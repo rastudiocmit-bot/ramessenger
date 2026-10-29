@@ -9,7 +9,7 @@ from center_messenger.alfa_client import AlfaError
 from center_messenger.alfa_family import pages
 from center_messenger.crm_directory import positive_id, source_date, source_name
 from center_messenger.auth_security import AuthError
-from center_messenger import card_jobs, card_loader_settings
+from center_messenger import card_jobs, card_loader_settings, card_queue, card_preference
 
 TOPIC = "crm.customer.groups"
 
@@ -47,12 +47,13 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False,
     policy = policy or card_loader_settings.get(db, workspace)
     manual = manual_context or _manual_fields(contact, source_contact=source_contact,
                                                conversation=conversation, policy=policy)
-    return db.execute(text("""
+    return db.execute(text("WITH pending_families AS MATERIALIZED (" + card_preference.pending_sql(snapshot) + """ )
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
       SELECT :w,gen_random_uuid(),:topic,concat(:conn,':',c.branch_id,':',c.external_id),
         jsonb_build_object('connection',CAST(:conn AS text),'branch',c.branch_id::text,
           'customer',c.external_id::text,'contact',c.contact_id::text,'student',c.student_id::text,
-          'version',:v,'manual',:manual,'requested_at',CAST(:requested_at AS text),
+          'version',:v,'unanswered',(c.contact_id IN (SELECT contact_id FROM pending_families)),
+          'manual',:manual,'requested_at',CAST(:requested_at AS text),
           'manual_until',CAST(:manual_until AS text),'source_contact',CAST(:source_contact AS text),
           'conversation',CAST(:conversation AS text),'due_at',now(),'available_at',now(),'attempts',0,
           'priority_boost',:priority_boost,'watchdog_at',CAST(:watchdog_at AS text),
@@ -63,7 +64,8 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False,
         AND e.event_key=concat(:conn,':',c.branch_id,':',c.external_id)
       WHERE c.workspace_id=:w AND c.run_id=:r AND c.contact_id IS NOT NULL AND c.student_id IS NOT NULL
         AND (CAST(:contact AS uuid) IS NULL OR c.contact_id=CAST(:contact AS uuid))
-        AND (:manual OR (:preload_active AND c.status='client'))
+        AND (:manual OR ((:preload_active AND c.status='client') OR (:preload_pending AND c.contact_id IN
+          (SELECT contact_id FROM pending_families))) AND (NOT :clients_only OR c.status='client'))
         AND (:force OR e.id IS NULL OR e.payload->>'version'<>CAST(:v AS text)
           OR e.payload->>'contact'<>c.contact_id::text OR e.payload->>'student'<>c.student_id::text
           OR e.payload->>'checked_run' IS DISTINCT FROM CAST(:r AS text)
@@ -73,6 +75,7 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False,
           AND outbox_events.payload->>'contact'=EXCLUDED.payload->>'contact'
           AND outbox_events.payload->>'student'=EXCLUDED.payload->>'student'
         THEN outbox_events.payload||jsonb_build_object(
+          'unanswered',EXCLUDED.payload->'unanswered',
           'manual',coalesce((outbox_events.payload->>'manual')::boolean,false) OR :manual,
           'requested_at',CASE WHEN :manual THEN CAST(:requested_at AS text) ELSE outbox_events.payload->>'requested_at' END,
           'manual_until',CASE WHEN :manual THEN CAST(:manual_until AS text) ELSE outbox_events.payload->>'manual_until' END,
@@ -91,12 +94,14 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False,
         OR outbox_events.payload->>'student'<>EXCLUDED.payload->>'student'
         OR (:manual AND (outbox_events.payload->>'manual' IS DISTINCT FROM 'true'
           OR coalesce((outbox_events.payload->>'requested_at')::timestamptz,'epoch')<CAST(:requested_at AS timestamptz)))
+        OR outbox_events.payload->'unanswered' IS DISTINCT FROM EXCLUDED.payload->'unanswered'
         OR :force
     """), {"w": workspace, "conn": snapshot["connection_id"], "r": snapshot["run"], "v": snapshot["version"],
              "topic": TOPIC, "contact": contact, "manual": contact is not None, "force": force,
-             "preload_active": policy["preload_active_groups"],
+             "preload_active": policy["preload_active_groups"], "preload_pending": policy["preload_unanswered"],
+             "clients_only": policy["automatic_clients_only"],
              "interval": policy["groups_interval_minutes"],
-             **manual}).rowcount
+             **manual, **card_preference.params(snapshot)}).rowcount
 
 
 def fetch(client, branch, customer):
@@ -130,6 +135,13 @@ def fetch(client, branch, customer):
     return groups, [m for m in memberships if m["group_id"] in groups]
 
 
+def _automatic_allowed(db, workspace, snapshot, source, policy):
+    if policy['automatic_clients_only'] and source['status'] != 'client':
+        return False
+    return ((policy['preload_active_groups'] and source['status'] == 'client') or
+            (policy['preload_unanswered'] and card_preference.is_pending(db, workspace, snapshot, [source['contact_id']])))
+
+
 def process(worker, workspace, job):
     from center_messenger.crm_api import DirectoryReader
     from center_messenger.family_cache import _TariffCache
@@ -138,13 +150,13 @@ def process(worker, workspace, job):
         with worker.accounts.transaction(workspace_id=workspace) as db:
             owned = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id AND state='pending' "
                 "AND payload->>'lease_owner'=:owner FOR UPDATE"),
-                {"w": workspace, "id": job["id"], "owner": worker.owner}).scalar_one_or_none()
+                {"w": workspace, "id": job["id"], "owner": job["lease_owner"]}).scalar_one_or_none()
             if owned is None:
                 return
             if card_jobs.blocked(db, workspace, job):
                 db.execute(text("UPDATE outbox_events SET payload=payload-'lease_owner'-'lease_until' "
                     "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:o"),
-                    {"w": workspace, "id": job["id"], "o": worker.owner})
+                    {"w": workspace, "id": job["id"], "o": job["lease_owner"]})
                 return
             job = {**job, "manual": owned.get("manual", False), "force_at": owned.get("force_at")}
             settings = worker.connections._row(db, workspace)
@@ -154,14 +166,15 @@ def process(worker, workspace, job):
             if (not settings or not settings["secret_ciphertext"] or not snapshot or not source
                 or str(settings["connection_id"]) != job["connection"] or settings["version"] != job["version"]
                 or snapshot["connection_id"] != settings["connection_id"]
-                or not (job["manual"] or (policy["preload_active_groups"] and source["status"] == "client"))):
+                or not (job["manual"] or _automatic_allowed(db, workspace, snapshot, source, policy))):
                 worker.requeue_current(db, workspace, job, owned)
                 return
             settings, snapshot = dict(settings), dict(snapshot)
             checkpoint = worker.checkpoint(job, owned, snapshot, snapshot["today"])
         with worker.connections._host_gate(settings["origin"]) as gate:
             credentials = worker.connections.vault.open(workspace, settings["connection_id"], settings["secret_ciphertext"])
-            client = worker.connections.client_factory(settings["origin"], settings["api_email"], credentials, gate)
+            client = worker.connections.client_factory(settings["origin"], settings["api_email"], credentials,
+                card_queue.request_gate(worker.accounts, workspace, policy, job, gate))
             if not job["force_at"]:
                 client = _TariffCache(client, worker.tariffs, (str(workspace), job["connection"], job["version"]))
             client = paged = worker.checkpoint_client(client, workspace, job, checkpoint, settings, credentials,
@@ -171,7 +184,7 @@ def process(worker, workspace, job):
                 db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
                 own = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id AND state='pending' "
                     "AND payload->>'lease_owner'=:owner AND (payload->>'lease_until')::timestamptz>now() FOR UPDATE"),
-                    {"w": workspace, "id": job["id"], "owner": worker.owner}).scalar_one_or_none()
+                    {"w": workspace, "id": job["id"], "owner": job["lease_owner"]}).scalar_one_or_none()
                 if own is None:
                     return
                 current = worker.connections._row(db, workspace)
@@ -181,7 +194,7 @@ def process(worker, workspace, job):
                 if (not current or not current["secret_ciphertext"] or current["version"] != settings["version"]
                     or str(current["connection_id"]) != job["connection"] or not published or published["run"] != snapshot["run"]
                     or not source or not (own.get("manual")
-                        or (policy["preload_active_groups"] and source["status"] == "client"))):
+                        or _automatic_allowed(db, workspace, snapshot, source, policy))):
                     worker.requeue_current(db, workspace, job, own)
                     return
                 params = {"w": workspace, "r": snapshot["run"], "b": int(job["branch"]), "customer": int(job["customer"])}
@@ -210,6 +223,8 @@ def process(worker, workspace, job):
                 from center_messenger.card_preference import refresh_for_contact
                 refresh_for_contact(db, workspace, snapshot, job['contact'])
                 worker.finish(db, workspace, job)
+    except card_queue.Deferred as error:
+        worker.retry(workspace, job, error=error, paged=paged)
     except card_jobs.PageYield:
         worker.yield_job(workspace, job)
     except card_jobs.LostCardLease:

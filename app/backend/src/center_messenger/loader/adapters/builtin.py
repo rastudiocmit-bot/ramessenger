@@ -39,6 +39,8 @@ def register_builtin(registry, services, config):
             from center_messenger.family_cache import FamilyCacheWorker
             worker = FamilyCacheWorker(services.alfa)
             return [Step("card", C.CARDS, lambda op: worker.run_next(), lane="maintenance",
+                         active_delay=2, idle_delay=2, budget=90),
+                    Step("card-secondary", C.CARDS, lambda op: worker.run_next(), lane="maintenance",
                          active_delay=2, idle_delay=2, budget=90)]
         def review():
             from center_messenger.active_review import ActiveReviewWorker
