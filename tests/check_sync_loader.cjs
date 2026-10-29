@@ -75,7 +75,7 @@ const cases=[[1440,"light"],[390,"light"],[320,"dark"]];
       assert.ok(posts.some(p=>p.archive_paused===true));
       assert.equal(await page.locator("#alfa-max-progress-value").textContent(),initial);
       assert.equal(await page.locator("#alfa-loader-live-count").textContent(),"7");
-      assert.equal(await page.locator("#alfa-loader-cards-badge").textContent(),"Обновляются");
+      assert.equal(await page.locator("#alfa-loader-cards-badge").textContent(),"Загружается");
       await page.locator("#alfa-loader-pause").click();
       await page.waitForFunction(()=>document.querySelector("#alfa-loader-pause").textContent==="Приостановить историю");
       await page.locator("#alfa-loader-history-alerts [data-retry-branch]").click();

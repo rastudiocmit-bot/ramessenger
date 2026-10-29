@@ -27,7 +27,7 @@ const { fixture } = require('./browser_fixture.cjs');
     assert.equal(data.mutations.at(-1).body.requests_per_turn, 6);
     await page.locator('#connections-settings-tab').click();
     assert.equal(await page.locator('#card-loader-form').isVisible(), false);
-    await page.locator('#connections-monitor-tab').focus(); await page.keyboard.press('ArrowRight');
+    await page.locator('#connections-monitor-tab').focus(); await page.keyboard.press('ArrowLeft');
     assert.equal(await page.locator('#connections-wizard-tab').getAttribute('aria-selected'), 'true');
     await page.waitForFunction(() => !document.querySelector('#card-loader-form button[type=submit]').disabled);
     assert.equal(await page.locator('#card-loader-form [name=requests_per_turn]').inputValue(), '6');
@@ -50,6 +50,33 @@ const { fixture } = require('./browser_fixture.cjs');
       return { width: control.width, height: control.height, horizontal: control.left >= text.right };
     }));
     assert.ok(switches.every(control => control.width === 34 && control.height === 20 && control.horizontal));
+    assert.equal(await page.locator('#connections-wizard-view #alfa-form').count(), 1);
+    assert.equal(await page.locator('#connections-wizard-view #alfa-max-connect-form').count(), 1);
+    assert.equal(await page.locator('#connections-settings-view #alfa-form').count(), 0);
+    assert.equal(await page.locator('#wizard-monitor-slot #connection-monitor-content').count(), 1);
+    const sizes = await page.locator('#wizard-data-settings,#wizard-native-settings,#wizard-card-settings').evaluateAll(elements => elements.map(el => {
+      const box = el.getBoundingClientRect(); return { left: box.left, width: box.width, top: box.top, bottom: box.bottom };
+    }));
+    assert.ok(sizes.every(box => Math.abs(box.width-sizes[0].width)<1 && Math.abs(box.left-sizes[0].left)<1));
+    assert.ok(sizes[0].bottom <= sizes[1].top && sizes[1].bottom <= sizes[2].top);
+    const monitorHandle = await page.locator('#connection-monitor-content').elementHandle();
+    await page.locator('#connections-monitor-tab').click();
+    assert.equal(await page.locator('#connections-monitor-view #connection-monitor-content').count(), 1);
+    await page.locator('#connections-wizard-tab').click();
+    assert.equal(await monitorHandle.evaluate(el => el === document.querySelector('#wizard-monitor-slot #connection-monitor-content')), true);
+    assert.equal(await page.locator('[id=connection-monitor-content]').count(), 1);
+    // Restore the connected synthetic service before visual QA.
+    await context.unroute('**/integrations/alfa-max');
+    await page.locator('#messages-tab').click(); await page.locator('#connections-tab').click();
+    await page.waitForFunction(() => document.querySelector('#alfa-max-status').textContent === 'Подключено');
+    assert.equal(await page.locator('#wizard-monitor-slot #alfa-max-progress').isVisible(), true);
+    const settingsCalls = data.calls.filter(call => call.path.endsWith('/directory/card-loader')).length;
+    for (let i=0;i<3;i++) {
+      await page.locator('#connections-monitor-tab').click();
+      await page.locator('#connections-wizard-tab').click();
+    }
+    assert.equal(data.calls.filter(call => call.path.endsWith('/directory/card-loader')).length, settingsCalls);
+    assert.equal(await monitorHandle.evaluate(el => el === document.querySelector('#wizard-monitor-slot #connection-monitor-content')), true);
     // Clear the intentionally triggered reauthentication notice before visual QA.
     for (const button of await page.locator('.notice-capsule:not([hidden]) .notice-del').all()) await button.click();
     await page.locator('#card-loader-form .advanced > summary').click();
@@ -68,6 +95,10 @@ const { fixture } = require('./browser_fixture.cjs');
       const box = element.getBoundingClientRect(); return box.top >= 0 && box.bottom <= innerHeight;
     }));
     await page.screenshot({ path: '/tmp/card-loader-wizard-mobile-save.png', animations: 'disabled' });
+    await page.locator('#wizard-monitor-title').scrollIntoViewIfNeeded();
+    assert.equal(await page.locator('#wizard-monitor-slot #connection-monitor-content').count(), 1);
+    assert.ok(await page.locator('#connection-monitor-content').evaluate(el => el.scrollWidth <= el.clientWidth + 1));
+    await page.screenshot({ path: '/tmp/card-loader-wizard-mobile-monitor.png', animations: 'disabled' });
     assert.equal(await page.locator('#connections-settings-view #card-loader-form').count(), 0);
     assert.equal(await page.locator('#connections-wizard-view #card-loader-form').count(), 1);
     assert.deepEqual(data.errors, []); assert.deepEqual(data.unexpected, []);
