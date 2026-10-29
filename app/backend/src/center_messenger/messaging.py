@@ -503,8 +503,8 @@ class Messaging:
                     from center_messenger.alfa_session import control
                     if control(latest['session_snapshot']).get('needs_check'):
                         raise AlfaBrowserError('session_check_pending')
-                    if ((latest['branch'], latest['customer'], latest.get('max_user_id'), latest.get('contact_phone'))
-                            != (target['branch'], target['customer'], target.get('max_user_id'), target.get('contact_phone'))):
+                    if ((latest['branch'], latest['customer'], latest.get('max_user_id'), latest.get('contact_phone'), latest.get('routing_guard'))
+                            != (target['branch'], target['customer'], target.get('max_user_id'), target.get('contact_phone'), target.get('routing_guard'))):
                         raise AlfaBrowserError('settings_changed')
                     self._native_phase(db, job, attempt, 'post_started')
                     # Correlate a delayed/unknown send with the source journal

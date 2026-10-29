@@ -31,6 +31,8 @@ from center_messenger.config import Settings
 from center_messenger.connector_vault import ConnectorVault
 from center_messenger.database import make_engine
 from center_messenger.message_order import message_order, visible_message
+from center_messenger import customer_updates
+from center_messenger.crm_api import DirectoryReader
 
 
 def peer_tag(peer):
@@ -59,7 +61,7 @@ def browser_status(service, workspace, connection):
 
 
 @contextmanager
-def wait_for_browser(service, workspace, connection, report, *, seconds=120):
+def wait_for_browser(service, workspace, connection, report, *, seconds=210):
     """Retry only lease acquisition; never rerun forms or override another lease."""
     started, next_status = time.monotonic(), 0
     while True:
@@ -214,6 +216,25 @@ def inspect_card(probe, branch, customer, expected_peer, renew, contact_phone=No
     return report
 
 
+def catalog_report(db, workspace, target, payload):
+    session = target.get('session_snapshot') or {}
+    if not session.get('crm_connection_id'):
+        return None
+    snapshot = DirectoryReader._published(db, workspace)
+    if not snapshot or snapshot['connection_id'] != session['crm_connection_id']:
+        return {'status': 'snapshot_unavailable'}
+    ids = {int(target['customer'])}
+    ids.update(int(value) for value in (payload or {}).get('crm_customer_ids') or [])
+    ids.update(int(pair[1]) for pair in (payload or {}).get('crm_observed_customers') or [])
+    rows = db.execute(text("SELECT external_id,branch_id,status FROM alfa_customers WHERE workspace_id=:w "
+        "AND run_id=:r AND external_id=ANY(CAST(:ids AS bigint[])) ORDER BY external_id,branch_id LIMIT 40"),
+        {'w': workspace, 'r': snapshot['run'], 'ids': sorted(ids)[:20]}).mappings().all()
+    saved = customer_updates.observation(db, workspace, snapshot, target['branch'], target['customer'])
+    return {'status': 'available', 'run': str(snapshot['run']),
+        'cards': [{'customer': r['external_id'], 'branch': r['branch_id'], 'status': r['status']} for r in rows],
+        'observation': {k: saved.get(k) for k in ('observed_at', 'revision', 'source', 'settings')}}
+
+
 def current_target(service, db, workspace, connection, case):
     """Read the visible source and production reply target in one snapshot."""
     payload = db.execute(text("SELECT m.payload FROM messages m JOIN conversations c "
@@ -243,6 +264,9 @@ def current_target(service, db, workspace, connection, case):
     case.update(branch=target['branch'], customer=target['customer'],
                 expected_peer_tag=peer_tag(peer),
                 contact_phone_tag=peer_tag('phone:' + phone) if phone else None)
+    catalog = catalog_report(db, workspace, target, payload)
+    if catalog is not None:
+        case['catalog'] = catalog
     return peer, phone
 
 

@@ -84,7 +84,8 @@ class RelinkTests(unittest.TestCase):
                     'occurred_at': AT, 'payload': {'branch_id': 4, 'crm_record_id': '52',
                     'customer_id': 7, 'customer_branch_id': 1, 'crm_customer_ids': [7]}}
         self.item = {'record_id': '52', 'direction': 'in', 'actor_type': 'contact',
-                     'occurred_at': AT, 'customers': [{'branch_id': 4, 'customer_id': 8}]}
+                     'occurred_at': AT, 'source_metadata_refresh': True,
+                     'customers': [{'branch_id': 4, 'customer_id': 8}]}
         self.directory = {7: [card(7, A)], 8: [card(8, B)]}
         self.new = {'customer_id': 8, 'branch_id': 1, 'contact_id': B,
                     'global_id_verified': True, 'primary_phone': PHONE}
@@ -118,7 +119,8 @@ class RelinkTests(unittest.TestCase):
 
     def test_proven_relink_carries_current_crm_fence_and_source_witness(self):
         db = Mock(); db.execute.return_value.scalars.return_value = []
-        with patch.object(parents, 'members', return_value=[A]), patch.object(parents, 'prove', return_value=[A, B]) as prove:
+        with patch.object(parents, 'members', return_value=[A]), patch.object(relink, 'history_proven', return_value=True), \
+             patch.object(parents, 'prove', return_value=[A, B]) as prove:
             result = relink.prove(db, 'w', 'channel', SNAPSHOT, 4, self.item, self.old,
                                   [self.new], self.directory)
         self.assertEqual(result, [A, B])
@@ -129,6 +131,16 @@ class RelinkTests(unittest.TestCase):
         self.assertEqual(route['crm_connection'], str(CRM))
         query, params = db.execute.call_args_list[0].args
         self.assertEqual(set(query._bindparams), set(params))
+
+    def test_one_reassigned_row_is_not_proof_for_other_unknown_old_history(self):
+        exact = {'peer': None, 'record': '52', 'occurred_at': AT, 'conversation_id': self.old['conversation_id']}
+        other = dict(exact, record='51', occurred_at=AT - timedelta(minutes=1))
+        self.assertTrue(relink.history_compatible([exact], self.old, self.item))
+        self.assertFalse(relink.history_compatible([exact, other], self.old, self.item))
+        self.assertTrue(relink.history_compatible([dict(exact, peer='77'), dict(other, peer='77')],
+                        self.old, self.item | {'max_user_id': '77'}))
+        self.assertFalse(relink.history_compatible([dict(exact, peer='77'), dict(other, peer='78')],
+                         self.old, self.item | {'max_user_id': '77'}))
 
     def test_peer_conflict_marks_the_old_address_stale_without_creating_alias(self):
         db = Mock(); db.execute.return_value.scalars.return_value = []

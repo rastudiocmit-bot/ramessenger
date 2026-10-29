@@ -180,6 +180,44 @@ def student_bindings(connection, customer_ids, previous=()):
     return result, review
 
 
+def primary_address(row):
+    if row.get('phones'):
+        return 'phone:' + row['phones'][0]
+    if row.get('emails'):
+        return 'email:' + row['emails'][0]
+    return 'card:' + str(row['external_id'])
+
+
+def contact_bindings(connection, sources, groups, previous):
+    """Preserve known ID/address bindings; a renamed payer is not a new person.
+
+    Existing distinct families never merge merely because their current labels
+    match. A changed address cannot join a different existing contact either.
+    Initial projections retain the conservative directory grouping contract.
+    """
+    prior = defaultdict(list)
+    reserved = set()
+    for row in previous:
+        if row.get('contact_id'):
+            prior[int(row['external_id'])].append(row)
+            reserved.add(UUID(str(row['contact_id'])))
+    result = {}
+    for identity, keys in groups.items():
+        desired = uuid5(connection, 'contact:' + identity)
+        for customer in keys:
+            old = prior[customer]
+            contacts = {UUID(str(r['contact_id'])) for r in old}
+            addresses = {primary_address(r) for r in old if 'phones' in r and 'emails' in r}
+            current = primary_address(min(sources[customer], key=lambda r: r['branch_id']))
+            if len(contacts) == 1 and (addresses == {current} or (not addresses and desired in contacts)):
+                result[customer] = next(iter(contacts))
+            elif old or desired in reserved:
+                result[customer] = uuid5(connection, f'contact-card:{customer}:{desired}')
+            else:
+                result[customer] = desired
+    return result
+
+
 def project_directory(connection: UUID, rows, previous=()):
     """One source customer across branches; separate children sharing a representative.
 
@@ -187,7 +225,7 @@ def project_directory(connection: UUID, rows, previous=()):
     Conflicting payer names sharing an address remain separate and require review.
     Different Customer IDs always remain separate children, including namesakes.
     """
-    rows = list(rows)
+    rows, previous = list(rows), list(previous)
     sources, address_names = defaultdict(list), defaultdict(set)
     for row in rows:
         sources[row["external_id"]].append(row)
@@ -215,12 +253,13 @@ def project_directory(connection: UUID, rows, previous=()):
         groups[identity].append(key)
     identities, _ = student_bindings(connection, representatives, previous)
     from center_messenger.crm_review import ReviewIndex
-    contact_ids = {key: uuid5(connection, "contact:" + identity)
-                   for identity, keys in groups.items() for key in keys}
+    contact_ids = contact_bindings(UUID(str(connection)), sources, groups, previous)
+    contact_groups = defaultdict(list)
+    for customer, contact in contact_ids.items():
+        contact_groups[contact].append(customer)
     current_review = ReviewIndex(rows, identities=identities, contacts=contact_ids)
     contacts, students, bindings = [], {}, []
-    for identity, keys in sorted(groups.items()):
-        contact = uuid5(connection, "contact:" + identity)
+    for contact, keys in sorted(contact_groups.items()):
         cards = [r for key in keys for r in sources[key]]
         legal_names = sorted(
             {r["legal_name"] for r in cards if r["legal_name"]}, key=normalized_name

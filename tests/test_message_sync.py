@@ -4510,5 +4510,231 @@ class MessageSyncTests(unittest.TestCase):
             self.assertEqual(mimo_wire.requests[0][0].get_header('Api-key'),'tp-'+'p'*30)
         finally:service.jobs.pool.shutdown(wait=True)
 
+    def test_active_review_discovers_a_promoted_lead_without_restarting_message_history(self):
+        self.customer_phone(7, parent='Old parent', status='lead')
+        self.project(self.row())
+        old = dict(self.conversation())
+        def handler(path, body):
+            self.assertEqual((body['is_study'], body['removed']), (1, 0))
+            rows = [{'id': 7, 'name': 'Current pupil', 'legal_name': 'Current parent', 'is_study': 1}] if '/1/' in path else []
+            return {'items': rows, 'total': len(rows), 'page': body['page']}
+        worker, _ = self.active_review_worker(handler)
+        for _ in range(4):
+            self.assertTrue(worker.step(self.workspace))
+        current = self.db.execute(text('SELECT status,contact_id FROM alfa_customers WHERE workspace_id=:w'),
+                                  {'w': self.workspace}).mappings().one()
+        self.assertEqual((current['status'], current['contact_id']), ('client', self.contact))
+        self.assertEqual(self.conversation()['inbound_seq'], old['inbound_seq'])
+        self.assertEqual(len(self.messages()), 1)
+
+    def test_missing_optional_fields_in_a_new_branch_reuse_exact_id_facts(self):
+        from center_messenger.active_review import apply_customer
+        self.snapshot['version'] = 1
+        self.customer_phone(7, parent='Known parent')
+        fact = apply_customer(self.db, self.workspace, {'connection_id': self.crm}, self.snapshot,
+            {'id': 7, 'name': 'Pupil', 'is_study': 1, '_branch': 2})
+        current = self.db.execute(text('SELECT phones,legal_name FROM alfa_customers WHERE workspace_id=:w AND branch_id=2'),
+                                  {'w': self.workspace}).mappings().one()
+        self.assertEqual(fact['contact_id'], str(self.contact))
+        self.assertEqual((current['phones'], current['legal_name']), (['+79160000000'], 'Known parent'))
+
+    def test_customer_label_repair_is_bounded_idempotent_and_fenced_by_published_run(self):
+        from center_messenger import customer_updates
+        self.family_worker_fixture()
+        self.db.execute(text("UPDATE alfa_customers SET legal_name='Repaired parent' WHERE workspace_id=:w"), {'w': self.workspace})
+        self.assertEqual(customer_updates.repair_labels(self.db, self.workspace, self.snapshot, limit=1), 1)
+        self.assertEqual(customer_updates.repair_labels(self.db, self.workspace, self.snapshot, limit=1), 0)
+        self.assertEqual(self.db.execute(text('SELECT display_name FROM contacts WHERE workspace_id=:w AND id=:c'),
+            {'w': self.workspace, 'c': self.contact}).scalar_one(), 'Repaired parent')
+        self.assertEqual(customer_updates.repair_labels(self.db, self.workspace, dict(self.snapshot, run=uuid4())), 0)
+
+    def test_customer_rename_updates_parent_pupil_search_and_clears_only_derived_review(self):
+        from center_messenger.active_review import apply_customer
+        self.snapshot['version'] = 1
+        self.project(self.row())
+        original = dict(self.messages()[0])
+        state = dict(self.conversation())
+        self.db.execute(text('UPDATE alfa_customers SET needs_review=true WHERE workspace_id=:w'), {'w': self.workspace})
+        fact = apply_customer(self.db, self.workspace, {'connection_id': self.crm}, self.snapshot,
+            {'id': 7, 'name': 'New pupil', 'legal_name': 'New parent', 'is_study': 1, '_branch': 1})
+        self.assertEqual(fact['contact_id'], str(self.contact))
+        self.assertEqual(self.db.execute(text('SELECT display_name FROM contacts WHERE workspace_id=:w AND id=:c'),
+            {'w': self.workspace, 'c': self.contact}).scalar_one(), 'New parent')
+        catalog = self.db.execute(text('SELECT display_name,search_text,needs_review FROM alfa_directory WHERE workspace_id=:w'),
+            {'w': self.workspace}).mappings().one()
+        self.assertEqual(catalog['display_name'], 'New parent')
+        self.assertIn('new parent', catalog['search_text'])
+        self.assertIn('new pupil', catalog['search_text'])
+        self.assertFalse(catalog['needs_review'])
+        self.assertEqual(self.messages()[0]['id'], original['id'])
+        self.assertEqual(self.messages()[0]['text'], original['text'])
+        self.assertEqual(self.messages()[0]['occurred_at'], original['occurred_at'])
+        for field in ('needs_reply', 'inbound_seq', 'handled_inbound_id', 'last_inbound_at'):
+            self.assertEqual(self.conversation()[field], state[field], field)
+
+    def test_customer_point_update_keeps_missing_contacts_and_applies_explicit_clear(self):
+        from center_messenger.active_review import apply_customer
+        self.snapshot['version'] = 1
+        self.customer_phone(7, parent='Kept parent')
+        settings = {'connection_id': self.crm}
+        apply_customer(self.db, self.workspace, settings, self.snapshot,
+                       {'id': 7, 'name': 'Updated pupil', 'is_study': 1, '_branch': 1})
+        saved = self.db.execute(text('SELECT phones,legal_name FROM alfa_customers WHERE workspace_id=:w'),
+            {'w': self.workspace}).mappings().one()
+        self.assertEqual((saved['phones'], saved['legal_name']), (['+79160000000'], 'Kept parent'))
+        apply_customer(self.db, self.workspace, settings, self.snapshot,
+                       {'id': 7, 'phone': [], 'legal_name': '', '_branch': 1})
+        saved = self.db.execute(text('SELECT phones,legal_name FROM alfa_customers WHERE workspace_id=:w'),
+            {'w': self.workspace}).mappings().one()
+        self.assertEqual((saved['phones'], saved['legal_name']), ([], ''))
+
+    def test_late_identity_response_cannot_overwrite_a_newer_point_observation(self):
+        from center_messenger.active_review import apply_customer
+        self.snapshot['version'] = 1
+        settings = {'connection_id': self.crm}
+        raw = {'id': 7, 'name': 'Fresh', 'legal_name': 'Fresh parent', 'is_study': 1, '_branch': 1}
+        apply_customer(self.db, self.workspace, settings, self.snapshot, raw, observed_at=self.at + timedelta(minutes=2))
+        old = apply_customer(self.db, self.workspace, settings, self.snapshot, dict(raw, name='Stale'),
+                             observed_at=self.at + timedelta(minutes=1))
+        self.assertFalse(old['applied'])
+        self.assertEqual(self.db.execute(text('SELECT name FROM alfa_customers WHERE workspace_id=:w'),
+            {'w': self.workspace}).scalar_one(), 'Fresh')
+
+    def test_current_parent_conflict_is_not_cleared_by_an_ordinary_rename(self):
+        from center_messenger.active_review import apply_customer
+        self.snapshot['version'] = 1
+        self.add_customer(self.contact, 1, 8)
+        self.customer_phone(7, parent='Parent A')
+        self.customer_phone(8, parent='Parent B')
+        apply_customer(self.db, self.workspace, {'connection_id': self.crm}, self.snapshot,
+            {'id': 7, 'name': 'Renamed pupil', 'is_study': 1, '_branch': 1})
+        self.assertTrue(self.db.execute(text('SELECT needs_review FROM alfa_directory WHERE workspace_id=:w'),
+            {'w': self.workspace}).scalar_one())
+
+    def test_finance_customer_request_also_refreshes_light_identity_without_extra_crm_calls(self):
+        reader, worker, _ = self.family_worker_fixture()
+        self.customer_phone(7, parent='Old parent', status='lead')
+        self.project(self.row())
+        worker.schedule(self.workspace)
+        job = worker.claim(self.workspace)
+        calls = []
+        def call(path, body):
+            calls.append(path)
+            items = [{'id': 7, 'name': 'Current pupil', 'legal_name': 'Current parent', 'is_study': 1,
+                      'balance': '100', 'paid_lesson_count': 2}] if '/customer/index' in path else []
+            return {'items': items, 'total': len(items), 'page': body['page']}
+        worker.connections.client_factory.return_value.call.side_effect = call
+        worker.process(self.workspace, job)
+        self.assertEqual(sum('/customer/index' in path for path in calls), 1)
+        source = self.db.execute(text('SELECT name,legal_name,status,phones FROM alfa_customers WHERE workspace_id=:w'),
+            {'w': self.workspace}).mappings().one()
+        self.assertEqual((source['name'], source['legal_name'], source['status']), ('Current pupil', 'Current parent', 'client'))
+        self.assertEqual(source['phones'], ['+79160000000'])
+
+    def test_full_import_carries_newer_point_facts_without_reverting_to_staged_names(self):
+        from center_messenger import customer_updates
+        from center_messenger.active_review import apply_customer
+        self.snapshot['version'] = 1
+        staged = dict(self.db.execute(text('SELECT * FROM alfa_customers WHERE workspace_id=:w'), {'w': self.workspace}).mappings().one())
+        next_run = uuid4()
+        self.db.execute(text("INSERT INTO alfa_sync_runs(workspace_id,id,connection_id,settings_version,requested_by,state) "
+            "VALUES(:w,:r,:c,1,:u,'running')"), {'w': self.workspace, 'r': next_run, 'c': self.crm, 'u': self.user})
+        customer_updates.record(self.db, self.workspace, dict(self.snapshot, run=next_run), 1, 7, self.at, source='directory')
+        apply_customer(self.db, self.workspace, {'connection_id': self.crm}, self.snapshot,
+            {'id': 7, 'name': 'Latest pupil', 'legal_name': 'Latest parent', 'is_study': 1, '_branch': 1},
+            observed_at=self.at + timedelta(minutes=2))
+        previous = list(self.db.execute(text('SELECT * FROM alfa_customers WHERE workspace_id=:w'), {'w': self.workspace}).mappings())
+        updated = customer_updates.carry_forward(self.db, self.workspace, self.crm, next_run, self.run,
+            [staged], previous, self.at - timedelta(minutes=1), 1)
+        self.assertEqual(updated[0]['name'], 'Latest pupil')
+        self.assertEqual(self.db.execute(text('SELECT name FROM alfa_customers WHERE workspace_id=:w AND run_id=:r'),
+            {'w': self.workspace, 'r': next_run}).scalar_one(), 'Latest pupil')
+
+    def test_publication_carry_does_not_promote_inherited_fields_of_a_newer_partial_response(self):
+        from center_messenger import customer_updates
+        from center_messenger.active_review import apply_customer
+        self.snapshot['version'] = 1
+        staged = dict(self.db.execute(text('SELECT * FROM alfa_customers WHERE workspace_id=:w'), {'w': self.workspace}).mappings().one())
+        staged['name'] = 'New full-import name'
+        next_run = uuid4()
+        self.db.execute(text("INSERT INTO alfa_sync_runs(workspace_id,id,connection_id,settings_version,requested_by,state) "
+            "VALUES(:w,:r,:c,1,:u,'running')"), {'w': self.workspace, 'r': next_run, 'c': self.crm, 'u': self.user})
+        customer_updates.record(self.db, self.workspace, dict(self.snapshot, run=next_run), 1, 7, self.at,
+                                source='directory', fields=['name', 'status'])
+        apply_customer(self.db, self.workspace, {'connection_id': self.crm}, self.snapshot,
+            {'id': 7, 'phone': ['+79000000002'], '_branch': 1}, observed_at=self.at + timedelta(minutes=2))
+        previous = list(self.db.execute(text('SELECT * FROM alfa_customers WHERE workspace_id=:w'), {'w': self.workspace}).mappings())
+        result = customer_updates.carry_forward(self.db, self.workspace, self.crm, next_run, self.run,
+            [staged], previous, self.at - timedelta(minutes=1), 1)
+        self.assertEqual(result[0]['name'], 'New full-import name')
+        self.assertEqual(result[0]['phones'], ['+79000000002'])
+
+    def test_resumed_legacy_finance_checkpoint_does_not_look_like_a_new_identity_observation(self):
+        from center_messenger.active_review import apply_customer
+        _, worker, _ = self.family_worker_fixture()
+        self.project(self.row())
+        worker.schedule(self.workspace)
+        job = worker.claim(self.workspace)
+        checkpoint = worker.checkpoint(job, {}, self.snapshot, self.at.date(), started_at=self.at)
+        self.db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object('checkpoint',CAST(:p AS jsonb)) "
+            "WHERE workspace_id=:w AND id=:id"), {'w': self.workspace, 'id': job['id'], 'p': json.dumps(checkpoint)})
+        apply_customer(self.db, self.workspace, {'connection_id': self.crm}, self.snapshot,
+            {'id': 7, 'name': 'Fresh name', '_branch': 1}, observed_at=self.at + timedelta(minutes=2))
+        def finance(*args, **kwargs):
+            kwargs['on_customer']({'id': 7, 'name': 'Old cached name', 'is_study': 1}, False)
+            return self.live_family_facts()
+        with patch('center_messenger.family_cache.fetch_family_finance', side_effect=finance):
+            worker.process(self.workspace, job)
+        self.assertEqual(self.db.execute(text('SELECT name FROM alfa_customers WHERE workspace_id=:w'),
+                         {'w': self.workspace}).scalar_one(), 'Fresh name')
+
+    def test_full_directory_publication_preserves_id_bindings_and_newer_point_identity(self):
+        from center_messenger.alfa_sync import AlfaSync
+        from center_messenger.active_review import apply_customer
+        self.family_worker_fixture()
+        original = self.db.execute(text('SELECT * FROM alfa_customers WHERE workspace_id=:w'), {'w': self.workspace}).mappings().one()
+        next_run = uuid4()
+        self.db.execute(text("INSERT INTO alfa_sync_runs(workspace_id,id,connection_id,settings_version,requested_by,state,created_at) "
+            "VALUES(:w,:r,:c,1,:u,'running',:at)"), {'w': self.workspace, 'r': next_run, 'c': self.crm, 'u': self.user, 'at': self.at})
+        self.db.execute(text('UPDATE alfa_sync_control SET running_id=:r WHERE workspace_id=:w'), {'w': self.workspace, 'r': next_run})
+        cursor = {'phase': 'customers', 'branches': [{'id': 1}], 'bi': 0, 'part': 0}
+        AlfaSync._store_page(self.db, self.workspace, next_run, cursor,
+            [{'id': 7, 'name': 'Staged pupil', 'is_study': 1}], observation=(self.crm, self.at, 1))
+        apply_customer(self.db, self.workspace, {'connection_id': self.crm}, self.snapshot,
+            {'id': 7, 'name': 'Latest pupil', 'legal_name': 'Latest parent', 'is_study': 1, '_branch': 1},
+            observed_at=self.at + timedelta(minutes=2))
+        control = self.db.execute(text('SELECT * FROM alfa_sync_control WHERE workspace_id=:w'), {'w': self.workspace}).mappings().one()
+        job = self.db.execute(text('SELECT * FROM alfa_sync_runs WHERE workspace_id=:w AND id=:r'),
+                              {'w': self.workspace, 'r': next_run}).mappings().one()
+        service = object.__new__(AlfaSync)
+        service._publish(self.db, control, job)
+        current = self.db.execute(text('SELECT * FROM alfa_customers WHERE workspace_id=:w AND run_id=:r'),
+                                  {'w': self.workspace, 'r': next_run}).mappings().one()
+        self.assertEqual((current['name'], current['legal_name']), ('Latest pupil', 'Latest parent'))
+        self.assertEqual((current['contact_id'], current['student_id']), (original['contact_id'], original['student_id']))
+        self.assertEqual(current['phones'], original['phones'])
+        self.assertEqual(self.db.execute(text('SELECT published_id FROM alfa_sync_control WHERE workspace_id=:w'),
+            {'w': self.workspace}).scalar_one(), next_run)
+
+    def test_source_reassociation_moves_only_the_exact_record_when_old_history_has_no_peer_proof(self):
+        from center_messenger.history_receipts import new_records
+        self.snapshot['version'] = 1
+        second = uuid4()
+        self.add_customer(second, 1, 8)
+        self.customer_phone(7, parent='Old parent', status='lead')
+        self.customer_phone(8, parent='Current parent', status='client')
+        self.project(self.row('51', body='Other history'), self.row('52', body='Keep original body', at=self.at + timedelta(minutes=1)))
+        original = next(m for m in self.messages() if m['payload']['crm_record_id'] == '52')
+        current = self.row('52', customer=8, body='Upstream edit', at=self.at + timedelta(minutes=1))
+        self.project(*new_records(self.db, self.workspace, self.channel, 1, [current]))
+        messages = self.messages()
+        self.assertEqual(len(messages), 2)
+        old = next(m for m in messages if m['payload']['crm_record_id'] == '51')
+        moved = next(m for m in messages if m['payload']['crm_record_id'] == '52')
+        self.assertEqual((moved['id'], moved['text']), (original['id'], 'Keep original body'))
+        self.assertNotEqual(moved['conversation_id'], old['conversation_id'])
+        self.assertEqual(moved['payload']['customer_id'], 8)
+        self.assertEqual(old['payload']['customer_id'], 7)
+
 if __name__ == "__main__":
     unittest.main()

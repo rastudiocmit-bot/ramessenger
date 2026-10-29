@@ -9,7 +9,8 @@ from sqlalchemy import text
 from center_messenger.alfa_client import AlfaError
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_api import DirectoryReader
-from center_messenger.crm_directory import customer_row, page_rows, normalized_name
+from center_messenger.crm_directory import page_rows, positive_id
+from center_messenger import customer_updates
 
 TOPIC = "crm.active.review"
 IDENTITY = "crm.active.identity"
@@ -37,32 +38,38 @@ def request(db, workspace, connection):
     return {"queued": True, "already_running": False}
 
 
-def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False):
+def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False, observed_at=None, source='point'):
     """Update light directory facts by source ID; full finance cards remain untouched."""
-    value = customer_row(raw, archive=archive)
-    branch, customer = int(raw["_branch"]), value["external_id"]
+    branch, customer = positive_id(raw['_branch']), positive_id(raw['id'])
     old = db.execute(text("SELECT * FROM alfa_customers WHERE workspace_id=:w AND run_id=:r "
         "AND branch_id=:b AND external_id=:id"),
         {"w": workspace, "r": snapshot["run"], "b": branch, "id": customer}).mappings().one_or_none()
-    if old:
-        for field in ("dob", "study_status_id", "lead_status_ids"):
-            if field not in raw:
-                value[field] = old[field]
+    observed_at = observed_at or db.execute(text('SELECT clock_timestamp()')).scalar_one()
+    saved = customer_updates.observation(db, workspace, snapshot, branch, customer)
+    if old and customer_updates.is_older(saved, observed_at):
+        return {'customer_id': str(customer), 'branch_id': str(branch), 'name': old['name'],
+                'contact_id': str(old['contact_id']), 'student_id': str(old['student_id']),
+                'active': old['status'] == 'client', 'applied': False}
+    facts = old
     # No name/phone matching. Existing verified bindings survive name changes.
     contact = old["contact_id"] if old else None
     student = old["student_id"] if old else None
     if not contact:
-        matches = list(db.execute(text("SELECT contact_id,student_id,branch_id FROM alfa_customers "
+        matches = list(db.execute(text("SELECT * FROM alfa_customers "
             "WHERE workspace_id=:w AND run_id=:r AND external_id=:id AND contact_id IS NOT NULL"),
             {"w": workspace, "r": snapshot["run"], "id": customer}).mappings())
         # Customer IDs are global within this CRM connection. A second branch
         # is another observation, including APIs omitting optional branch_ids.
         if len({(m["contact_id"], m["student_id"]) for m in matches}) == 1:
             contact, student = matches[0]["contact_id"], matches[0]["student_id"]
+            facts = facts or min(matches, key=lambda m: m['branch_id'])
+    value = customer_updates.merge_fields(raw, facts, archive=archive)
     contact = contact or uuid5(UUID(str(settings["connection_id"])), f"active-contact:{branch}:{customer}")
     student = student or uuid5(UUID(str(settings["connection_id"])), f"student:{customer}")
     parent = value["legal_name"] or value["name"]
-    review = bool(old and normalized_name(old["legal_name"]) != normalized_name(value["legal_name"]))
+    # Reasons are derived from current facts below. A renamed parent is not a
+    # permanent review finding; manual conversation links remain independent.
+    review = False
     db.execute(text("INSERT INTO contacts(workspace_id,id,display_name) VALUES(:w,:id,:name) ON CONFLICT DO NOTHING"),
                {"w": workspace, "id": contact, "name": parent})
     db.execute(text("INSERT INTO students(workspace_id,id,display_name) VALUES(:w,:id,:name) "
@@ -75,24 +82,15 @@ def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False):
         "ON CONFLICT(workspace_id,run_id,branch_id,external_id) DO UPDATE SET name=EXCLUDED.name,"
         "legal_name=EXCLUDED.legal_name,status=EXCLUDED.status,dob=EXCLUDED.dob,study_status_id=EXCLUDED.study_status_id,"
         "lead_status_ids=EXCLUDED.lead_status_ids,phones=EXCLUDED.phones,emails=EXCLUDED.emails,contact_id=EXCLUDED.contact_id,"
-        "student_id=EXCLUDED.student_id,needs_review=alfa_customers.needs_review OR EXCLUDED.needs_review"),
+        "student_id=EXCLUDED.student_id"),
         {"w": workspace, "r": snapshot["run"], "b": branch, "id": customer, "name": value["name"],
          "parent": value["legal_name"], "status": value["status"], "dob": value["dob"], "study": value["study_status_id"],
          "leads": json.dumps(value["lead_status_ids"]), "c": contact, "s": student, "review": review,
          "phones":json.dumps(value["phones"]),"emails":json.dumps(value["emails"])})
-    # Published lightweight directory gets new ID-bound cards without a full archive import.
-    db.execute(text("INSERT INTO alfa_directory(workspace_id,run_id,contact_id,display_name,phones,emails,needs_review,search_text) "
-        "VALUES(:w,:r,:c,:name,CAST(:phones AS jsonb),CAST(:emails AS jsonb),:review,:search) ON CONFLICT(workspace_id,run_id,contact_id) "
-        "DO UPDATE SET needs_review=alfa_directory.needs_review OR EXCLUDED.needs_review,"
-        "phones=(SELECT coalesce(jsonb_agg(DISTINCT x),'[]'::jsonb) FROM alfa_customers a "
-        "CROSS JOIN LATERAL jsonb_array_elements(a.phones) x WHERE a.workspace_id=:w AND a.run_id=:r AND a.contact_id=:c),"
-        "emails=(SELECT coalesce(jsonb_agg(DISTINCT x),'[]'::jsonb) FROM alfa_customers a "
-        "CROSS JOIN LATERAL jsonb_array_elements(a.emails) x WHERE a.workspace_id=:w AND a.run_id=:r AND a.contact_id=:c),"
-        "search_text=concat_ws(' ',alfa_directory.display_name,alfa_directory.phones::text,alfa_directory.emails::text,"
-        "(SELECT string_agg(a.name||' '||a.external_id::text,' ') FROM alfa_customers a "
-        "WHERE a.workspace_id=:w AND a.run_id=:r AND a.contact_id=:c))"),
-        {"w": workspace, "r": snapshot["run"], "c": contact, "name": parent, "review": review,
-         "search": normalized_name(parent + " " + value["name"] + " " + str(customer)), "phones":json.dumps(value["phones"]),"emails":json.dumps(value["emails"])})
+    customer_updates.refresh_contact(db, workspace, snapshot, contact)
+    customer_updates.record(db, workspace, snapshot, branch, customer, observed_at,
+                            revision=saved.get('revision', 0) + 1, source=source, saved=saved,
+                            fields=customer_updates.observed_fields(raw, archive))
     if not old or old["contact_id"] != contact or old["student_id"] != student:
         # Repair only the newly linked ID, never all historic families.
         db.execute(text("UPDATE conversations c SET contact_id=:contact WHERE c.workspace_id=:w "
@@ -105,7 +103,7 @@ def apply_customer(db, workspace, settings, snapshot, raw, *, archive=False):
             {"w": workspace, "id": uuid4(), "key": f"{settings['connection_id']}:{contact}",
              "p": json.dumps({"connection": str(settings["connection_id"]), "contact": str(contact)})})
     return {"customer_id": str(customer), "branch_id": str(branch), "name": value["name"],
-            "contact_id": str(contact), "student_id": str(student), "active": value["status"] == "client"}
+            "contact_id": str(contact), "student_id": str(student), "active": value["status"] == "client", 'applied': True}
 
 
 class ActiveReviewWorker:
@@ -155,6 +153,7 @@ class ActiveReviewWorker:
                     {"w": workspace, "r": snapshot["run"], "b": branch, "last": job["last_id"], "t": IDENTITY,
                      "c": str(settings["connection_id"]), "run": job["run"]}).scalar_one_or_none()
             store(db, workspace, settings["connection_id"], job)
+            observed_at = db.execute(text('SELECT clock_timestamp()')).scalar_one()
         try:
             if branch not in available:
                 raise AlfaError("forbidden", 403)
@@ -195,7 +194,8 @@ class ActiveReviewWorker:
                         if duplicate:
                             raise AlfaError("invalid_response")
                     for raw in rows:
-                        fact = apply_customer(db, workspace, settings, snapshot, dict(raw, _branch=branch), archive=archive)
+                        fact = apply_customer(db, workspace, settings, snapshot, dict(raw, _branch=branch),
+                                              archive=archive, observed_at=observed_at, source='active_review')
                         fact.update(run=job["run"], checked_at=datetime.now(UTC).isoformat())
                         db.execute(text("INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state) "
                             "VALUES(:w,:id,:t,:key,CAST(:p AS jsonb),'published') ON CONFLICT(workspace_id,topic,event_key) "

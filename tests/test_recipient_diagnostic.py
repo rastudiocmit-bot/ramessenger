@@ -18,6 +18,19 @@ BASE = '/company/1/max/bulk?related_class=Customer&related_ids%5B%5D=42'
 
 
 class RecipientDiagnosticTests(unittest.TestCase):
+    def test_catalog_report_shows_status_and_observation_without_identity_texts(self):
+        db = Mock()
+        db.execute.side_effect = [Mock(mappings=Mock(return_value=Mock(all=Mock(return_value=[{
+            'external_id': 7, 'branch_id': 1, 'status': 'client', 'name': 'private pupil', 'legal_name': 'private parent'}])))),
+            Mock(scalar_one_or_none=Mock(return_value={'observed_at': '2026-10-29T01:00:00+00:00',
+                'revision': 3, 'source': 'card', 'settings': 1, 'private': 'not for output'}))]
+        with patch.object(audit.DirectoryReader, '_published', return_value={'connection_id': 'crm', 'run': 'run'}):
+            result = audit.catalog_report(db, 'w', {'customer': 7, 'branch': 1,
+                'session_snapshot': {'crm_connection_id': 'crm'}}, {'crm_observed_customers': [[4, 7]]})
+        self.assertEqual(result['cards'], [{'customer': 7, 'branch': 1, 'status': 'client'}])
+        self.assertEqual(result['observation']['revision'], 3)
+        self.assertNotIn('private', json.dumps(result))
+
     def test_current_target_reports_visible_source_metadata_and_actual_routed_card(self):
         service, db = Mock(), Mock()
         payload = {'customer_id': 9805, 'customer_branch_id': 2, 'crm_record_id': '52289',
@@ -80,6 +93,19 @@ class RecipientDiagnosticTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'browser_wait_timeout')
         service.sessions.release.assert_not_called()
         self.assertEqual(report['browser_wait']['waited_seconds'], 2)
+
+    def test_default_wait_can_outlast_the_current_browser_lease(self):
+        clock, _ = self.wait_scope()
+        service, report, lease = Mock(), {}, {'lease': 'owned'}
+        def claim(*args):
+            if clock[0] < 171:
+                raise audit.AlfaBrowserError('browser_busy')
+            return lease
+        service.sessions.claim.side_effect = claim
+        with audit.wait_for_browser(service, 'w', 'c', report) as acquired:
+            self.assertIs(acquired, lease)
+        self.assertEqual(clock[0], 171)
+        service.sessions.release.assert_called_once_with(lease)
 
     def test_busy_status_reads_a_snapshot_and_does_not_expose_session_tokens(self):
         service, db = Mock(), Mock()

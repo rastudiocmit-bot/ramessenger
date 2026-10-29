@@ -258,6 +258,8 @@ class FamilyCacheWorker:
                 repair(db, workspace, snapshot)
                 from center_messenger.crm_review import repair as repair_review
                 repair_review(db, workspace, snapshot)
+                from center_messenger.customer_updates import repair_labels
+                repair_labels(db, workspace, snapshot)
                 card_preference.repair(db, workspace, snapshot)
                 enqueue(db, workspace, snapshot)
 
@@ -289,12 +291,12 @@ class FamilyCacheWorker:
                        {"w": workspace, "id": row["id"], "p": json.dumps(job)})
             return {**job, "id": row["id"], "topic": row["topic"]}
 
-    def checkpoint(self, job, owned, snapshot, today):
+    def checkpoint(self, job, owned, snapshot, today, *, started_at=None):
         scope = [job["connection"], job["version"], str(snapshot["run"]), job["branch"],
                  job["customer"], job["contact"], job["student"], job["topic"], job.get("force_at")]
         saved = owned.get("checkpoint") or {}
         if saved.get("scope") != scope:
-            saved = {"scope": scope, "today": today.isoformat(), "started_at": datetime.now(UTC).isoformat(),
+            saved = {"scope": scope, "today": today.isoformat(), "started_at": (started_at or datetime.now(UTC)).isoformat(),
                      "responses": {}, "pages": 0}
         return saved
 
@@ -389,7 +391,10 @@ class FamilyCacheWorker:
                     return
                 today = db.execute(text("SELECT CAST(now() AT TIME ZONE timezone AS date) FROM workspaces WHERE id=:w"),
                                    {"w": workspace}).scalar_one()
-                checkpoint = self.checkpoint(job, owned, snapshot, today)
+                checkpoint = self.checkpoint(job, owned, snapshot, today,
+                    started_at=db.execute(text('SELECT clock_timestamp()')).scalar_one())
+                if job['topic'] == TOPIC and 'identity_observed_at' not in checkpoint:
+                    checkpoint['identity_observed_at'] = checkpoint['started_at']
                 today = date.fromisoformat(checkpoint["today"])
                 if job["topic"] == HISTORY and "history_only" not in checkpoint:
                     recent_at = saved["lessons_refreshed_at"] if saved else None
@@ -403,8 +408,10 @@ class FamilyCacheWorker:
                 client = _TariffCache(client, self.tariffs, (str(workspace), job["connection"], job["version"]))
                 client = paged = self.checkpoint_client(client, workspace, job, checkpoint, settings, credentials)
                 source["branch_id"] = int(job["branch"])
+                observed_customers = []
                 if job["topic"] == TOPIC:
-                    data = fetch_family_finance(client, int(job["branch"]), int(job["customer"]), source_customer=source)
+                    data = fetch_family_finance(client, int(job["branch"]), int(job["customer"]), source_customer=source,
+                        on_customer=lambda raw, archived: observed_customers.append((raw, archived)))
                 else:
                     data = fetch_family_lessons(client, int(job["branch"]), int(job["customer"]),
                                                 today=today, full=job["topic"] == HISTORY,
@@ -427,6 +434,10 @@ class FamilyCacheWorker:
                     params = {"w": workspace, "conn": job["connection"], "b": int(job["branch"]),
                               "id": int(job["customer"]), "v": job["version"], "observed": started_at}
                     if job["topic"] == TOPIC:
+                        from center_messenger.active_review import apply_customer
+                        for raw, archived in observed_customers:
+                            apply_customer(db, workspace, settings, snapshot, dict(raw, _branch=int(job['branch'])),
+                                archive=archived, observed_at=datetime.fromisoformat(checkpoint['identity_observed_at']), source='card')
                         db.execute(text("INSERT INTO alfa_family_details(workspace_id,connection_id,branch_id,customer_id,"
                             "settings_version,balance,paid_lesson_count,subscriptions,refreshed_at) VALUES "
                             "(:w,:conn,:b,:id,:v,:balance,:paid,CAST(:subs AS jsonb),:observed) "
