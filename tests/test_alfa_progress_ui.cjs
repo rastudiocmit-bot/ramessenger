@@ -322,7 +322,7 @@ test("archive pause is a server mutation and retains all completed journals and 
   assert.equal(ui.$('#alfa-loader-pause').textContent,'Продолжить историю');
   assert.match(ui.$('#alfa-max-progress-value').textContent,/6 из 8/);
   assert.equal(ui.$('#alfa-loader-live-count').textContent,'7');
-  assert.equal(ui.$('#alfa-loader-cards-badge').textContent,'Обновляются');
+  assert.equal(ui.$('#alfa-loader-cards-badge').textContent,'Загружается');
   assert.ok([...ui.window.document.querySelectorAll('[data-retry-branch]')].every(b=>b.disabled));
   ui.$('#alfa-loader-pause').click();await settle(ui);
   assert.deepEqual(posts,[{archive_paused:true},{archive_paused:false}]);

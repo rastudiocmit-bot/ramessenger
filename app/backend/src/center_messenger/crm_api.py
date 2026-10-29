@@ -504,7 +504,8 @@ class DirectoryReader:
                 card_preference.refresh(db, workspace, snapshot, [contact_id])
                 selection = card_preference.selected(db, workspace, snapshot, conversation, contact_id)
                 for target in selection["contacts"] if selection else [contact_id]:
-                    enqueue(db, workspace, snapshot, contact=target, force=force)
+                    enqueue(db, workspace, snapshot, contact=target, force=force,
+                            source_contact=contact_id, conversation=conversation)
         if compact:
             return self.prepared_view(actor, workspace, contact_id, conversation, known_version=known_version)
         return self.detail(actor, workspace, contact_id, conversation=conversation)

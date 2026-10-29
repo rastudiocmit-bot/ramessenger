@@ -194,9 +194,12 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
   function renderCards(payload, offline = false) {
     const cards = payload.cards, worker = offline ? null : payload.card_worker;
     const badge = $("#alfa-loader-cards-badge"), value = $("#alfa-loader-cards-value"), queue = $("#alfa-loader-cards-queue"), track = $("#alfa-loader-cards-track");
-    badge.textContent = offline ? "Последние данные" : worker ? "Обновляются" : cards?.errors ? "Ожидают повтора" : cards?.total && cards.ready < cards.total ? "В очереди" : cards?.configured ? "Актуальны" : "Нужен справочник";
+    badge.textContent = offline ? "Последние данные" : worker ? "Загружается" : cards?.busy ? "Канал занят" : cards?.errors ? "Ожидают повтора" : cards?.queued ? "В очереди" : cards?.configured ? "Актуальны" : "Нужен справочник";
     value.textContent = !cards ? "Получаем состояние кэша" : !cards.configured ? "Сначала загрузите справочник" : cards.total ? number(cards.ready) + " из " + number(cards.total) + " клиентов готовы" : "Нет клиентов, ожидающих ответа";
-    queue.textContent = cards?.queued ? "В очереди: " + number(cards.queued) : "";
+    queue.textContent = cards?.queued ? "В очереди: " + number(cards.queued) +
+      (cards.manual_queued ? " · открыты операторами: " + number(cards.manual_queued) : "") +
+      (cards.background_queued ? " · фоновые: " + number(cards.background_queued) : "") +
+      (cards.oldest_wait_seconds ? " · ожидание до " + number(cards.oldest_wait_seconds) + " с" : "") : "";
     show(track, Boolean(cards?.total));
     for (const [attr, content] of [["aria-valuenow", cards?.ready], ["aria-valuemin", 0], ["aria-valuemax", cards?.total]]) {
       if (cards?.total) track.setAttribute(attr, String(content)); else track.removeAttribute(attr);
@@ -207,6 +210,9 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
       const operation = {reading_finance:"баланс и абонементы",reading_recent_lessons:"недавние и будущие занятия",reading_lesson_history:"годовая история занятий",reading_customer_groups:"действующие группы клиента"}[worker.operation];
       current.append(document.createTextNode(worker.manual ? "По запросу оператора: " : "Сейчас: "), node("strong", worker.name || "Клиент"), document.createTextNode(" · ID " + worker.customer_id + " · филиал " + worker.branch_id + (operation ? " · " + operation : "")));
       if (worker.student_name && worker.student_name !== worker.name) current.append(document.createTextNode(" · " + worker.student_name));
+      if (worker.page !== null && worker.page !== undefined) current.append(document.createTextNode(" · страница " + number(worker.page + 1)));
+      if (worker.api_calls) current.append(document.createTextNode(" · API-вызовов: " + number(worker.api_calls)));
+      if (worker.started_at) current.append(document.createTextNode(" · с " + clock(worker.started_at)));
     }
     else if (cards?.as_of) current.append(document.createTextNode("Состояние кэша на " + clock(cards.as_of)));
     const groups = $("#alfa-loader-groups-status"), counts = cards?.groups;
@@ -215,8 +221,10 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
       (counts.unlinked ? " · не связаны с карточкой: " + number(counts.unlinked) : "") : "";
     show(groups, Boolean(counts));
     const error = $("#alfa-loader-cards-error");
-    error.textContent = cards?.errors ? "Не удалось обновить клиентов: " + number(cards.errors) + ". " + (cards.next_retry_at ? isFuture(cards.next_retry_at, payload) ? "Повтор после " + date(cards.next_retry_at) + ". " : "Повтор ожидает выполнения. " : "") + "Последние сохранённые сведения остаются доступны." : "";
-    show(error, Boolean(cards?.errors));
+    error.textContent = cards?.errors ? "Не удалось обновить клиентов: " + number(cards.errors) + ". " + (cards.next_retry_at ? isFuture(cards.next_retry_at, payload) ? "Повтор после " + date(cards.next_retry_at) + ". " : "Повтор ожидает выполнения. " : "") + "Последние сохранённые сведения остаются доступны."
+      : cards?.stalled ? "Дольше 30 секунд ожидают запуска: " + number(cards.stalled) + ". Загрузчик повысит их приоритет и продолжит автоматически."
+      : cards?.busy ? "Канал AlfaCRM занят другой операцией. Повтор произойдёт автоматически." : "";
+    show(error, Boolean(cards?.errors || cards?.stalled || cards?.busy));
   }
   function render(payload) {
     const streams = payload.streams || [], worker = payload.worker || {}, review = payload.active_review || {};
