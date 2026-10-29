@@ -459,9 +459,10 @@
     else if (mode === "active" && before === "error") notices?.resolve("connection:" + selector);
   }
   function connectionView(view) {
-    if (!["monitor", "settings", "voice", "agents"].includes(view)) view = "monitor";
+    if (!["monitor", "wizard", "settings", "voice", "agents"].includes(view)) view = "monitor";
     state.connectionsView = view;
-    for (const name of ["monitor", "settings", "voice", "agents"]) {
+    if (view === "wizard") void cardLoader.load();
+    for (const name of ["monitor", "wizard", "settings", "voice", "agents"]) {
       show($("#connections-" + name + "-view"), name === view);
       $("#connections-" + name + "-tab").setAttribute("aria-selected", String(name === view));
       $("#connections-" + name + "-tab").tabIndex = name === view ? 0 : -1;
@@ -471,7 +472,7 @@
   $(".connection-tabs").addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const names = ["monitor", "settings", "voice", "agents"], index = names.indexOf(state.connectionsView || "monitor");
+    const names = ["monitor", "wizard", "settings", "voice", "agents"], index = names.indexOf(state.connectionsView || "monitor");
     const view = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
       : names[(index + (event.key === "ArrowLeft" ? names.length - 1 : 1)) % names.length];
     connectionView(view); $("#connections-" + view + "-tab").focus();

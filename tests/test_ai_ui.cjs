@@ -28,7 +28,7 @@ test('voice providers and agent editor occupy separate connection tabs',async t=
  assert.equal(s.$('#ai-cloud-card').closest('.pane').id,'pane-connections');
  assert.equal(s.$('#ai-agent-form').closest('.pane').id,'pane-connections');
  assert.equal(s.$('#max-add').closest('[role=tabpanel]').id,'connections-settings-view');
- assert.equal(s.w.document.querySelectorAll('.connection-tabs [role=tab]').length,4);
+ assert.equal(s.w.document.querySelectorAll('.connection-tabs [role=tab]').length,5);
 });
 test('provider switches available models and the exact selected model is tested and saved',async t=>{
  const s=await setup(t);s.$('#ai-agent-new').click();
