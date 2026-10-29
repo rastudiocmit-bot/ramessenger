@@ -71,7 +71,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     clearTimeout(timer); clearTimeout(searchTimer); clearTimeout(linkTimer); clearTimeout(notifyTimer);
     notifyTimer = null; notifyBusy = false; notifySeq = null; notifyEpoch = null; notifyTarget = null; show($("#chat-new-marker"), false);
     for (const data of cache.values()) data.controller?.abort();
-    cache.clear(); familyCache.clear(); familyRequests.clear(); familyRenderKey = ""; listToken = null; listTask = null; channels = []; items = []; selected = null; page = 0; hasMore = false;
+    cache.clear(); familyCache.clear(); cancelFamilyRequests(); familyRequests.clear(); familyRenderKey = ""; listToken = null; listTask = null; channels = []; items = []; selected = null; page = 0; hasMore = false;
     listHeights.clear(); listGeometry = null; listViewportFrame = 0; lastViewportKey = "";
     listPollAfter = 0; listPollError = null; historyPollError = null;
     pollBusy = false; actionBusy = false; historyBusy = false; listLoading = false; listRetryRequired = false; lastList = ""; linkConversation = null; tokenChannel = null;
@@ -1454,15 +1454,31 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     familySync(times.length ? `Обновлено ${date(times[0])}` : synced && !Number.isNaN(synced.getTime()) ? `Справочник от ${date(family.snapshot_at)}` : "Справочник CRM");
     if (family.cache) {
       const info = family.cache;
-      const updated = info.updated_at ? `Баланс и абонементы: ${date(info.updated_at)}` : `Готовим карточку · ${info.cached_sources} из ${info.sources}`;
-      const lessons = "lessons_updated_at" in info ? info.lessons_updated_at ? `Занятия: ${date(info.lessons_updated_at)}` : "Занятия: загружаем" : "";
-      const history = "lessons_history_updated_at" in info ? info.lessons_history_updated_at ? `Год занятий проверен ${date(info.lessons_history_updated_at)}` : "Год занятий: ожидает проверки" : "";
-      const groups = "groups_updated_at" in info ? info.groups_updated_at ? `Группы: ${date(info.groups_updated_at)}` : info.groups_refreshing ? "Группы: проверяем на сервере" : "Группы: из справочника CRM" : "";
-      const status = info.refreshing ? "Обновляем на сервере" : info.overdue ? "Ожидает обновления" : info.auto_refresh ? "Обновляем каждые 30 минут" : "Обновляем при открытии карточки";
+      const updated = info.updated_at ? `Баланс и абонементы: ${date(info.updated_at)}` : `Баланс и абонементы: данные не получены`;
+      const lessons = "lessons_updated_at" in info ? info.lessons_updated_at ? `Занятия: ${date(info.lessons_updated_at)}` : "Занятия: данные не получены" : "";
+      const history = "lessons_history_updated_at" in info ? info.lessons_history_updated_at ? `Год занятий проверен ${date(info.lessons_history_updated_at)}` : "Год занятий: данные не получены" : "";
+      const groups = "groups_updated_at" in info ? info.groups_updated_at ? `Группы: ${date(info.groups_updated_at)}` : "Группы: из справочника CRM" : "";
+      const active = Object.values(info.sections || {}).find(item => item.status === "loading");
+      const waiting = Object.values(info.sections || {}).find(item => ["busy", "retry_wait", "partial", "queued"].includes(item.status));
+      const phase = info.state || (info.refreshing ? "loading" : info.error ? "error" : info.pending ? "queued" : "ready");
+      const status = phase === "loading" ? `Загружаем ${active?.label?.toLowerCase() || "карточку"}`
+        : phase === "busy" ? "Канал AlfaCRM занят"
+        : phase === "retry_wait" ? `Ожидаем повтор${info.retry_at ? ` · ${date(info.retry_at)}` : ""}`
+        : ["queued", "partial"].includes(phase) ? `В очереди${info.queue_position ? ` · позиция ${info.queue_position}` : ""}`
+        : phase === "error" ? "Ошибка обновления"
+        : info.complete ? "Карточка актуальна" : info.overdue ? "Данные требуют обновления"
+        : info.auto_refresh ? "Обновляем каждые 30 минут" : "Обновляем при открытии карточки";
       const issue = info.failures?.[0]?.code;
-      const brief = issue === "credentials_required" ? "проверьте ключ CRM" : issue === "access_denied" ? "ограничен доступ CRM" : issue === "not_found" ? "клиент не найден в CRM" : info.retry_at && info.error ? `повтор ${date(info.retry_at)}` : info.error ? "есть ошибка обновления" : info.refreshing ? "обновляем" : info.overdue ? "ждёт обновления" : info.auto_refresh ? "каждые 30 мин" : "при открытии";
-      familySync(`${info.updated_at ? `Обновлено ${date(info.updated_at)}` : "Загружаем карточку"} · ${brief}`,
-        [updated, lessons, history, groups, status, info.error].filter(Boolean).join(" · "));
+      const legacyBrief = issue === "credentials_required" ? "проверьте ключ CRM" : issue === "access_denied" ? "ограничен доступ CRM" : issue === "not_found" ? "клиент не найден в CRM" : info.retry_at && info.error ? `повтор ${date(info.retry_at)}` : info.error ? "есть ошибка обновления" : info.refreshing ? "обновляем" : info.overdue ? "ждёт обновления" : info.auto_refresh ? "каждые 30 мин" : "при открытии";
+      const headline = !info.state ? `${info.updated_at ? `Обновлено ${date(info.updated_at)}` : "Загружаем карточку"} · ${legacyBrief}`
+        : phase === "loading" ? status
+        : phase === "busy" ? `Канал AlfaCRM занят${info.retry_at ? ` · повтор ${date(info.retry_at)}` : ""}`
+        : ["queued", "partial"].includes(phase) ? status
+        : phase === "retry_wait" ? status
+        : phase === "error" ? `Ошибка обновления · ${issue === "credentials_required" ? "проверьте ключ CRM" : issue === "access_denied" ? "ограничен доступ CRM" : issue === "not_found" ? "клиент не найден в CRM" : "Повторить"}`
+        : info.updated_at ? `Карточка обновлена ${date(info.updated_at)}` : "Показаны данные справочника";
+      familySync(headline,
+        [updated, lessons, history, groups, status, waiting?.error_message, info.error].filter(Boolean).join(" · "));
       familyRefreshState();
     }
     if (!family.cache) familyRefreshState();
@@ -1524,9 +1540,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (left >= 0 && left <= 7) notes.append(note("warn", left === 0 ? "Абонемент заканчивается сегодня" : `Абонемент заканчивается через ${left} ${plural(left, "день", "дня", "дней")}`, `${subName(item)} · до ${familyDate(item.end)}`, "warn"));
     }
     if (known(student.balance) && Number(student.balance) < 0) notes.append(note("wallet", `Задолженность ${familyMoney(Math.abs(Number(student.balance)))}`, "Общий баланс клиента отрицательный", "debt"));
-    if (!subscriptionsLoaded || !lessonsReady) notes.prepend(note("clock", "Готовим подробную карточку", "Абонементы и занятия загружаются на сервере. Уже полученные сведения доступны ниже.", ""));
+    const sectionStatus = name => family.cache?.sections?.[name]?.status;
+    const pendingDetails = [sectionStatus("finance"), sectionStatus("lessons")].some(value => ["queued", "loading", "busy", "retry_wait", "partial"].includes(value));
+    if ((!subscriptionsLoaded || !lessonsReady) && pendingDetails) notes.prepend(note("clock", "Готовим подробную карточку", "Абонементы и занятия поставлены в очередь. Уже полученные сведения доступны ниже.", ""));
+    else if (!subscriptionsLoaded || !lessonsReady) notes.prepend(note("warn", "Подробные данные не получены", "Обновите карточку или проверьте состояние подключения AlfaCRM.", "warn"));
     if (subscriptionConflict) notes.prepend(note("warn", "Уточните сведения об абонементе", "Один ID вернулся из филиалов с разными данными. Обновите карточку.", ""));
-    if (cards.some(card => card.needs_mapping_refresh)) notes.prepend(note("clock", "Обновляем связи абонементов", "Проверяем предметы и филиалы по занятиям. Сохранённые суммы доступны.", ""));
+    if (cards.some(card => card.needs_mapping_refresh) && ["queued", "loading", "busy", "retry_wait", "partial"].includes(sectionStatus("finance"))) notes.prepend(note("clock", "Обновляем связи абонементов", "Проверяем предметы и филиалы по занятиям. Сохранённые суммы доступны.", ""));
+    else if (cards.some(card => card.needs_mapping_refresh)) notes.prepend(note("warn", "Связи абонементов не получены", "Сохранённые суммы доступны. Запустите повторное обновление.", "warn"));
     if (notes.childNodes.length) detail.append(notes);
 
     const paid = cards.filter(card => known(card.paid_lesson_count));
@@ -1580,6 +1600,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (familyCache.size >= 40) familyCache.delete(familyCache.keys().next().value);
     familyCache.set(contact, { value, at: Date.now() });
   }
+  function cancelFamilyRequests(keepConversation = null) {
+    for (const [path, entry] of familyRequests) {
+      if (keepConversation && entry.conversation === keepConversation) continue;
+      entry.controller?.abort(); familyRequests.delete(path);
+    }
+  }
   function preparedFamilyRequest(conversation, cachedOnly = false, contact = null) {
     const params = new URLSearchParams();
     if (cachedOnly) params.set("cached_only", "true");
@@ -1590,24 +1616,28 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     }
     const path = `${chatPath(conversation)}/family${params.size ? "?" + params : ""}`;
     if (!familyRequests.has(path)) {
-      const request = api(path, { timeoutMs: 20000 }).then(result => {
+      const controller = new AbortController();
+      const entry = { controller, conversation, contact, promise: null };
+      const request = api(path, { timeoutMs: 20000, signal: controller.signal }).then(result => {
         if (!result.not_modified) return result;
         const saved = familyCache.get(contact)?.value;
         if (saved && saved.version === result.version) return saved;
         params.delete("known_version");
-        return api(`${chatPath(conversation)}/family?${params}`, { timeoutMs: 20000 });
+        return api(`${chatPath(conversation)}/family?${params}`, { timeoutMs: 20000, signal: controller.signal });
       }).finally(() => {
-        if (familyRequests.get(path) === request) familyRequests.delete(path);
+        if (familyRequests.get(path) === entry) familyRequests.delete(path);
       });
-      familyRequests.set(path, request);
+      entry.promise = request; familyRequests.set(path, entry);
     }
-    return familyRequests.get(path);
+    return familyRequests.get(path).promise;
   }
   function watchFamily(conversation, contact, epoch, gen, seq) {
     clearTimeout(familyTimer);
-    if (!family?.cache || (!family.cache.pending && !family.cache.refreshing && !family.cache.auto_refresh)) return;
+    if (!family?.cache || (!family.cache.pending && !family.cache.incomplete && !family.cache.auto_refresh)) return;
     // Poll prepared facts only; the server owns CRM work and the 30-minute clock.
-    const delay = family.cache.refreshing ? (family.cache.error ? 30000 : 3000) : 60000;
+    const phase = family.cache.state || (family.cache.refreshing ? "loading" : family.cache.pending ? "queued" : family.cache.error ? "error" : "ready");
+    const delay = !family.cache.state && family.cache.paused ? 60000 : phase === "loading" ? 3000 : ["queued", "partial"].includes(phase) ? 5000
+      : ["busy", "retry_wait"].includes(phase) ? 10000 : phase === "error" ? 30000 : family.cache.incomplete ? 10000 : 60000;
     familyTimer = setTimeout(async () => {
       if (!valid(epoch, gen) || seq !== detailsSeq || !detailsDialog.open || selected !== conversation || !active()) return;
       if (document.hidden) { watchFamily(conversation, contact, epoch, gen, seq); return; }
@@ -1620,12 +1650,13 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     }, delay);
   }
   function familyRefreshState() {
-    const refreshing = familyBusy || Boolean(family?.cache?.refreshing);
+    const refreshing = Boolean(family?.cache?.loading ?? family?.cache?.refreshing);
     detailsDialog.classList.toggle("is-refreshing", refreshing);
     const refresh = $("#chat-details-refresh");
     refresh.setAttribute("aria-busy", String(refreshing));
     refresh.disabled = familyBusy || !isAdmin();
-    refresh.title = refreshing ? "Обновляем сведения на сервере. Сохранённые данные доступны." : "Обновить сведения из CRM";
+    refresh.title = refreshing ? "Сервер загружает сведения. Сохранённые данные доступны."
+      : familyBusy ? "Ставим карточку в очередь" : "Обновить сведения из CRM";
   }
   async function refreshSelected(force) {
     if (!force || !isAdmin() || familyBusy || !family) return;
@@ -1678,6 +1709,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (!selected || !meta) return;
     if (!contactId && !meta.identity_resolution && !options.auto && !pinnedDocked()) { openLink(selected); return; }
     const epoch = state.epoch, gen = generation, conversation = selected;
+    cancelFamilyRequests(conversation);
     const refresh = $("#chat-details-refresh"); refresh.hidden = !contactId; refresh.disabled = !isAdmin();
     familyPending(meta.name); const seq = detailsSeq;
     clearTimeout(closingTimer); detailsDialog.classList.remove("is-closing"); presentDetails();
@@ -1793,7 +1825,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if (quietCloses > 0) { quietCloses -= 1; return; }
     if (detailsDialog.open) return; // A late event from a close that a reopen has already replaced.
     detailsDialog.classList.remove("is-refreshing");
-    detailsSeq += 1; family = null; clearTimeout(familyTimer); familyTimer = null; renderPin();
+    detailsSeq += 1; family = null; clearTimeout(familyTimer); familyTimer = null; cancelFamilyRequests(); renderPin();
   });
   async function openCards(item) {
     if (!item.contact_id) return openLink(item.id);

@@ -39,13 +39,18 @@ def progress(db, workspace, snapshot):
     """), {"w": workspace, "conn": snapshot["connection_id"], "r": snapshot["run"], "topic": TOPIC}).mappings().one())
 
 
-def enqueue(db, workspace, snapshot, *, contact=None, force=False):
+def enqueue(db, workspace, snapshot, *, contact=None, force=False,
+            source_contact=None, conversation=None):
+    from center_messenger.family_cache import _manual_fields
+    manual = _manual_fields(contact, source_contact=source_contact, conversation=conversation)
     return db.execute(text("""
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
       SELECT :w,gen_random_uuid(),:topic,concat(:conn,':',c.branch_id,':',c.external_id),
         jsonb_build_object('connection',CAST(:conn AS text),'branch',c.branch_id::text,
           'customer',c.external_id::text,'contact',c.contact_id::text,'student',c.student_id::text,
-          'version',:v,'manual',:manual,'due_at',now(),'available_at',now(),'attempts',0,
+          'version',:v,'manual',:manual,'requested_at',CAST(:requested_at AS text),
+          'manual_until',CAST(:manual_until AS text),'source_contact',CAST(:source_contact AS text),
+          'conversation',CAST(:conversation AS text),'due_at',now(),'available_at',now(),'attempts',0,
           'force_at',CASE WHEN :force THEN CAST(clock_timestamp() AS text) ELSE NULL END),'pending'
       FROM alfa_customers c JOIN alfa_branches b ON b.workspace_id=c.workspace_id AND b.connection_id=:conn
         AND b.external_id=c.branch_id AND b.available
@@ -64,6 +69,10 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False):
           AND outbox_events.payload->>'student'=EXCLUDED.payload->>'student'
         THEN outbox_events.payload||jsonb_build_object(
           'manual',coalesce((outbox_events.payload->>'manual')::boolean,false) OR :manual,
+          'requested_at',CASE WHEN :manual THEN CAST(:requested_at AS text) ELSE outbox_events.payload->>'requested_at' END,
+          'manual_until',CASE WHEN :manual THEN CAST(:manual_until AS text) ELSE outbox_events.payload->>'manual_until' END,
+          'source_contact',CASE WHEN :manual THEN CAST(:source_contact AS text) ELSE outbox_events.payload->>'source_contact' END,
+          'conversation',CASE WHEN :manual THEN CAST(:conversation AS text) ELSE outbox_events.payload->>'conversation' END,
           'force_at',CASE WHEN :force THEN EXCLUDED.payload->>'force_at' ELSE outbox_events.payload->>'force_at' END)
         ELSE EXCLUDED.payload||CASE WHEN outbox_events.payload->>'version'=EXCLUDED.payload->>'version'
           AND outbox_events.payload->>'contact'=EXCLUDED.payload->>'contact'
@@ -73,9 +82,12 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False):
       WHERE outbox_events.state<>'pending' OR outbox_events.payload->>'version'<>EXCLUDED.payload->>'version'
         OR outbox_events.payload->>'contact'<>EXCLUDED.payload->>'contact'
         OR outbox_events.payload->>'student'<>EXCLUDED.payload->>'student'
-        OR (:manual AND outbox_events.payload->>'manual' IS DISTINCT FROM 'true') OR :force
+        OR (:manual AND (outbox_events.payload->>'manual' IS DISTINCT FROM 'true'
+          OR coalesce((outbox_events.payload->>'requested_at')::timestamptz,'epoch')<CAST(:requested_at AS timestamptz)))
+        OR :force
     """), {"w": workspace, "conn": snapshot["connection_id"], "r": snapshot["run"], "v": snapshot["version"],
-             "topic": TOPIC, "contact": contact, "manual": contact is not None, "force": force}).rowcount
+             "topic": TOPIC, "contact": contact, "manual": contact is not None, "force": force,
+             **manual}).rowcount
 
 
 def fetch(client, branch, customer):
@@ -132,7 +144,7 @@ def process(worker, workspace, job):
             if (not settings or not settings["secret_ciphertext"] or not snapshot or not source
                 or str(settings["connection_id"]) != job["connection"] or settings["version"] != job["version"]
                 or snapshot["connection_id"] != settings["connection_id"] or not (job["manual"] or source["status"] == "client")):
-                worker.finish(db, workspace, job)
+                worker.requeue_current(db, workspace, job, owned)
                 return
             settings, snapshot = dict(settings), dict(snapshot)
             checkpoint = worker.checkpoint(job, owned, snapshot, snapshot["today"])
@@ -156,7 +168,7 @@ def process(worker, workspace, job):
                 if (not current or not current["secret_ciphertext"] or current["version"] != settings["version"]
                     or str(current["connection_id"]) != job["connection"] or not published or published["run"] != snapshot["run"]
                     or not source or not (own.get("manual") or source["status"] == "client")):
-                    worker.finish(db, workspace, job)
+                    worker.requeue_current(db, workspace, job, own)
                     return
                 params = {"w": workspace, "r": snapshot["run"], "b": int(job["branch"]), "customer": int(job["customer"])}
                 for identifier, name in groups.items():

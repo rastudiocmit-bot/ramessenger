@@ -2587,7 +2587,9 @@ class MessageSyncTests(unittest.TestCase):
         reader.prepare(None,self.workspace,self.contact,conversation=conversation,cached_only=True)
         self.assertEqual(self.family_jobs(),[])
         result = reader.prepare(None,self.workspace,self.contact,conversation=conversation)
-        self.assertTrue(result['cache']['refreshing'])
+        self.assertEqual(result['cache']['state'],'queued')
+        self.assertTrue(result['cache']['pending'])
+        self.assertFalse(result['cache']['refreshing'])
         self.assertFalse(result['cache']['auto_refresh'])
         with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
             worker.process(self.workspace,worker.claim(self.workspace))
@@ -2609,8 +2611,12 @@ class MessageSyncTests(unittest.TestCase):
         self.snapshot['version'] = 2
         self.db.execute(text('UPDATE alfa_settings SET version=2 WHERE workspace_id=:w'),{'w':self.workspace})
         reader.prepare(None,self.workspace,self.contact,conversation=conversation)
-        self.assertEqual(self.family_jobs()[0]['payload']['version'],2)
-        self.assertNotIn('lease_owner',self.family_jobs()[0]['payload'])
+        rebased=self.family_jobs()[0]['payload']
+        self.assertEqual(rebased['version'],2)
+        self.assertTrue(rebased['manual'])
+        self.assertEqual(rebased['source_contact'],str(self.contact))
+        self.assertEqual(rebased['conversation'],str(conversation))
+        self.assertNotIn('lease_owner',rebased)
         worker.process(self.workspace,job)
         self.assertIsNone(self.family_facts())
         with patch('center_messenger.family_cache.fetch_family_finance',return_value=self.live_family_facts()):
@@ -2628,7 +2634,9 @@ class MessageSyncTests(unittest.TestCase):
         first=reader.detail(None,self.workspace,self.contact)
         self.assertEqual(first['students'][0]['balance'],'4123.75')
         self.assertIsNone(first['cache']['lessons_updated_at'])
-        self.assertTrue(first['cache']['refreshing'])
+        self.assertEqual(first['cache']['state'],'queued')
+        self.assertTrue(first['cache']['pending'])
+        self.assertFalse(first['cache']['refreshing'])
         with patch('center_messenger.family_cache.fetch_family_lessons',return_value=[]):
             worker.process(self.workspace,worker.claim(self.workspace))
         financial_time=self.family_facts()['refreshed_at']
@@ -2647,6 +2655,29 @@ class MessageSyncTests(unittest.TestCase):
         with patch('center_messenger.family_cache.fetch_family_finance',return_value={**self.live_family_facts(),'balance':'5000.00'}):
             worker.process(self.workspace,money)
         self.assertEqual(reader.detail(None,self.workspace,self.contact)['students'][0]['balance'],'5000.00')
+
+    def test_card_status_distinguishes_queue_active_lease_and_busy_retry(self):
+        reader,worker,_=self.family_worker_fixture()
+        self.project(self.row('1',direction='out',actor='automation'))
+        conversation=self.conversation()['id']
+        queued=reader.prepare(None,self.workspace,self.contact,conversation=conversation)
+        self.assertEqual(queued['cache']['state'],'queued')
+        self.assertFalse(queued['cache']['loading'])
+        self.assertEqual(queued['cache']['sections']['finance']['status'],'queued')
+        self.assertEqual(queued['cache']['sections']['finance']['source_customer_ids'],['7'])
+        job=worker.claim(self.workspace)
+        loading=reader.detail(None,self.workspace,self.contact)
+        self.assertEqual(loading['cache']['state'],'loading')
+        self.assertTrue(loading['cache']['loading'])
+        self.assertIsNotNone(loading['cache']['sections']['finance']['started_at'])
+        self.assertGreaterEqual(loading['cache']['sections']['finance']['queue_wait_ms'],0)
+        worker.retry(self.workspace,job,busy=True,error=AuthError(409,'busy'))
+        busy=reader.detail(None,self.workspace,self.contact)['cache']
+        self.assertEqual(busy['state'],'busy')
+        self.assertFalse(busy['loading'])
+        self.assertTrue(busy['busy'])
+        self.assertEqual(busy['sections']['finance']['status'],'busy')
+        self.assertIsNotNone(busy['sections']['finance']['retry_at'])
 
     def test_financial_refresh_preserves_lesson_proof_and_the_yearly_check_clock(self):
         reader,worker,_=self.family_worker_fixture()

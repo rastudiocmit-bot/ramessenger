@@ -26,6 +26,8 @@ TOPICS = (TOPIC, LESSONS, HISTORY, GROUPS)
 INTERVAL = timedelta(minutes=30)
 HISTORY_INTERVAL = timedelta(days=1)
 LEASE = timedelta(seconds=90)
+MANUAL_INTEREST = timedelta(minutes=10)
+MANUAL_BURST = 5
 SUBSCRIPTIONS_STALE_SQL = """EXISTS(SELECT 1 FROM jsonb_array_elements(f.subscriptions) item
     WHERE NOT(item ? 'subject_ids') OR NOT(item ? 'lesson_type_ids'))"""
 LESSONS_STALE_SQL = """EXISTS(SELECT 1 FROM jsonb_array_elements(f.lessons) item
@@ -33,8 +35,43 @@ LESSONS_STALE_SQL = """EXISTS(SELECT 1 FROM jsonb_array_elements(f.lessons) item
       OR NOT(item ? 'customer_id') OR NOT(item ? 'customer_verified'))"""
 MAPPING_STALE_SQL = "(" + SUBSCRIPTIONS_STALE_SQL + " OR " + LESSONS_STALE_SQL + ")"
 
+SECTION_META = {
+    TOPIC: ("finance", "Баланс и абонементы", "refreshed_at", INTERVAL),
+    LESSONS: ("lessons", "Занятия", "lessons_refreshed_at", INTERVAL),
+    HISTORY: ("history", "История занятий", "lessons_full_refreshed_at", HISTORY_INTERVAL),
+    GROUPS: ("groups", "Группы", "groups_refreshed_at", timedelta(hours=6)),
+}
 
-def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS):
+
+def _parse_time(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _active_lease(job, now):
+    lease = _parse_time(job.get("lease_until"))
+    return bool(job.get("lease_owner") and lease and lease > now)
+
+
+def _manual_fields(contact, *, source_contact=None, conversation=None):
+    if contact is None:
+        return {"manual": False, "requested_at": None, "manual_until": None,
+                "source_contact": None, "conversation": None}
+    now = datetime.now(UTC)
+    return {"manual": True, "requested_at": now.isoformat(),
+            "manual_until": (now + MANUAL_INTEREST).isoformat(),
+            "source_contact": str(source_contact or contact),
+            "conversation": str(conversation) if conversation else None}
+
+
+def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS,
+            source_contact=None, conversation=None):
     """Independent queues: finances first, recent lessons, then the daily history.
 
     All three keep their own leases and retry clocks. A failed history request
@@ -49,20 +86,26 @@ def enqueue(db, workspace, snapshot, *, contact=None, force=False, topics=TOPICS
         if topic not in topics:
             continue
         count += _enqueue(db, workspace, snapshot, contact=contact, force=force,
-                         topic=topic, column=column, interval=interval, stale=stale)
+                         topic=topic, column=column, interval=interval, stale=stale,
+                         source_contact=source_contact, conversation=conversation)
     if GROUPS in topics:
-        count += group_links.enqueue(db, workspace, snapshot, contact=contact, force=force)
+        count += group_links.enqueue(db, workspace, snapshot, contact=contact, force=force,
+                                    source_contact=source_contact, conversation=conversation)
     return count
 
 
-def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale):
+def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval, stale,
+             source_contact, conversation):
     # SQL fragments below come only from the fixed policy in enqueue().
+    manual = _manual_fields(contact, source_contact=source_contact, conversation=conversation)
     return db.execute(text("WITH pending_families AS MATERIALIZED (" + card_preference.pending_sql(snapshot) + ") " + f"""
       INSERT INTO outbox_events(workspace_id,id,topic,event_key,payload,state)
       SELECT :w,gen_random_uuid(),:topic,concat(:conn,':',c.branch_id,':',c.external_id),
         jsonb_build_object('connection',CAST(:conn AS text),'branch',c.branch_id::text,
           'customer',c.external_id::text,'contact',c.contact_id::text,'student',c.student_id::text,
-          'version',:version,'manual',:manual,'due_at',coalesce(f.{column}+interval '{interval}',now()),
+          'version',:version,'manual',:manual,'requested_at',CAST(:requested_at AS text),
+          'manual_until',CAST(:manual_until AS text),'source_contact',CAST(:source_contact AS text),
+          'conversation',CAST(:conversation AS text),'due_at',coalesce(f.{column}+interval '{interval}',now()),
           'force_at',CASE WHEN :force THEN CAST(clock_timestamp() AS text) ELSE NULL END,
           'available_at',now(),'attempts',0),'pending'
       FROM alfa_customers c JOIN alfa_branches b ON b.workspace_id=c.workspace_id
@@ -81,37 +124,61 @@ def _enqueue(db, workspace, snapshot, *, contact, force, topic, column, interval
           AND outbox_events.payload->>'student'=EXCLUDED.payload->>'student'
           THEN outbox_events.payload||jsonb_build_object(
             'manual',coalesce((outbox_events.payload->>'manual')::boolean,false) OR :manual,
+            'requested_at',CASE WHEN :manual THEN CAST(:requested_at AS text) ELSE outbox_events.payload->>'requested_at' END,
+            'manual_until',CASE WHEN :manual THEN CAST(:manual_until AS text) ELSE outbox_events.payload->>'manual_until' END,
+            'source_contact',CASE WHEN :manual THEN CAST(:source_contact AS text) ELSE outbox_events.payload->>'source_contact' END,
+            'conversation',CASE WHEN :manual THEN CAST(:conversation AS text) ELSE outbox_events.payload->>'conversation' END,
             'force_at',CASE WHEN :force THEN EXCLUDED.payload->>'force_at' ELSE outbox_events.payload->>'force_at' END)
           ELSE EXCLUDED.payload END
       WHERE (outbox_events.state<>'pending' AND coalesce((outbox_events.payload->>'lease_until')::timestamptz,'epoch')<=now())
         OR outbox_events.payload->>'version'<>EXCLUDED.payload->>'version'
         OR outbox_events.payload->>'contact'<>EXCLUDED.payload->>'contact'
         OR outbox_events.payload->>'student'<>EXCLUDED.payload->>'student'
-        OR (:manual AND outbox_events.payload->>'manual' IS DISTINCT FROM 'true')
+        OR (:manual AND (outbox_events.payload->>'manual' IS DISTINCT FROM 'true'
+          OR coalesce((outbox_events.payload->>'requested_at')::timestamptz,'epoch')<CAST(:requested_at AS timestamptz)))
         OR :force
       """), {"w": workspace, "topic": topic, "conn": snapshot["connection_id"],
                "run": snapshot["run"], "version": snapshot["version"],
                "contact": contact, "manual": contact is not None, "force": force,
-               "finance": topic == TOPIC, **card_preference.params(snapshot)}).rowcount
+               "finance": topic == TOPIC, **manual, **card_preference.params(snapshot)}).rowcount
 
 
 def cache_status(db, workspace, connection, cards, contact, version, *, contacts=None, snapshot=None):
     contacts = list(contacts or [contact])
     sources = [card for student in cards for card in student["cards"]]
-    times = [datetime.fromisoformat(card["refreshed_at"]) for card in sources if card.get("refreshed_at")]
-    jobs = list(db.execute(text("SELECT (payload-'checkpoint')||jsonb_build_object('topic',topic) FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) "
-        "AND state='pending' AND payload->>'connection'=:conn AND payload->>'version'=:v AND payload->>'contact'=ANY(CAST(:contacts AS text[]))"),
-        {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
+    now = datetime.now(UTC)
+    jobs = list(db.execute(text("""
+      WITH ranked AS (
+        SELECT e.id,row_number() OVER (ORDER BY
+          coalesce((e.payload->>'manual')::boolean,false) DESC,
+          CASE WHEN coalesce((e.payload->>'manual')::boolean,false)
+            THEN coalesce((e.payload->>'requested_at')::timestamptz,e.created_at) END DESC NULLS LAST,
+          (coalesce((e.payload->>'served_at')::timestamptz,e.created_at)<now()-interval '15 minutes') DESC,
+          coalesce((e.payload->>'served_at')::timestamptz,e.created_at),e.id) AS position
+        FROM outbox_events e WHERE e.workspace_id=:w
+          AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending'
+          AND e.payload->>'connection'=:conn AND e.payload->>'version'=:v
+      )
+      SELECT (e.payload-'checkpoint')||jsonb_build_object('topic',e.topic,'job_id',CAST(e.id AS text),
+        'created_at',e.created_at,'queue_position',ranked.position,'checkpoint_pages',
+        coalesce((e.payload->'checkpoint'->>'pages')::integer,0))
+      FROM outbox_events e JOIN ranked ON ranked.id=e.id
+      WHERE e.workspace_id=:w AND e.topic IN (:finance,:lessons,:history,:groups)
+        AND e.state='pending' AND e.payload->>'connection'=:conn AND e.payload->>'version'=:v
+        AND e.payload->>'contact'=ANY(CAST(:contacts AS text[]))
+    """), {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
          "conn": str(connection), "v": str(version), "contacts": list(map(str, contacts))}).scalars())
-    keys = {(card["branch_id"], card["id"]) for card in sources}
+    # Outbox JSON keeps source identifiers as strings.  Normalising both sides
+    # is essential: otherwise a real queued/leased job disappears from the
+    # public status when the prepared card contains integer AlfaCRM IDs.
+    keys = {(str(card["branch_id"]), str(card["id"])) for card in sources}
     jobs = [job for job in jobs if (job["branch"], job["customer"]) in keys]
     active_blocks = card_jobs.blocks(db, workspace, connection, version) if jobs else []
     jobs = [card_jobs.effective_job(job, active_blocks) for job in jobs]
     runnable = [job for job in jobs if not job.get("paused")]
-    now = datetime.now(UTC)
-    refreshing = any((job.get("lease_until") and datetime.fromisoformat(job["lease_until"])>now) or
-                     (job.get("available_at") and datetime.fromisoformat(job["available_at"])<=now) for job in runnable)
-    retries = [job["available_at"] for job in runnable if job.get("available_at") and job.get("error")]
+    loading = any(_active_lease(job, now) for job in runnable)
+    retries = [job["available_at"] for job in runnable
+               if job.get("available_at") and (job.get("error") or job.get("cause") == "busy")]
     failures = [{"code": job["error"], "http_status": job.get("http_status"), "cause": job.get("cause"),
                  "operation": job["topic"], "branch_id": job["branch"], "customer_id": job["customer"],
                  "stage": job.get("stage"), "page": job.get("page"), "paused": bool(job.get("paused")),
@@ -121,18 +188,93 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
                      "Не удалось обновить занятия. Баланс и абонементы обновляются отдельно. ")
                      + card_jobs.LABELS.get(job["error"], card_jobs.LABELS["crm_unavailable"])}
                 for job in jobs if job.get("error")]
-    ready = len(times) == len(sources) and bool(sources)
     mapping_pending = any(card.get("needs_mapping_refresh") for card in sources)
+
+    sections = {}
+    for topic, (key, label, field, interval) in SECTION_META.items():
+        section_jobs = [job for job in jobs if job["topic"] == topic]
+        values = [_parse_time(card.get(field)) for card in sources]
+        cached = [value for value in values if value]
+        fresh = [value for value in cached if value + interval > now]
+        leased = [job for job in section_jobs if _active_lease(job, now)]
+        busy = [job for job in section_jobs if job.get("cause") == "busy"]
+        errors = [job for job in section_jobs if job.get("error")]
+        paused = [job for job in errors if job.get("paused")]
+        waiting = [job for job in section_jobs if (_parse_time(job.get("available_at")) or now) > now]
+        partial = any(int(job.get("checkpoint_pages") or 0) > 0 for job in section_jobs)
+        if leased:
+            status = "loading"
+        elif busy:
+            status = "busy"
+        elif paused:
+            status = "error"
+        elif errors and waiting:
+            status = "retry_wait"
+        elif partial:
+            status = "partial"
+        elif section_jobs:
+            status = "queued"
+        elif len(fresh) == len(sources) and sources:
+            status = "ready"
+        elif len(cached) == len(sources) and sources:
+            status = "stale"
+        elif cached:
+            status = "partial"
+        else:
+            status = "missing"
+        section_retry = [_parse_time(job.get("available_at")) for job in section_jobs
+                         if job.get("error") or job.get("cause") == "busy"]
+        section_retry = [value for value in section_retry if value]
+        requested = [_parse_time(job.get("requested_at")) or _parse_time(job.get("created_at")) for job in section_jobs]
+        requested = [value for value in requested if value]
+        started = [_parse_time(job.get("started_at")) for job in leased]
+        started = [value for value in started if value]
+        positions = [int(job["queue_position"]) for job in section_jobs if job.get("queue_position")]
+        error_job = errors[0] if errors else None
+        sections[key] = {
+            "label": label, "status": status, "updated_at": min(cached).isoformat() if cached else None,
+            "finished_at": min(cached).isoformat() if cached else None,
+            "requested_at": min(requested).isoformat() if requested else None,
+            "started_at": min(started).isoformat() if started else None,
+            "retry_at": min(section_retry).isoformat() if section_retry else None,
+            "queue_position": min(positions) if positions else None,
+            "sources": len(sources), "cached_sources": len(cached), "fresh_sources": len(fresh),
+            "source_customer_ids": sorted({str(job["customer"]) for job in section_jobs}
+                                          or {str(card["id"]) for card in sources}),
+            "directory_version": version,
+            "checkpoint_pages": sum(int(job.get("checkpoint_pages") or 0) for job in section_jobs),
+            "attempts": max([int(job.get("attempts") or 0) for job in section_jobs], default=0),
+            "queue_wait_ms": max([int(job.get("queue_wait_ms") or 0) for job in section_jobs], default=0),
+            "duration_ms": max([int(job.get("duration_ms") or 0) for job in section_jobs], default=0),
+            "error_code": error_job.get("error") if error_job else None,
+            "error_message": card_jobs.LABELS.get(error_job.get("error"), card_jobs.LABELS["crm_unavailable"])
+                             if error_job else None,
+            "stage": next((job.get("stage") for job in leased if job.get("stage")), None),
+            "page": next((job.get("page") for job in leased if job.get("page") is not None), None),
+        }
+
+    finance_at = _parse_time(sections["finance"]["updated_at"])
+    lessons_at = _parse_time(sections["lessons"]["updated_at"])
+    history_at = _parse_time(sections["history"]["updated_at"])
+    groups_at = _parse_time(sections["groups"]["updated_at"])
+    required = [sections[name]["status"] for name in ("finance", "lessons", "groups")]
+    complete = bool(required) and all(status == "ready" for status in required) and not mapping_pending
+    statuses = [section["status"] for section in sections.values()]
+    state = next((status for status in ("loading", "busy", "retry_wait", "error", "partial", "queued")
+                  if status in statuses), "ready" if complete else "stale" if any(_parse_time(card.get("refreshed_at")) for card in sources) else "missing")
+    times = [_parse_time(card.get("refreshed_at")) for card in sources]
+    times = [value for value in times if value]
+    ready = len(times) == len(sources) and bool(sources)
     updated = min(times) if ready else None
-    def oldest(field):
-        values = [datetime.fromisoformat(card[field]) for card in sources if card.get(field)]
-        return min(values) if len(values) == len(sources) and values else None
-    lessons_at, history_at = oldest("lessons_refreshed_at"), oldest("lessons_full_refreshed_at")
-    groups_at = oldest("groups_refreshed_at")
     automatic = card_preference.is_pending(db, workspace, snapshot, contacts) if snapshot else db.execute(text(
         "SELECT EXISTS(SELECT 1 FROM conversations WHERE workspace_id=:w AND contact_id=:c AND needs_reply AND kind='direct')"),
         {"w": workspace, "c": contact}).scalar_one()
-    return {"auto_refresh": bool(automatic), "ready": ready, "refreshing": bool(refreshing), "pending": bool(jobs), "updated_at": updated.isoformat() if updated else None,
+    positions = [section["queue_position"] for section in sections.values() if section["queue_position"]]
+    return {"auto_refresh": bool(automatic), "ready": ready, "complete": complete, "incomplete": not complete,
+            "state": state, "loading": loading, "refreshing": loading, "busy": any(job.get("cause") == "busy" for job in jobs),
+            "pending": bool(jobs), "queued": sum(not _active_lease(job, now) for job in jobs),
+            "queue_position": min(positions) if positions else None, "sections": sections,
+            "updated_at": updated.isoformat() if updated else None,
             "paused": any(job.get("paused") for job in jobs), "failures": failures,
             "next_refresh_at": (updated + INTERVAL).isoformat() if updated else None,
             "interval_minutes": 30, "sources": len(sources), "cached_sources": len(times),
@@ -142,11 +284,15 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
             "lessons_history_interval_hours": 24,
             "groups_updated_at": groups_at.isoformat() if groups_at else None,
             "groups_interval_hours": 6,
-            "groups_refreshing": any(job["topic"] == GROUPS for job in runnable),
-            "lessons_refreshing": any(job["topic"] == LESSONS for job in runnable),
-            "lessons_history_refreshing": any(job["topic"] == HISTORY for job in runnable),
+            "groups_refreshing": any(job["topic"] == GROUPS and _active_lease(job, now) for job in runnable),
+            "groups_pending": any(job["topic"] == GROUPS for job in jobs),
+            "lessons_refreshing": any(job["topic"] == LESSONS and _active_lease(job, now) for job in runnable),
+            "lessons_pending": any(job["topic"] == LESSONS for job in jobs),
+            "lessons_history_refreshing": any(job["topic"] == HISTORY and _active_lease(job, now) for job in runnable),
+            "lessons_history_pending": any(job["topic"] == HISTORY for job in jobs),
             "overdue": not ready or mapping_pending or updated + INTERVAL <= datetime.now(UTC)
-                       or lessons_at is None or lessons_at + INTERVAL <= datetime.now(UTC),
+                       or lessons_at is None or lessons_at + INTERVAL <= datetime.now(UTC)
+                       or groups_at is None or groups_at + timedelta(hours=6) <= datetime.now(UTC),
             "retry_at": min(retries, default=None),
             "error": failures[0]["text"] if failures else None}
 
@@ -154,7 +300,9 @@ def cache_status(db, workspace, connection, cards, contact, version, *, contacts
 def current(db, workspace, connection):
     """Only a leased, current-source job can be displayed as processing now."""
     row = db.execute(text("""
-      SELECT e.topic,e.payload-'checkpoint' AS payload,c.name AS student_name,coalesce(nullif(c.legal_name,''),d.display_name,c.name) AS name
+      SELECT e.topic,(e.payload-'checkpoint')||jsonb_build_object('checkpoint_pages',
+        coalesce((e.payload->'checkpoint'->>'pages')::integer,0)) AS payload,
+        c.name AS student_name,coalesce(nullif(c.legal_name,''),d.display_name,c.name) AS name
       FROM outbox_events e JOIN alfa_settings s ON s.workspace_id=e.workspace_id
         AND s.connection_id=:conn AND s.secret_ciphertext IS NOT NULL
       JOIN alfa_sync_control sc ON sc.workspace_id=s.workspace_id AND sc.connection_id=s.connection_id
@@ -176,6 +324,8 @@ def current(db, workspace, connection):
             "customer_id": job["customer"], "branch_id": job["branch"],
             "started_at": job.get("started_at"), "lease_until": job["lease_until"],
             "stage": job.get("stage"), "page": job.get("page"),
+            "api_calls": int(job.get("checkpoint_pages") or 0),
+            "attempts": int(job.get("attempts") or 0),
             "manual": bool(job.get("manual")), "operation": {
                 TOPIC: "reading_finance", LESSONS: "reading_recent_lessons", HISTORY: "reading_lesson_history", GROUPS: "reading_customer_groups"
             }[row["topic"]]}
@@ -185,7 +335,9 @@ def progress(db, workspace, connection, snapshot):
     """Count families needing an answer, without multiplying branch source cards."""
     at = datetime.now(UTC).isoformat()
     empty = {"configured": bool(snapshot), "total": 0, "ready": 0, "cached": 0,
-             "queued": 0, "errors": 0, "next_retry_at": None, "interval_minutes": 30, "as_of": at}
+             "queued": 0, "manual_queued": 0, "background_queued": 0, "loading": 0,
+             "busy": 0, "stalled": 0, "oldest_wait_seconds": 0,
+             "errors": 0, "next_retry_at": None, "interval_minutes": 30, "as_of": at}
     if not snapshot or snapshot["connection_id"] != connection:
         return empty
     row = db.execute(text("""
@@ -220,7 +372,27 @@ def progress(db, workspace, connection, snapshot):
     """), {"w": workspace, "conn": connection, "run": snapshot["run"],
              "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS,
              **card_preference.params(snapshot)}).mappings().one()
-    return empty | dict(row) | {"groups": group_links.progress(db, workspace, snapshot)}
+    queue = dict(db.execute(text("""
+      SELECT count(*) FILTER(WHERE coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()) AS queue_depth,
+        count(*) FILTER(WHERE coalesce((payload->>'manual')::boolean,false)
+          AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()) AS manual_queued,
+        count(*) FILTER(WHERE NOT coalesce((payload->>'manual')::boolean,false)
+          AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()) AS background_queued,
+        count(*) FILTER(WHERE coalesce((payload->>'lease_until')::timestamptz,'epoch')>now()) AS loading,
+        count(*) FILTER(WHERE payload->>'cause'='busy') AS busy,
+        count(*) FILTER(WHERE (coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()
+          AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-interval '30 seconds')
+          OR (coalesce((payload->>'lease_until')::timestamptz,'epoch')>now()
+            AND coalesce((payload->>'last_progress_at')::timestamptz,
+              (payload->>'started_at')::timestamptz,created_at)<now()-interval '60 seconds')) AS stalled,
+        coalesce(max(EXTRACT(EPOCH FROM now()-coalesce((payload->>'requested_at')::timestamptz,created_at)))
+          FILTER(WHERE coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now()),0)::integer AS oldest_wait_seconds
+      FROM outbox_events WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups)
+        AND state='pending' AND payload->>'connection'=CAST(:conn AS text)
+        AND payload->>'version'=CAST(:version AS text)
+    """), {"w": workspace, "conn": connection, "version": snapshot["version"],
+             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS}).mappings().one())
+    return empty | dict(row) | queue | {"groups": group_links.progress(db, workspace, snapshot)}
 
 
 class _TariffCache:
@@ -262,11 +434,94 @@ class FamilyCacheWorker:
                 repair_labels(db, workspace, snapshot)
                 card_preference.repair(db, workspace, snapshot)
                 enqueue(db, workspace, snapshot)
+                self.reconcile_manual(db, workspace, snapshot)
+                self.watchdog(db, workspace, snapshot)
+
+    def watchdog(self, db, workspace, snapshot):
+        """Make an opened card recoverable when it waited without a lease."""
+        db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object("
+            "'priority_boost',true,'watchdog_at',CAST(clock_timestamp() AS text)) "
+            "WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) AND state='pending' "
+            "AND payload->>'connection'=CAST(:conn AS text) AND payload->>'version'=CAST(:version AS text) "
+            "AND coalesce((payload->>'manual')::boolean,false) "
+            "AND coalesce((payload->>'lease_until')::timestamptz,'epoch')<=now() "
+            "AND (payload->>'available_at')::timestamptz<=now() "
+            "AND coalesce((payload->>'requested_at')::timestamptz,created_at)<now()-interval '30 seconds'"),
+            {"w": workspace, "conn": snapshot["connection_id"], "version": snapshot["version"],
+             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS})
+
+    def reconcile_manual(self, db, workspace, snapshot):
+        """Recover an incomplete open card even if an obsolete job was retired."""
+        rows = list(db.execute(text("""
+          SELECT DISTINCT ON (coalesce(payload->>'source_contact',payload->>'contact'))
+            coalesce(payload->>'source_contact',payload->>'contact') AS source_contact,
+            payload->>'conversation' AS conversation,
+            (payload->>'requested_at')::timestamptz AS requested_at,
+            (payload->>'manual_until')::timestamptz AS manual_until
+          FROM outbox_events WHERE workspace_id=:w
+            AND topic IN (:finance,:lessons,:history,:groups)
+            AND state='pending'
+            AND coalesce((payload->>'manual')::boolean,false)
+            AND (payload->>'manual_until')::timestamptz>now()
+          ORDER BY coalesce(payload->>'source_contact',payload->>'contact'),
+            (payload->>'requested_at')::timestamptz DESC NULLS LAST LIMIT 100
+        """), {"w": workspace,
+                 "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS}).mappings())
+        for row in rows:
+            try:
+                source_contact = UUID(row["source_contact"])
+                conversation = UUID(row["conversation"]) if row["conversation"] else None
+            except (TypeError, ValueError):
+                continue
+            card_preference.refresh(db, workspace, snapshot, [source_contact])
+            selection = card_preference.selected(db, workspace, snapshot, conversation, source_contact)
+            targets = selection["contacts"] if selection else [source_contact]
+            for target in targets:
+                enqueue(db, workspace, snapshot, contact=target, source_contact=source_contact,
+                        conversation=conversation)
+            # Reconciliation must not turn a ten-minute observation window into
+            # a permanent background refresh. Restore the original deadline.
+            db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object("
+                "'requested_at',CAST(:requested AS text),'manual_until',CAST(:until AS text)) "
+                "WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) AND state='pending' "
+                "AND payload->>'connection'=CAST(:conn AS text) AND payload->>'version'=CAST(:version AS text) "
+                "AND payload->>'contact'=ANY(CAST(:targets AS text[]))"),
+                {"w": workspace, "conn": snapshot["connection_id"], "version": snapshot["version"],
+                 "requested": row["requested_at"], "until": row["manual_until"],
+                 "targets": list(map(str, targets)), "finance": TOPIC, "lessons": LESSONS,
+                 "history": HISTORY, "groups": GROUPS})
+            db.execute(text("UPDATE outbox_events SET state='published',"
+                "payload=(payload-'lease_owner'-'lease_until'-'checkpoint')||"
+                "jsonb_build_object('rebased_at',CAST(clock_timestamp() AS text)) "
+                "WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) AND state='pending' "
+                "AND coalesce(payload->>'source_contact',payload->>'contact')=:source "
+                "AND payload->>'contact'<>ALL(CAST(:targets AS text[]))"),
+                {"w": workspace, "source": str(source_contact), "targets": list(map(str, targets)),
+                 "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS})
+        # Current-version jobs now carry every still-open manual request.  Old
+        # settings/directory jobs are fenced so they cannot occupy the queue or
+        # publish a late result against a replaced Customer ID.
+        db.execute(text("UPDATE outbox_events SET state='published',"
+            "payload=(payload-'lease_owner'-'lease_until'-'checkpoint')||"
+            "jsonb_build_object('rebased_at',CAST(clock_timestamp() AS text)) "
+            "WHERE workspace_id=:w AND topic IN (:finance,:lessons,:history,:groups) AND state='pending' "
+            "AND (payload->>'connection'<>CAST(:conn AS text) "
+            "OR payload->>'version'<>CAST(:version AS text) OR NOT EXISTS(SELECT 1 "
+            "FROM alfa_sync_control sc JOIN alfa_customers c ON c.workspace_id=sc.workspace_id "
+            "AND c.run_id=sc.published_id WHERE sc.workspace_id=outbox_events.workspace_id "
+            "AND sc.connection_id=:conn AND c.branch_id::text=outbox_events.payload->>'branch' "
+            "AND c.external_id::text=outbox_events.payload->>'customer' "
+            "AND c.contact_id::text=outbox_events.payload->>'contact' "
+            "AND c.student_id::text=outbox_events.payload->>'student'))"),
+            {"w": workspace, "conn": snapshot["connection_id"], "version": snapshot["version"],
+             "finance": TOPIC, "lessons": LESSONS, "history": HISTORY, "groups": GROUPS})
 
     def claim(self, workspace):
         quota = (TOPIC, LESSONS, TOPIC, HISTORY, GROUPS)
         turns = getattr(self, "_turns", {})
         preferred = quota[turns.get(workspace, 0) % len(quota)]
+        manual_streaks = getattr(self, "_manual_streaks", {})
+        prefer_background = manual_streaks.get(workspace, 0) >= MANUAL_BURST
         with self.accounts.transaction(workspace_id=workspace) as db:
             row = db.execute(text("SELECT e.id,e.topic,e.payload FROM outbox_events e WHERE e.workspace_id=:w "
                 "AND e.topic IN (:finance,:lessons,:history,:groups) AND e.state='pending' AND ("
@@ -274,19 +529,33 @@ class FamilyCacheWorker:
                 "('access_denied','not_found','invalid_response','crm_unavailable') AND "
                 "(e.payload->>'force_at')::timestamptz>(e.payload->>'failed_at')::timestamptz)) "
                 "AND coalesce((e.payload->>'lease_until')::timestamptz,'epoch')<=now() AND NOT " + card_jobs.block_sql() +
-                " ORDER BY (coalesce((e.payload->>'served_at')::timestamptz,e.created_at)<now()-interval '15 minutes') DESC,"
-                "coalesce((e.payload->>'manual')::boolean,false) DESC,(e.topic=:preferred) DESC,"
+                " ORDER BY (:prefer_background AND NOT coalesce((e.payload->>'manual')::boolean,false) "
+                "AND coalesce((e.payload->>'served_at')::timestamptz,e.created_at)<now()-interval '15 minutes') DESC,"
+                "coalesce((e.payload->>'manual')::boolean,false) DESC,"
+                "coalesce((e.payload->>'priority_boost')::boolean,false) DESC,"
+                "CASE WHEN coalesce((e.payload->>'manual')::boolean,false) THEN "
+                "coalesce((e.payload->>'requested_at')::timestamptz,e.created_at) END DESC NULLS LAST,"
+                "(e.topic=:preferred) DESC,"
                 "CASE e.topic WHEN :finance THEN 0 WHEN :lessons THEN 1 WHEN :history THEN 2 ELSE 3 END,"
                 "coalesce((e.payload->>'served_at')::timestamptz,e.created_at),e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED"),
                 {"w": workspace, "finance": TOPIC, "lessons": LESSONS, "history": HISTORY,
-                 "groups": GROUPS, "preferred": preferred}).mappings().one_or_none()
+                 "groups": GROUPS, "preferred": preferred, "prefer_background": prefer_background}).mappings().one_or_none()
             if not row:
                 return None
             turns[workspace] = turns.get(workspace, 0) + 1
             self._turns = turns
             job = dict(row["payload"])
-            job.update(lease_owner=self.owner, lease_until=(datetime.now(UTC) + LEASE).isoformat(),
-                       started_at=datetime.now(UTC).isoformat(), served_at=datetime.now(UTC).isoformat())
+            if job.get("manual"):
+                manual_streaks[workspace] = manual_streaks.get(workspace, 0) + 1
+            else:
+                manual_streaks[workspace] = 0
+            self._manual_streaks = manual_streaks
+            now = datetime.now(UTC)
+            requested = _parse_time(job.get("requested_at")) or _parse_time(job.get("created_at")) or now
+            job.update(lease_owner=self.owner, lease_until=(now + LEASE).isoformat(),
+                       started_at=now.isoformat(), last_progress_at=now.isoformat(),
+                       queue_wait_ms=max(0, int((now - requested).total_seconds() * 1000)),
+                       served_at=now.isoformat())
             db.execute(text("UPDATE outbox_events SET payload=CAST(:p AS jsonb) WHERE workspace_id=:w AND id=:id"),
                        {"w": workspace, "id": row["id"], "p": json.dumps(job)})
             return {**job, "id": row["id"], "topic": row["topic"]}
@@ -312,7 +581,8 @@ class FamilyCacheWorker:
                     or str(snapshot["run"]) != checkpoint["scope"][2] or not self._source(db, workspace, job)):
                     raise card_jobs.LostCardLease()
                 written = db.execute(text("UPDATE outbox_events SET payload=payload||jsonb_build_object("
-                    "'checkpoint',CAST(:p AS jsonb),'stage',CAST(:stage AS text),'page',CAST(:page AS integer)) WHERE workspace_id=:w AND id=:id "
+                    "'checkpoint',CAST(:p AS jsonb),'stage',CAST(:stage AS text),'page',CAST(:page AS integer),"
+                    "'last_progress_at',CAST(clock_timestamp() AS text)) WHERE workspace_id=:w AND id=:id "
                     "AND state='pending' AND payload->>'lease_owner'=:owner "
                     "AND (payload->>'lease_until')::timestamptz>now() RETURNING id"),
                     {"w": workspace, "id": job["id"], "owner": self.owner, "p": json.dumps(value),
@@ -340,6 +610,39 @@ class FamilyCacheWorker:
             "AND c.student_id=CAST(:student AS uuid)"),
             {"w": workspace, "conn": job["connection"], "b": int(job["branch"]),
              "customer": int(job["customer"]), "contact": job["contact"], "student": job["student"]}).mappings().one_or_none()
+
+    def requeue_current(self, db, workspace, job, owned=None):
+        """Retire an obsolete source and preserve an operator's refresh request.
+
+        Directory publication and Customer IDs may change while AlfaCRM IO is in
+        flight. The old source is fenced, then the same visible conversation is
+        resolved against the newest published directory and enqueued again.
+        """
+        owned = dict(owned or job)
+        manual = bool(owned.get("manual") or job.get("manual"))
+        force = bool(owned.get("force_at") or job.get("force_at"))
+        db.execute(text("UPDATE outbox_events SET state='published',payload=(payload-'lease_owner'-'lease_until'"
+            "-'error'-'checkpoint'-'paused'-'cause'-'http_status'-'failed_at'-'stage'-'page')"
+            "||jsonb_build_object('available_at',now(),'attempts',0,'rebased_at',CAST(clock_timestamp() AS text)) "
+            "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:owner"),
+            {"w": workspace, "id": job["id"], "owner": self.owner})
+        if not manual:
+            return
+        from center_messenger.crm_api import DirectoryReader
+        snapshot = DirectoryReader._published(db, workspace)
+        if not snapshot:
+            return
+        try:
+            source_contact = UUID(owned.get("source_contact") or job["contact"])
+            conversation = UUID(owned["conversation"]) if owned.get("conversation") else None
+        except (TypeError, ValueError):
+            return
+        card_preference.refresh(db, workspace, snapshot, [source_contact])
+        selection = card_preference.selected(db, workspace, snapshot, conversation, source_contact)
+        targets = selection["contacts"] if selection else [source_contact]
+        for target in targets:
+            enqueue(db, workspace, snapshot, contact=target, force=force,
+                    source_contact=source_contact, conversation=conversation)
 
     def process(self, workspace, job):
         if job["topic"] == GROUPS:
@@ -370,7 +673,7 @@ class FamilyCacheWorker:
                 if (not settings or not settings["secret_ciphertext"] or
                     str(settings["connection_id"]) != job["connection"] or settings["version"] != job["version"] or
                     not source or not (job.get("manual") or pending)):
-                    self.finish(db, workspace, job)
+                    self.requeue_current(db, workspace, job, owned)
                     return
                 settings, source = dict(settings), dict(source)
                 saved = db.execute(text("SELECT * FROM alfa_family_details WHERE workspace_id=:w AND connection_id=:conn "
@@ -429,7 +732,7 @@ class FamilyCacheWorker:
                     if (not current or not current["secret_ciphertext"] or current["version"] != settings["version"] or
                         str(current["connection_id"]) != job["connection"] or not published or published["run"] != snapshot["run"]
                         or not self._source(db, workspace, job)):
-                        self.finish(db, workspace, job)
+                        self.requeue_current(db, workspace, job, own)
                         return
                     params = {"w": workspace, "conn": job["connection"], "b": int(job["branch"]),
                               "id": int(job["customer"]), "v": job["version"], "observed": started_at}
@@ -455,7 +758,8 @@ class FamilyCacheWorker:
                         snapshot = DirectoryReader._published(db, workspace)
                         if snapshot and snapshot["connection_id"] == settings["connection_id"] and snapshot["version"] == settings["version"]:
                             enqueue(db, workspace, snapshot, contact=job["contact"] if own.get("manual") else None,
-                                    force=bool(job.get("force_at")), topics=(LESSONS, HISTORY))
+                                    force=bool(job.get("force_at")), topics=(LESSONS, HISTORY),
+                                    source_contact=own.get("source_contact"), conversation=own.get("conversation"))
                     else:
                         cached = db.execute(text("SELECT lessons,lessons_refreshed_at,lessons_full_refreshed_at FROM alfa_family_details "
                             "WHERE workspace_id=:w AND connection_id=:conn AND branch_id=:b AND customer_id=:id "
@@ -494,12 +798,16 @@ class FamilyCacheWorker:
 
     def finish(self, db, workspace, job):
         # A force refresh requested during IO must survive this worker's finish.
+        now = datetime.now(UTC)
+        started = _parse_time(job.get("started_at")) or now
         db.execute(text("UPDATE outbox_events SET state=CASE WHEN (payload->>'force_at') IS DISTINCT FROM CAST(:force AS text) "
             "THEN 'pending' ELSE 'published' END,payload=(payload-'lease_owner'-'lease_until'-'error'-'checkpoint' "
             "-'paused'-'cause'-'http_status'-'failed_at'-'stage'-'page')||jsonb_build_object('available_at',now(),'attempts',0) "
+            "||jsonb_build_object('finished_at',CAST(:finished AS text),'duration_ms',CAST(:duration AS integer)) "
             "WHERE workspace_id=:w AND id=:id AND payload->>'lease_owner'=:owner "
             "AND (payload->>'lease_until')::timestamptz>now()"),
-            {"w": workspace, "id": job["id"], "owner": self.owner, "force": job.get("force_at")})
+            {"w": workspace, "id": job["id"], "owner": self.owner, "force": job.get("force_at"),
+             "finished": now.isoformat(), "duration": max(0, int((now - started).total_seconds() * 1000))})
 
     def retry(self, workspace, job, *, busy=False, error=None, paged=None):
         patch, scope = card_jobs.failure(error, job.get("attempts", 0), busy=busy)
@@ -508,11 +816,16 @@ class FamilyCacheWorker:
             patch.pop("error")
             patch["cause"] = "busy"
         patch.update(stage=paged.stage if paged else "prepare", page=paged.page if paged else None)
+        patch["last_progress_at"] = datetime.now(UTC).isoformat()
         with self.accounts.transaction(workspace_id=workspace) as db:
             db.execute(text("SELECT id FROM workspaces WHERE id=:w FOR UPDATE"), {"w": workspace})
             settings = self.connections._row(db, workspace)
             if not settings or settings["version"] != job["version"] or str(settings["connection_id"]) != job["connection"]:
-                self.finish(db, workspace, job)
+                owned = db.execute(text("SELECT payload FROM outbox_events WHERE workspace_id=:w AND id=:id "
+                    "AND state='pending' AND payload->>'lease_owner'=:owner FOR UPDATE"),
+                    {"w": workspace, "id": job["id"], "owner": self.owner}).scalar_one_or_none()
+                if owned:
+                    self.requeue_current(db, workspace, job, owned)
                 return
             written = db.execute(text("UPDATE outbox_events SET payload=(payload-'lease_owner'-'lease_until'-'error' "
                 + ("-'checkpoint' " if code in {"not_found", "invalid_response"} else "") + ")||CAST(:p AS jsonb) "

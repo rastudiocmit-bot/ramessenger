@@ -1024,7 +1024,7 @@ test('disk card renders before a slow enqueue and keeps its content while the re
   assert.equal(ui.$('.family-stats'),stats);
 });
 
-test('manual refresh spins immediately and never clears the disk snapshot while the request waits', async t=>{
+test('manual refresh keeps the disk snapshot but only an active server lease spins', async t=>{
   let release;
   const family=preparedFamily(1);
   const ui=setup(t,(url,options)=>{
@@ -1037,7 +1037,8 @@ test('manual refresh spins immediately and never clears the disk snapshot while 
   await ui.app.enter();ui.$('#chat-details').click();await flush();
   const stats=ui.$('.family-stats');ui.$('#chat-details-refresh').click();await flush();
   assert.ok(release);assert.equal(ui.$('.family-stats'),stats);
-  assert.equal(ui.$('#chat-details-refresh').getAttribute('aria-busy'),'true');
+  assert.equal(ui.$('#chat-details-refresh').getAttribute('aria-busy'),'false');
+  assert.equal(ui.$('#chat-details-refresh').disabled,true);
   release();await flush();
   assert.equal(ui.$('#chat-details-refresh').getAttribute('aria-busy'),'false');
   assert.equal(ui.$('.family-stats'),stats);
@@ -1053,6 +1054,32 @@ test('ready card footer shows one update time and its refresh interval', async t
   ui.$('#chat-details-dialog').close=function(){this.open=false;};
   await ui.app.enter();ui.$('#chat-details').click();await flush();
   assert.equal(ui.$('#chat-details-sync').textContent,'Обновлено 2026-10-24T00:00:00Z · каждые 30 мин');
+});
+
+test('card queue, active lease and busy channel have distinct labels and polling clocks', async t=>{
+  let family=preparedFamily(1);
+  family.cache={...family.cache,state:'queued',complete:false,incomplete:true,pending:true,loading:false,
+    queue_position:2,sections:{finance:{label:'Баланс и абонементы',status:'queued'}}};
+  const ui=setup(t,url=>{
+    if(url.pathname.endsWith('/messages'))return history(identifier(1),[],{conversation:{...conversation(1),contact_id:identifier(91)}});
+    if(url.pathname.endsWith('/family'))return structuredClone(family);
+  });
+  ui.$('#chat-details-dialog').showModal=function(){this.open=true;};
+  ui.$('#chat-details-dialog').close=function(){this.open=false;};
+  await ui.app.enter();ui.$('#chat-details').click();await flush();
+  assert.equal(ui.$('#chat-details-sync').textContent,'В очереди · позиция 2');
+  assert.equal(ui.$('#chat-details-dialog').classList.contains('is-refreshing'),false);
+  family={...family,cache:{...family.cache,state:'loading',loading:true,refreshing:true,
+    sections:{finance:{label:'Баланс и абонементы',status:'loading'}}}};
+  await runTimer(ui,5000);await flush();
+  assert.equal(ui.$('#chat-details-sync').textContent,'Загружаем баланс и абонементы');
+  assert.equal(ui.$('#chat-details-dialog').classList.contains('is-refreshing'),true);
+  family={...family,cache:{...family.cache,state:'busy',loading:false,refreshing:false,busy:true,
+    retry_at:'2026-10-24T00:00:05Z',sections:{finance:{label:'Баланс и абонементы',status:'busy'}}}};
+  await runTimer(ui,3000);await flush();
+  assert.match(ui.$('#chat-details-sync').textContent,/^Канал AlfaCRM занят/);
+  assert.equal(ui.$('#chat-details-dialog').classList.contains('is-refreshing'),false);
+  assert.ok([...ui.timers.values()].some(timer=>timer.delay===10000));
 });
 
 test('preferred CRM child opens first while an operator child choice survives card polling', async t=>{
