@@ -8,6 +8,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     studio: { day_start: '10:00', day_end: '20:00', work_days: [1, 2, 3, 4, 5, 6], default_due: 'end_of_day', visibility: 'all', alfa_copy: false },
     personal: { press: 'split', voice_task: 'instant', reminders: true, hints: true, digest: false }, voice: [] };
   const preferences = { name_order: "parent_first" };
+  const notificationPreferences = {configured:true,sound_enabled:false,volume:55,client:'soft',lead:'clear',archive:'low',service_popups:false,task_sound:false};
   const cardLoader = { preload_unanswered: true, preload_active_groups: true,
     finance_interval_minutes: 30, lessons_interval_minutes: 30, groups_interval_minutes: 360,
     history_interval_minutes: 0, requests_per_turn: 3, busy_retry_seconds: 5,
@@ -75,6 +76,14 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       workspaces: [{ id: 'test', name: 'Развивайся', role, timezone: 'Europe/Moscow', sections }] };
     else if (p === '/api/auth/sessions') payload = { sessions: [{ id: 'session', current: true, device_label: 'Chrome · Linux', last_seen_at: '2026-10-24T11:00:00Z' }] };
     else if (p === '/api/auth/logout') payload = {};
+    else if (p.endsWith('/notification-preferences')) {
+      if(method==='PATCH'){
+        Object.assign(notificationPreferences,entry.body);
+        if('task_reminders' in entry.body)tasks.personal.reminders=entry.body.task_reminders;
+      }
+      payload={...notificationPreferences,task_reminders:tasks.personal.reminders};
+    }
+    else if(p.endsWith('/notification-status'))payload={crm:{configured:true,status:'active'},max:{configured:true,state:'active',recovery:{phase:'active'}}};
     else if (p.includes('/tasks')) {
       // Operator tasks (tasks.js): an in-memory list with the server's shapes.
       const now = Date.now(), iso = ms => new Date(ms).toISOString();

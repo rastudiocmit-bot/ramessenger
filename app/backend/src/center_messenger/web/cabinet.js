@@ -153,7 +153,6 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
     }
   }
   $("#chat-person-open").addEventListener("click", () => document.dispatchEvent(new CustomEvent("cm:chat-details-open")));
-  $("#profile-sound-settings").addEventListener("click", () => $("#chat-settings-open").click());
   $("#profile-connections").addEventListener("click", async () => {
     if (sections.connections) return;
     if (!context) { try { await metadata(); } catch (_) { return; } }

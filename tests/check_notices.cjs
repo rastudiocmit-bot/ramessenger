@@ -1,58 +1,52 @@
-// Service notice capsule: show, delete, fold into the pill, open the list, switch off.
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { chromium } = require('playwright');
-const { fixture } = require('./browser_fixture.cjs');
-const shots = process.env.CM_TEST_SCREENSHOTS;
-(async () => {
-  const browser = await chromium.launch({ executablePath: process.env.CM_TEST_CHROMIUM_EXECUTABLE || undefined,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', ...JSON.parse(process.env.CM_TEST_CHROMIUM_ARGS || '[]')] });
-  const save = async (page, name) => { if (shots) { fs.mkdirSync(shots, { recursive: true }); await page.screenshot({ path: path.join(shots, name + '.png') }); } };
-  try {
-    for (const theme of ['light', 'dark']) {
-      const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-      const data = await fixture(context, 'owner');
-      const page = await context.newPage(); page.setDefaultTimeout(15000);
-      await page.goto('https://cabinet.example.test/?view=messages'); await page.locator('.chat-select').first().tap();
-      await page.evaluate(t => { document.documentElement.dataset.theme = t; }, theme);
-      await page.waitForTimeout(600);
-      // A second instance, as app.js makes one, drives the same capsule API.
-      const notify = (args) => page.evaluate(a => window.__n.notify(a), args);
-      await page.evaluate(() => { document.querySelectorAll('.notices').forEach(n => n.remove()); window.__n = window.CenterNotices({ $: s => document.querySelector(s) }); });
-      assert.equal(await notify({ type: 'error', title: 'Не отправлено в MAX', text: 'Анна Смирнова · AlfaCRM не ответила', action: { label: 'Повторить' } }), true);
-      await page.waitForSelector('.notice-capsule:not([hidden])');
-      const box = await page.locator('.notice-capsule').boundingBox();
-      assert.ok(box.x >= 15 && box.x + box.width <= 375, 'fits the phone width');
-      await page.waitForTimeout(400); await save(page, `notice-${theme}-new`);
-      // Delete straight from the incoming capsule.
-      await page.locator('.notice-capsule .notice-del').tap();
-      await page.waitForSelector('.notice-capsule', { state: 'hidden' });
-      assert.equal(await page.locator('.notice-pill').isHidden(), true, 'a deleted notice leaves nothing behind');
-      // Two warnings; the same one twice counts instead of stacking.
-      await notify({ type: 'warning', title: 'AlfaCRM просит войти', text: 'История приостановлена', key: 'a' });
-      await notify({ type: 'error', title: 'Текст без агента', text: 'DeepSeek не подключён', key: 'b' });
-      await notify({ type: 'error', title: 'Текст без агента', text: 'DeepSeek не подключён', key: 'b' });
-      assert.match(await page.locator('.notice-capsule .notice-title').textContent(), /2 раза/);
-      await page.waitForSelector('.notice-pill:not([hidden])', { timeout: 10000 });
-      assert.equal(await page.locator('.notice-count').textContent(), '2');
-      await save(page, `notice-${theme}-pill`);
-      await page.locator('.notice-pill').tap(); await page.waitForSelector('.notice-panel:not([hidden])');
-      assert.equal(await page.locator('.notice-row').count(), 2);
-      await page.waitForTimeout(400); await save(page, `notice-${theme}-panel`);
-      await page.locator('.notice-row .notice-del').first().tap();
-      assert.equal(await page.locator('.notice-row').count(), 1, 'a notice is deleted from the list');
-      await page.locator('.notice-fold').tap(); await page.waitForSelector('.notice-panel', { state: 'hidden' });
-      // Switched off in the settings: nothing shows, the caller keeps its fallback.
-      assert.equal(await page.locator('#notices-enabled').count(), 1, 'setting exists');
-      await page.evaluate(() => { const t = document.querySelector('#notices-enabled'); t.checked = false; t.dispatchEvent(new Event('change')); });
-      assert.equal(await page.evaluate(() => localStorage.getItem('cm:service-notices')), 'off');
-      await page.evaluate(() => { document.querySelectorAll('.notices').forEach(n => n.remove()); window.__n = window.CenterNotices({ $: s => document.querySelector(s) }); });
-      assert.equal(await notify({ type: 'error', title: 'Скрыто' }), false);
-      assert.equal(await page.locator('.notice-capsule:not([hidden])').count(), 0);
-      assert.deepEqual(data.errors, []); assert.deepEqual(data.unexpected, []);
-      await context.close();
-    }
-    console.log(JSON.stringify({ browser: browser.version(), ok: true }));
-  } finally { await browser.close(); }
-})().catch(error => { console.error(error); process.exitCode = 1; });
+// Real UI with synthetic local-only service states and personal preferences.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs');
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.CM_TEST_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--disable-dev-shm-usage']});
+ try{
+  const checked=[];
+  for(const width of [1440,390,320])for(const theme of ['light','dark']){
+   const context=await browser.newContext({viewport:{width,height:900},isMobile:width<720,hasTouch:width<720,reducedMotion:'reduce'}),data=await fixture(context,'owner',['messages','tasks','connections']);
+   let phase='otp_required';
+   await context.route('**/notification-status',r=>r.fulfill({contentType:'application/json',body:JSON.stringify({crm:{configured:true,status:'active'},max:{configured:true,state:phase,recovery:{phase:phase==='otp_required'?'confirmation_required':'active'}}})}));
+   await context.route('**/integrations/alfa-max',r=>r.fulfill({contentType:'application/json',body:JSON.stringify({configured:true,state:phase,vault_ready:true,crm_configured:true,branches:[{id:'1',name:'Центральный'}]})}));
+   const page=await context.newPage();page.setDefaultTimeout(15000);await page.goto('https://cabinet.example.test/');await page.waitForSelector('.chat-bubble');
+   await page.evaluate(t=>document.documentElement.dataset.theme=t,theme);
+   await page.waitForFunction(()=>document.querySelector('.notification-badge').textContent==='1');
+   assert.equal(await page.locator('.notice-capsule').isVisible(),false,'calm by default');
+   if(width<720)await page.locator('.chat-select').first().click();
+   await page.locator('#notification-bell').waitFor({state:'visible'});
+   assert.ok(await page.locator('#notification-bell').evaluate(el=>{const b=el.getBoundingClientRect();return b.left>=0&&b.right<=innerWidth&&b.top>=0;}));
+   await page.locator('#notification-bell').click();await page.waitForSelector('#notification-center[open]');
+   assert.equal(await page.locator('.notification-row').count(),1);
+   assert.match(await page.locator('.notification-row').innerText(),/Нужен код подтверждения MAX/);
+   assert.doesNotMatch(await page.locator('.notification-row').innerText(),/раза/);
+   if(process.env.CM_TEST_SCREENSHOTS){fs.mkdirSync(process.env.CM_TEST_SCREENSHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`notifications-${width}-${theme}.png`)});}
+   await page.locator('.notification-row-actions button').filter({hasText:'Ввести код'}).click();
+   await page.waitForSelector('#alfa-max-otp-form:not([hidden])');
+   assert.equal(await page.locator('#sync-master-connections-tab').getAttribute('aria-selected'),'true');
+   assert.equal(await page.locator('#sync-max-config').getAttribute('open'),'');
+   await page.locator('#notification-bell').click();assert.equal(await page.locator('.notification-row').count(),1);
+   await page.getByRole('button',{name:'Настройки уведомлений',exact:true}).click();await page.waitForSelector('#notification-settings-dialog[open]');
+   await page.waitForFunction(()=>document.querySelector('#notification-preferences-status').textContent.includes('Сохранено'));
+   assert.equal(await page.locator('#notices-enabled').isChecked(),false);
+   await page.locator('#chat-tone-client').selectOption('low');
+   await page.waitForFunction(()=>document.querySelector('#notification-preferences-status').textContent==='Настройки сохранены в аккаунте.');
+   await page.locator('#notification-task-reminders').uncheck();
+   await page.waitForFunction(()=>document.querySelector('#notification-preferences-status').textContent==='Настройки сохранены в аккаунте.');
+   assert.equal(data.tasks.personal.reminders,false);
+   await page.locator('#notification-service-preview').click();assert.match(await page.locator('#notification-service-example').innerText(),/Спокойный режим/);
+   assert.equal(await page.locator('.notice-capsule').isVisible(),false);
+   assert.ok(await page.locator('#notification-settings-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth+1));
+   if(process.env.CM_TEST_SCREENSHOTS){await page.locator('#notification-settings-dialog').evaluate(el=>el.scrollTop=0);await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`notification-settings-${width}-${theme}.png`)});}
+   await page.locator('[data-close="notification-settings-dialog"]').click();
+   phase='active';await page.reload();await page.waitForSelector('.chat-bubble');
+   await page.locator('#notification-bell').click();await page.getByRole('button',{name:'Настройки уведомлений',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('#notification-preferences-status').textContent.includes('Сохранено'));
+   assert.equal(await page.locator('#chat-tone-client').inputValue(),'low');assert.equal(await page.locator('#notification-task-reminders').isChecked(),false);
+   await page.locator('[data-close="notification-settings-dialog"]').click();assert.equal(await page.locator('.notification-badge').isVisible(),false);
+   assert.deepEqual(data.errors,[]);assert.deepEqual(data.unexpected,[]);checked.push({width,theme,calm:true,exact_action:true,personal_settings_retained:true});await context.close();
+  }
+  console.log(JSON.stringify({ok:true,checked},null,2));
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1});

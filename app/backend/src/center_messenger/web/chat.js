@@ -1957,7 +1957,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
 
   // Only non-personal display preferences are kept across browser restarts.
   const defaults = { enabled: false, volume: 55, client: "soft", lead: "clear", archive: "low" };
-  let sounds = { ...defaults };
+  let sounds = { ...defaults }, taskSound = false;
   try {
     const saved = JSON.parse(localStorage.getItem("cm-sound") || "null");
     if (saved && typeof saved === "object") {
@@ -1983,12 +1983,12 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     });
   }
   function unlockSound() {
-    if (!sounds.enabled) return;
+    if (!sounds.enabled && !taskSound) return;
     try { soundContext ||= new AudioContext(); if (soundContext.state === "suspended") soundContext.resume().catch(() => {}); } catch (_) { /* Browser audio may be unavailable. */ }
   }
-  function playTone(status = "client", preview = false) {
+  function playTone(status = "client", preview = false, selectedTone = null) {
     if (!sounds.enabled && !preview) return;
-    const tone = sounds[status === "unlinked" ? "lead" : status] || "soft"; if (tone === "off") return;
+    const tone = selectedTone || sounds[status === "unlinked" ? "lead" : status] || "soft"; if (tone === "off") return;
     try {
       soundContext ||= new AudioContext(); if (soundContext.state !== "running") return;
       const frequencies = { soft: [660, 880], clear: [880, 1175, 880], low: [440, 554] }[tone];
@@ -2008,6 +2008,16 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     if ($("#profile-sound")) $("#profile-sound").checked = sounds.enabled;
     unlockSound();
   }
+  document.addEventListener("cm:notification-preferences", event => {
+    const p = event.detail; if (!p || p.epoch !== state.epoch) return;
+    sounds = { enabled: p.sound_enabled, volume: p.volume, client: p.client, lead: p.lead, archive: p.archive };
+    taskSound = Boolean(p.task_sound); hydrateSounds(); unlockSound();
+    try { localStorage.setItem("cm-sound", JSON.stringify(sounds)); } catch (_) { /* Local playback cache only. */ }
+  });
+  document.addEventListener("cm:notification-task-sound", async event => {
+    try { soundContext ||= new AudioContext(); await soundContext.resume(); playTone("client", true, "clear"); }
+    catch (_) { if (event.detail?.preview) toast("Браузер не разрешил звук. Проверьте разрешение звука для сайта.", true); }
+  });
   $("#chat-settings-open").addEventListener("click", () => {
     $("#chat-sound-enabled").checked = sounds.enabled; $("#chat-volume").value = String(sounds.volume);
     for (const key of ["client", "lead", "archive"]) $(`#chat-tone-${key}`).value = sounds[key];
