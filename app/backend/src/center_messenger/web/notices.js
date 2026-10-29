@@ -90,7 +90,7 @@ window.CenterNotices = ({ $, state = {}, api = null, readServices = null, onServ
     capsule.hidden=false;timer=setTimeout(collapse,5000);
     if(item.reminder && preferences.task_sound && !preview)document.dispatchEvent(new CustomEvent("cm:notification-task-sound"));
   }
-  function notify({type="error",title,text="",key=null,action=null,actions=null,category=null,attention=null,revision=null,always=false,glyph=null}={}){
+  function notify({type="error",title,text="",key=null,action=null,actions=null,category=null,attention=null,revision=null,quiet=false,always=false,glyph=null}={}){
     if(!title || !state.user || !state.workspace)return false;
     key=key||`${type}|${title}`;
     category ||= key.startsWith("task:")?"task":"service";
@@ -105,10 +105,11 @@ window.CenterNotices = ({ $, state = {}, api = null, readServices = null, onServ
     const changed=!item||item.signature!==signature||Boolean(item.resolved)!==!actionable;
     if(!item){item={key,id:++seq,at:Date.now(),acknowledged:false};items.unshift(item);}
     if(changed){item.acknowledged=false;item.presented=false;item.at=Date.now();}
+    if(quiet)item.presented=true;
     Object.assign(item,{type,title:String(title),text:String(text),category,reminder,signature,resolved:!actionable,actions:actions|| (action?[action]:[])});
     // No repeat counter and no timer restart on an unchanged polling result.
     items=items.filter(entry=>!entry.resolved).concat(items.filter(entry=>entry.resolved).slice(0,12)).slice(0,100);
-    render();if(changed&&actionable)showPopup(item);
+    render();if(changed&&actionable&&!quiet)showPopup(item);
     return true;
   }
   function resolve(key,resolution="Вопрос решён"){

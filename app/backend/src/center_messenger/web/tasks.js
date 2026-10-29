@@ -714,17 +714,16 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   function remind() {
     if (!summary || !ctx || ctx.personal?.reminders === false) return;
     if (!summary.overdue) notices?.resolve("task:due:many", "Просроченных задач больше нет");
-    const now = Date.now(), due = (summary.upcoming || []).filter(task => new Date(task.due_at).getTime() <= now && !store.get(remindedKey(task)));
-    if (due.length > 3) {
-      for (const task of due) store.set(remindedKey(task), "1");
-      notices?.notify({ type: "warning", title: `Просрочено: ${due.length} ${plural(due.length, "задача", "задачи", "задач")}`, text: due.slice(0, 2).map(t => t.title).join(" · "),
-        key: "task:due:many", always: true, count: false, glyph: "bell", actions: [{ label: "Открыть задачи", run: () => renderPane("tasks") }] });
-    } else for (const task of due) {
+    const now = Date.now(), due = (summary.upcoming || []).filter(task => new Date(task.due_at).getTime() <= now);
+    let announced = false;
+    for (const task of due) {
+      const seen = Boolean(store.get(remindedKey(task)));
+      const quiet = seen || announced; if (!seen) announced = true;
       store.set(remindedKey(task), "1");
       const late = Math.round((now - new Date(task.due_at).getTime()) / 60000);
       notices?.notify({ type: "warning", strong: true, title: `Пора: ${task.title}`,
         text: [task.client_label, `срок ${clock(task.due_at)}` + (late >= 5 ? `, просрочено на ${late < 60 ? late + " мин" : Math.round(late / 60) + " ч"}` : "")].filter(Boolean).join(" · "),
-        key: `task:reminder:${task.id}`, revision:`due:${task.due_at}`, always: true, sticky: true, count: false, glyph: "bell", actions: [
+        key: `task:reminder:${task.id}`, revision:`due:${task.due_at}`, quiet, always: true, sticky: true, count: false, glyph: "bell", actions: [
           { label: "Выполнено", run: () => complete(task) },
           { label: "Через 1 ч", run: () => action(task, "snooze", "Задача отложена на час", { due_at: snoozeTarget("hour") }) },
           { label: "Открыть", keep: true, run: () => task.conversation_id ? openChat(task) : openSheet({ task }) },
@@ -733,10 +732,12 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
     // A quiet heads-up 15 minutes before a task with a set time.
     for (const task of summary.upcoming || []) {
       const left = Math.round((new Date(task.due_at).getTime() - now) / 60000), key = `cm:task-soon:${task.id}@${task.due_at}`;
-      if (left <= 0 || left > 15 || store.get(key) || store.get(remindedKey(task))) continue;
+      if (left <= 0 || left > 15) continue;
+      const seen = Boolean(store.get(key) || store.get(remindedKey(task)));
+      const quiet = seen || announced; if (!seen) announced = true;
       store.set(key, "1");
       notices?.notify({ type: "info", glyph: "bell", title: `Скоро: ${task.title}`, text: [task.client_label, `срок ${clock(task.due_at)}, осталось ${left} мин`].filter(Boolean).join(" · "),
-        key: `task:reminder:${task.id}`, revision:`soon:${task.due_at}`, always: true, count: false, actions: [{ label: "Открыть", run: () => task.conversation_id ? openChat(task) : openSheet({ task }) }] });
+        key: `task:reminder:${task.id}`, revision:`soon:${task.due_at}`, quiet, always: true, count: false, actions: [{ label: "Открыть", run: () => task.conversation_id ? openChat(task) : openSheet({ task }) }] });
     }
     digest(now);
   }

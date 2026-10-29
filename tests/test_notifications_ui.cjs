@@ -75,6 +75,12 @@ test('contained examples never create incidents or change account settings',asyn
  s.$('#notification-service-preview').click();assert.match(s.$('#notification-service-example').textContent,/только пример/);
  assert.equal(s.$('.notification-badge').hidden,true);assert.equal(s.$('.notice-capsule').hidden,true);assert.equal(s.calls.length,before);
 });
+test('a known unresolved task is restored quietly without losing the badge',async t=>{
+ const s=await setup(t);s.app.notify({key:'task:reminder:old',title:'Перезвонить',quiet:true,actions:[{label:'Открыть'}]});
+ assert.equal(s.$('.notification-badge').textContent,'1');assert.equal(s.$('.notice-capsule').hidden,true);
+ await s.app.load(true);assert.equal(s.$('.notice-capsule').hidden,true);
+ s.app.resolve('task:reminder:old','Выполнена');assert.equal(s.$('.notification-badge').hidden,true);
+});
 test('a failed service status read cannot invent recovery; access loss clears administrator issues',async t=>{
  let deny=false,broken=false,reads=0;const reports=[];
  const s=await setup(t,null,{readServices:async()=>{reads++;if(deny)throw Object.assign(Error('denied'),{status:403});if(broken)return {};return {crm:null,max:null};},onServices:(...args)=>reports.push(args)});

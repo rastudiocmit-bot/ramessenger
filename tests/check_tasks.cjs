@@ -114,7 +114,11 @@ async function longPress(page, selector) {
       await page.waitForSelector('.notice-capsule:not([hidden]) .notice-title:has-text("Пора: Перезвонить")');
       assert.equal(await page.locator('.notice-capsule .notice-act').count(), 3);
       await settle(page); await save(page, 'tasks-reminder');
-      await page.locator('.notice-capsule .notice-act', { hasText: 'Через 1 ч' }).tap();
+      await page.reload();await page.waitForSelector('#notification-bell');
+      await page.waitForFunction(()=>document.querySelector('.notification-badge').textContent==='1');
+      assert.equal(await page.locator('.notice-capsule').isVisible(),false,'a known reminder is restored quietly after reload');
+      await page.locator('#notification-bell').tap();
+      await page.locator('.notification-row-actions button', { hasText: 'Через 1 ч' }).tap();
       await page.waitForFunction(() => true);
       await page.waitForTimeout(300);
       const snooze = data.mutations.find(m => m.path.endsWith('/late-1/snooze'));
