@@ -472,7 +472,9 @@
   $(".connection-tabs").addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const names = ["monitor", "wizard", "settings", "voice", "agents"], index = names.indexOf(state.connectionsView || "monitor");
+    const names = ["monitor", "wizard", "settings", "voice", "agents"];
+    const focusedView = event.target.closest("[data-connection-view]")?.dataset.connectionView;
+    const index = names.indexOf(focusedView || state.connectionsView || "monitor");
     const view = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
       : names[(index + (event.key === "ArrowLeft" ? names.length - 1 : 1)) % names.length];
     connectionView(view); $("#connections-" + view + "-tab").focus();
@@ -623,7 +625,7 @@
     alfaMaxButtons();
     const hasSession = payload.configured && payload.state !== "not_configured";
     show($("#history-monitor-empty"), !hasSession);
-    if (previousState !== payload.state && payload.state !== "active" && !["voice", "agents"].includes(state.connectionsView)) connectionView("settings");
+    if (previousState !== payload.state && payload.state !== "active" && !["voice", "agents", "wizard"].includes(state.connectionsView)) connectionView("settings");
     if (hasSession) alfaMaxProgress.start();
     else { alfaMaxProgress.reset(); connectionSummary("#alfa-history-summary", "Сначала подключите MAX", "waiting"); }
     clearTimeout(alfaSessionTimer);

@@ -1,109 +1,122 @@
 "use strict";
 window.CenterCardLoader = ({ $, state, api, show }) => {
-  const form = $("#card-loader-form");
-  const error = $("#card-loader-error");
-  const errorText = $("#card-loader-error-text");
-  const retry = $("#card-loader-retry");
-  const status = $("#card-loader-status");
+  const form = $("#card-loader-form"), error = $("#card-loader-error");
+  const errorText = $("#card-loader-error-text"), retry = $("#card-loader-retry");
+  const status = $("#card-loader-status"), limits = $("#card-loader-limits");
   const submit = form.querySelector('button[type="submit"]');
-  let loadedWorkspace = null, generation = 0, pendingLoad = null;
+  const fields = Array.from(form.querySelectorAll("input[name],select[name]"));
+  const value = field => field.type === "checkbox" ? field.checked : Number(field.value);
+  const values = () => Object.fromEntries(fields.map(field => [field.name, value(field)]));
+  const defaults = values(), touched = new Set();
+  let baseline = { ...defaults }, loadedWorkspace = null, generation = 0, pendingLoad = null, saving = false;
 
-  const number = name => Number(form.elements[name].value);
   const canManage = () => ["owner", "admin"].includes(state.workspace?.role);
   const current = (workspace, epoch, gen) => workspace === state.workspace?.id && epoch === state.epoch && gen === generation;
-  function controls(disabled) {
-    form.querySelectorAll("input,select,button").forEach(field => { field.disabled = disabled; });
-  }
-  function failure(message) {
-    errorText.textContent = message; show(error);
-  }
-  function render(payload) {
-    for (const [name, value] of Object.entries(payload)) {
-      const field = form.elements[name];
-      if (!field) continue;
-      if (field.type === "checkbox") field.checked = Boolean(value);
-      else {
-        // An API-saved interval may be valid without being one of the presets.
-        if (field.tagName === "SELECT" && !Array.from(field.options).some(option => option.value === String(value))) {
-          field.add(new Option(`Каждые ${value} мин`, String(value)));
-        }
-        field.value = String(value);
+  const changed = () => fields.some(field => value(field) !== baseline[field.name]);
+  function assign(field, next) {
+    if (field.type === "checkbox") field.checked = Boolean(next);
+    else {
+      if (field.tagName === "SELECT" && !Array.from(field.options).some(option => option.value === String(next))) {
+        field.add(new Option(field.name === "history_interval_minutes" ? `Каждые ${next} мин` : String(next), String(next)));
       }
+      field.value = String(next);
     }
-    status.textContent = `${payload.parallel_card_jobs ?? 1} карточка одновременно · пауза API не менее ${payload.host_request_gap_ms ?? 350} мс`;
+  }
+  function describe(message) {
+    fields.forEach(field => { field.disabled = !canManage(); });
+    submit.disabled = !canManage() || loadedWorkspace !== state.workspace?.id || saving || Boolean(pendingLoad);
+    submit.textContent = saving ? "Сохраняем…" : "Сохранить настройки загрузчика";
+    form.classList.toggle("has-unsaved-changes", changed());
+    status.textContent = message || (saving ? "Сохраняем настройки…" : changed()
+      ? "Есть несохранённые изменения."
+      : loadedWorkspace ? "Настройки загружены. Значения можно изменить." : "Рекомендуемые значения заполнены. Настройки можно изменить.");
+  }
+  function failure(message, loading = false) {
+    errorText.textContent = message; show(error); show(retry, loading);
+  }
+  function renderServer(payload, preserve) {
+    const before = values();
+    baseline = { ...defaults, ...payload };
+    for (const field of fields) if (!preserve(field, before)) assign(field, baseline[field.name]);
+    touched.clear();
+    for (const field of fields) if (value(field) !== baseline[field.name]) touched.add(field.name);
+    const count = payload.parallel_card_jobs ?? 1;
+    limits.textContent = `${count} ${count === 1 ? "карточка" : "карточки"} одновременно · лимит ${payload.requests_per_minute ?? 120} запросов в минуту`;
     errorText.textContent = ""; show(error, false);
   }
-  function load() {
+  function load({ force = false } = {}) {
     const workspace = state.workspace;
-    if (!workspace || !canManage()) return Promise.resolve();
+    if (!workspace || !canManage()) { describe(); return Promise.resolve(); }
     const epoch = state.epoch, gen = generation;
     if (pendingLoad && pendingLoad.workspace === workspace.id && pendingLoad.epoch === epoch && pendingLoad.gen === gen) return pendingLoad.promise;
-    const entry = { workspace: workspace.id, epoch, gen, promise: null };
-    pendingLoad = entry;
-    controls(true); retry.disabled = true;
-    status.textContent = "Проверяем сохранённые настройки · значения по умолчанию уже заполнены";
+    // Switching tabs must not reload over a draft already being edited.
+    if (!force && loadedWorkspace === workspace.id) return Promise.resolve();
+    const entry = { workspace: workspace.id, epoch, gen, values: values(), promise: null };
+    pendingLoad = entry; retry.disabled = true;
+    describe("Проверяем сохранённые настройки. Поля можно редактировать.");
     entry.promise = (async () => {
       try {
         const payload = await api(`/workspaces/${workspace.id}/directory/card-loader`);
         if (!current(workspace.id, epoch, gen)) return;
-        loadedWorkspace = workspace.id; render(payload); controls(false);
+        loadedWorkspace = workspace.id;
+        renderServer(payload, (field, before) => touched.has(field.name) || before[field.name] !== entry.values[field.name]);
       } catch (cause) {
         if (!current(workspace.id, epoch, gen)) return;
         loadedWorkspace = null;
-        status.textContent = "Показаны рекомендуемые или ранее полученные значения. Сохранение доступно после проверки настроек.";
-        failure(`Не удалось прочитать настройки загрузчика. ${cause.message}`);
+        failure(`Не удалось прочитать настройки загрузчика. ${cause.message}`, true);
       } finally {
         if (pendingLoad === entry) pendingLoad = null;
-        if (current(workspace.id, epoch, gen)) retry.disabled = false;
+        if (current(workspace.id, epoch, gen)) {
+          retry.disabled = false;
+          describe(loadedWorkspace ? undefined : "Поля доступны для редактирования. Повторите загрузку настроек, чтобы разрешить сохранение на сервере.");
+        }
       }
     })();
     return entry.promise;
   }
   function reset() {
-    generation += 1; pendingLoad = null; loadedWorkspace = null;
-    form.reset(); controls(true); retry.disabled = false;
-    submit.textContent = "Сохранить настройки загрузчика";
-    errorText.textContent = ""; show(error, false);
-    status.textContent = "Рекомендуемые значения · 1 карточка одновременно · пауза API не менее 350 мс";
+    generation += 1; pendingLoad = null; loadedWorkspace = null; saving = false; touched.clear();
+    form.reset(); baseline = { ...defaults };
+    for (const field of fields) assign(field, defaults[field.name]);
+    errorText.textContent = ""; show(error, false); show(retry, false); retry.disabled = false;
+    limits.textContent = "1 карточка одновременно · лимит 120 запросов в минуту";
+    describe();
   }
-  retry.addEventListener("click", () => { void load(); });
-  form?.addEventListener("submit", async event => {
+  form.addEventListener("input", event => {
+    if (fields.includes(event.target)) { touched.add(event.target.name); describe(); }
+  });
+  form.addEventListener("change", event => {
+    if (fields.includes(event.target)) { touched.add(event.target.name); describe(); }
+  });
+  retry.addEventListener("click", () => { void load({ force: true }); });
+  form.addEventListener("submit", async event => {
     event.preventDefault();
     const workspace = state.workspace;
-    if (!workspace || !canManage() || loadedWorkspace !== workspace.id || submit.disabled) return;
+    if (!workspace || !canManage() || loadedWorkspace !== workspace.id || saving || pendingLoad) return;
+    if (!form.checkValidity()) { form.reportValidity(); return; }
+    const payload = values();
+    if (payload.manual_max_wait_seconds < payload.manual_priority_seconds) {
+      failure("Порог задержки должен быть не меньше времени повышения приоритета."); return;
+    }
+    if (payload.retry_max_seconds < payload.retry_initial_seconds) {
+      failure("Максимальная пауза должна быть не меньше первого повтора."); return;
+    }
     const epoch = state.epoch, gen = generation;
-    controls(true); submit.textContent = "Сохраняем…";
+    saving = true; describe();
+    let succeeded = false;
     try {
-      const payload = {
-        preload_unanswered: form.elements.preload_unanswered.checked,
-        preload_active_groups: form.elements.preload_active_groups.checked,
-        preload_active_cards: form.elements.preload_active_cards.checked,
-        automatic_clients_only: form.elements.automatic_clients_only.checked,
-        pause_background_on_send: form.elements.pause_background_on_send.checked,
-        active_interval_minutes: number("active_interval_minutes"),
-        parallel_card_jobs: number("parallel_card_jobs"),
-        requests_per_minute: number("requests_per_minute"),
-        manual_max_wait_seconds: number("manual_max_wait_seconds"),
-        finance_interval_minutes: number("finance_interval_minutes"),
-        lessons_interval_minutes: number("lessons_interval_minutes"),
-        groups_interval_minutes: number("groups_interval_minutes"),
-        history_interval_minutes: number("history_interval_minutes"),
-        requests_per_turn: number("requests_per_turn"),
-        busy_retry_seconds: number("busy_retry_seconds"),
-        retry_initial_seconds: number("retry_initial_seconds"),
-        retry_max_seconds: number("retry_max_seconds"),
-        manual_priority_seconds: number("manual_priority_seconds"),
-        manual_interest_minutes: number("manual_interest_minutes"),
-        manual_burst: number("manual_burst"),
-      };
       const saved = await api(`/workspaces/${workspace.id}/directory/card-loader`, { method: "PUT", data: payload });
       if (!current(workspace.id, epoch, gen)) return;
-      render(saved);
-      status.textContent += " · сохранено";
+      // Keep any newer edit made while the save request was in flight.
+      renderServer(saved, (field, before) => before[field.name] !== payload[field.name]);
+      succeeded = true;
     } catch (cause) {
       if (current(workspace.id, epoch, gen)) failure(cause.message);
     } finally {
-      if (current(workspace.id, epoch, gen)) { controls(false); submit.textContent = "Сохранить настройки загрузчика"; }
+      if (current(workspace.id, epoch, gen)) {
+        saving = false;
+        describe(succeeded ? changed() ? "Сохранено. Более новые изменения ещё не сохранены." : "Настройки сохранены." : undefined);
+      }
     }
   });
   reset();
