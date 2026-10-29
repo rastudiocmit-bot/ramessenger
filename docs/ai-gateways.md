@@ -2,6 +2,20 @@
 
 Connections → **ИИ-шлюзы** contains credentials and action routes. AI agents remain in their own tab; each agent chooses a task, provider, model and prompt. Existing Yandex/DeepSeek credentials, the enabled microphone and the 15–180 second recording setting survive migration 0019. No default provider changes on upgrade.
 
+## Connections interface
+
+The synchronization master, service settings, gateways and agents use the same
+content width, heading, card edges, spacing and light/dark theme tokens. Keep
+shared layout rules scoped to `#pane-connections`; do not add a narrower fixed
+width to a single tab. The four main tabs wrap into two rows on narrow screens.
+The master retains its three inner views and the single synchronization monitor.
+
+Each settings tab starts with a collapsible explanation. Service settings explain
+when a separate MAX bot is needed; gateways distinguish saving/checking credentials
+from assigning an action; agents explain instructions, defaults and safe tests.
+These hints make no provider requests. Existing form IDs, independent save actions
+and capability checks remain separate; navigation never saves a draft implicitly.
+
 ## Independent accounts
 
 - Yandex: Russian SpeechKit recognition and AI Studio text models.
