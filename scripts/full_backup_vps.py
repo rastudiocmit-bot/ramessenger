@@ -8,7 +8,7 @@ requires a verified PostgreSQL base backup booted in a network-isolated clone.
 """
 
 import argparse
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime, UTC
 import fcntl
 import glob
@@ -91,35 +91,43 @@ def authentication_key(secret):
 
 def file_digest(path, secret):
     sha = hashlib.sha256()
-    mac = hmac.new(authentication_key(secret), path.name.encode() + b'\0', hashlib.sha256)
+    mac = hmac.new(authentication_key(secret), path.name.encode() + b'\0', hashlib.sha256) if secret is not None else None
     with path.open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             sha.update(block)
-            mac.update(block)
-    return {'name': path.name, 'bytes': path.stat().st_size,
-            'sha256': sha.hexdigest(), 'hmac_sha256': mac.hexdigest()}
+            if mac:
+                mac.update(block)
+    result = {'name': path.name, 'bytes': path.stat().st_size, 'sha256': sha.hexdigest()}
+    if mac:
+        result['hmac_sha256'] = mac.hexdigest()
+    return result
 
 
-def verify_integrity(directory, key_file):
-    secret = key_file.read_bytes().strip()
+def verify_integrity(directory, key_file=None):
     raw = (directory / 'manifest.json').read_bytes()
-    expected = (directory / 'manifest.hmac').read_text().strip()
-    actual = hmac.new(authentication_key(secret), raw, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, actual):
-        raise BackupError('Manifest authentication failed')
     manifest = json.loads(raw)
+    plain = manifest.get('mode') == 'plain'
+    secret = None
+    if not plain:
+        if key_file is None:
+            raise BackupError('Encrypted backup requires --key-file')
+        secret = key_file.read_bytes().strip()
+        expected = (directory / 'manifest.hmac').read_text().strip()
+        actual = hmac.new(authentication_key(secret), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, actual):
+            raise BackupError('Manifest authentication failed')
     if manifest.get('format') != 1 or manifest.get('state') != 'complete':
         raise BackupError('Not a completed backup manifest')
     for item in manifest['parts']:
         name = item['name']
-        if not isinstance(name, str) or Path(name).name != name or not name.endswith('.enc'):
+        if not isinstance(name, str) or Path(name).name != name or (not plain and not name.endswith('.enc')):
             raise BackupError('Unsafe backup part name')
         path = directory / name
         if path.is_symlink() or not path.is_file():
             raise BackupError('Missing backup part: ' + name)
         saved = file_digest(path, secret)
         if any(not hmac.compare_digest(str(saved[k]), str(item[k]))
-               for k in ('bytes', 'sha256', 'hmac_sha256')):
+               for k in (('bytes', 'sha256') if plain else ('bytes', 'sha256', 'hmac_sha256'))):
             raise BackupError('Backup part authentication failed: ' + name)
     return manifest
 
@@ -219,13 +227,15 @@ class Runner:
 
 
 class FullBackup:
-    def __init__(self, directory, key_file):
+    def __init__(self, directory, key_file=None, *, plain=False):
         self.directory, self.key_file = directory, key_file
+        self.plain = plain
         self.work = directory / 'private-work'
         private_directory(self.work)
         self.runner = Runner(self.work)
         self.parts = []
-        self.metadata = {'started_at': now(), 'host': socket.gethostname(), 'scope': 'center-messenger'}
+        self.metadata = {'started_at': now(), 'host': socket.gethostname(), 'scope': 'center-messenger',
+                         'mode': 'plain' if plain else 'encrypted'}
         self.timers = []
         self.api_stopped = False
         self.clone = None
@@ -244,7 +254,7 @@ class FullBackup:
 
     def phase(self, name, **extra):
         self.state = dict(self.metadata, phase=name, backup_directory=str(self.directory),
-                          key_file=str(self.key_file), **extra)
+                          key_file=str(self.key_file) if self.key_file else None, **extra)
         json_write(self.directory / 'status.json', self.state)
         announce('PHASE', name)
 
@@ -264,23 +274,33 @@ class FullBackup:
         return dest
 
     def part(self, name, commands):
+        name = self.part_name(name)
         self.require_space(2 * GIB)
         temporary = self.directory / (name + '.incomplete')
         destination = self.directory / name
-        self.runner.pipeline([*commands, encryption_command(self.key_file)], output=temporary)
+        pipeline = commands if self.plain else [*commands, encryption_command(self.key_file)]
+        self.runner.pipeline(pipeline, output=temporary)
         os.replace(temporary, destination)
         destination.chmod(0o600)
         sync_directory(destination.parent)
-        self.parts.append(file_digest(destination, self.key_file.read_bytes().strip()))
+        self.parts.append(file_digest(destination, self.secret()))
         announce('SAVED', name, 'bytes=' + str(destination.stat().st_size))
         return destination
 
     def decrypt(self, name):
+        name = self.part_name(name)
         item = next(part for part in self.parts if part['name'] == name)
-        saved = file_digest(self.directory / name, self.key_file.read_bytes().strip())
+        saved = file_digest(self.directory / name, self.secret())
         if saved != item:
             raise BackupError('Encrypted part changed before restore verification')
-        return encryption_command(self.key_file, decrypt=True, source=self.directory / name)
+        return ['cat', str(self.directory / name)] if self.plain else encryption_command(
+            self.key_file, decrypt=True, source=self.directory / name)
+
+    def part_name(self, name):
+        return name.removesuffix('.enc') if self.plain else name
+
+    def secret(self):
+        return None if self.plain else self.key_file.read_bytes().strip()
 
     def require_space(self, minimum):
         free = shutil.disk_usage(self.directory).free
@@ -301,7 +321,10 @@ class FullBackup:
                 time.sleep(10)
 
     def prepare(self):
-        for command in ('docker', 'systemctl', 'tar', 'gzip', 'openssl', 'git', 'gh', 'du'):
+        commands = ('docker', 'systemctl', 'tar', 'gzip', 'du')
+        if not self.plain:
+            commands += ('openssl', 'git', 'gh')
+        for command in commands:
             if not shutil.which(command):
                 raise BackupError('Required command not found: ' + command)
         if not ROOT.is_dir() or not (ROOT / 'compose.yaml').is_file():
@@ -385,7 +408,7 @@ class FullBackup:
         for path in self.host_paths + self.mutable_paths:
             if path == Path('/') or path == self.directory or path in self.directory.parents:
                 raise BackupError('Backup destination overlaps a source path')
-            if path == self.key_file or path in self.key_file.parents:
+            if self.key_file and (path == self.key_file or path in self.key_file.parents):
                 raise BackupError('Backup encryption key would be included in its own backup')
         host_bytes = int(self.runner.run(['du', '--summarize', '--bytes', '--total',
             *map(str, minimal_paths(self.host_paths + self.mutable_paths))], timeout=600).splitlines()[-1].split()[0])
@@ -394,8 +417,9 @@ class FullBackup:
         self.metadata.update(databases=self.databases, database_bytes=self.db_bytes,
             postgres_recovery_settings=self.recovery_settings,
             host_paths=[str(p) for p in self.host_paths], mutable_paths=[str(p) for p in self.mutable_paths],
-            encryption={'cipher': 'AES-256-CBC', 'kdf': 'PBKDF2', 'iterations': ITERATIONS,
-                        'authentication': 'HMAC-SHA256 over manifest and encrypted parts'})
+            encryption=({'enabled': False, 'integrity': 'SHA256'} if self.plain else
+                        {'cipher': 'AES-256-CBC', 'kdf': 'PBKDF2', 'iterations': ITERATIONS,
+                         'authentication': 'HMAC-SHA256 over manifest and encrypted parts'}))
         # Worst-case uncompressed source files plus image export, SQL/base backups,
         # one extracted verification cluster and WAL headroom. No old copies deleted.
         needed = host_bytes + image_bytes * 1.1 + self.db_bytes * 3 + 3 * GIB
@@ -456,6 +480,18 @@ class FullBackup:
 
     def source_bundle(self):
         self.phase('source_repository')
+        if self.plain:
+            # Preserve the deployed files without GitHub credentials or network.
+            # The complete runnable image is saved separately with docker save.
+            source = self.work / 'deployed-app'
+            source.mkdir(mode=0o700)
+            self.runner.run(['docker', 'cp', self.api_id + ':/app/.', str(source)], timeout=600)
+            self.part('active-app.tar.gz', [archive_command(self.paths_file('app-paths.nul', [source]))])
+            self.runner.pipeline([self.decrypt('active-app.tar.gz'), ['tar', '-tzf', '-']])
+            self.metadata.update(source_bundle_verified=True, source_capture='deployed_container_files',
+                                 git_history_exported=False)
+            shutil.rmtree(source)
+            return
         mirror = self.work / 'source.git'
         # systemd intentionally does not inherit the SSH shell's token/config.
         # Read its protected credential only for gh and its git subprocesses;
@@ -557,7 +593,7 @@ class FullBackup:
             name = 'database-%03d.dump.enc' % index
             self.part(name, [['docker', 'exec', self.db_id, 'pg_dump', '-U', 'cm_owner',
                              '-d', database, '-Fc']])
-            self.logical_parts.append({'database': database, 'part': name})
+            self.logical_parts.append({'database': database, 'part': self.part_name(name)})
             self.runner.pipeline([self.decrypt(name), ['docker', 'exec', '-i', self.db_id,
                 'pg_restore', '--list']], timeout=600)
         self.phase('database_physical_backup')
@@ -750,6 +786,9 @@ class FullBackup:
             raise BackupError('Backup is incomplete: required verification did not finish')
         required_parts = {'source.bundle.enc', 'deployment-files.tar.gz.enc',
             'container-images.tar.gz.enc', 'postgres-globals.sql.enc', 'postgres-base.tar.gz.enc'}
+        if self.plain:
+            required_parts.remove('source.bundle.enc')
+            required_parts = {self.part_name(name) for name in required_parts} | {'active-app.tar.gz'}
         required_parts.update(item['part'] for item in self.metadata.get('logical_databases', []))
         if not required_parts.issubset({part['name'] for part in self.parts}):
             raise BackupError('Backup is incomplete: required archive is missing')
@@ -764,14 +803,16 @@ class FullBackup:
         # Authenticate the exact manifest bytes, then independently re-read every part.
         manifest = dict(self.metadata, format=1, state='complete', parts=self.parts)
         json_write(self.directory / 'manifest.json', manifest)
-        secret = self.key_file.read_bytes().strip()
+        secret = self.secret()
         raw = (self.directory / 'manifest.json').read_bytes()
-        (self.directory / 'manifest.hmac').write_text(
-            hmac.new(authentication_key(secret), raw, hashlib.sha256).hexdigest() + '\n')
+        if not self.plain:
+            (self.directory / 'manifest.hmac').write_text(
+                hmac.new(authentication_key(secret), raw, hashlib.sha256).hexdigest() + '\n')
         (self.directory / 'SHA256SUMS').write_text(''.join(
             part['sha256'] + '  ' + part['name'] + '\n' for part in self.parts))
         verify_integrity(self.directory, self.key_file)
-        (self.directory / 'RESTORE.txt').write_text(restore_notes(self.key_file), encoding='utf-8')
+        (self.directory / 'RESTORE.txt').write_text(
+            plain_restore_notes() if self.plain else restore_notes(self.key_file), encoding='utf-8')
         shutil.copy2(__file__, self.directory / 'full_backup_vps.py')
         shutil.rmtree(self.work)
         for path in self.directory.iterdir():
@@ -782,8 +823,51 @@ class FullBackup:
         self.phase('complete', completed_at=now(), physical_restore_verified=True,
                    all_table_counts_verified=True, parts=len(self.parts))
         announce('BACKUP_COMPLETE', self.directory)
-        announce('KEY_FILE', self.key_file)
-        announce('Download the backup directory and keep its key separately; do not post either in chat.')
+        if self.plain:
+            announce('No backup encryption key is needed. Keep this directory private.')
+        else:
+            announce('KEY_FILE', self.key_file)
+            announce('Download the backup directory and keep its key separately; do not post either in chat.')
+
+
+def plain_restore_notes():
+    return '''CENTER MESSENGER ORDINARY BACKUP
+
+No encryption or separate backup key is used. This directory contains passwords,
+connection encryption keys, TLS/SSH credentials and customer data. Keep access
+restricted and download it privately; do not place it in a public web directory.
+
+Verify the files:
+  sha256sum -c SHA256SUMS
+  python3 full_backup_vps.py --verify /absolute/backup/directory
+
+deployment-files.tar.gz: all inventoried deployment paths, including hidden files,
+secrets, connection master key, legacy releases and proxy/systemd configuration.
+active-app.tar.gz: actual /app contents from the running API container. No GitHub
+download is required and remote Git history is not exported in this mode.
+container-images.tar.gz: exact running API and PostgreSQL image exports:
+  gzip -dc container-images.tar.gz | docker image load
+postgres-globals.sql: PostgreSQL roles and other cluster-global objects.
+database-NNN.dump: additional logical database dumps; database names are listed
+in manifest.json under logical_databases. Restore with pg_restore after preparing
+roles and an isolated target database. Their TOC was checked, not a full SQL restore.
+postgres-base.tar.gz: complete physical PostgreSQL base backup INCLUDING WAL.
+It was checked with pg_verifybackup, booted in a network-isolated copy, and all
+user table row counts and the schema revision were compared with the snapshot.
+support-queue.sqlite: consistent SQLite support queue, when present; original
+path is sqlite_restore_path in manifest.json. Discard stale WAL/SHM on restore.
+persistent-files.tar.gz: additional writable mounts, if any.
+recovery-metadata.tar.gz: container/image/volume/network configuration and counts.
+
+Restore only into an isolated recovery environment first. Preserve file ownership,
+ACL and xattrs when extracting host files; do not overwrite a live server's proxy
+or systemd configuration. PostgreSQL physical recovery must use the saved version
+and image. Review imported image references/digests before recreating containers.
+Do not enable automatic deployments until recovery is verified.
+
+Copy the whole directory off the VPS. A copy on the same disk alone does not
+protect against disk loss. This set covers the messenger, not unrelated sites.
+'''
 
 
 def restore_notes(key_file):
@@ -941,15 +1025,17 @@ def start_background(args):
         pass
     log.chmod(0o600)
     recover = '/usr/bin/python3 ' + str(script) + ' --recover-run ' + stamp + ' --output-root ' + str(args.output_root)
-    with github_credential() as credential:
+    with (nullcontext(None) if args.plain else github_credential()) as credential:
+        credential_option = ['--property=LoadCredential=github-token:' + str(credential)] if credential else []
         subprocess.run(['systemd-run', '--unit=' + unit, '--collect', '--property=Type=exec',
             '--property=RuntimeMaxSec=3h', '--property=TimeoutStopSec=300',
-            '--property=LoadCredential=github-token:' + str(credential),
+            *credential_option,
             '--property=StandardOutput=append:' + str(log),
             '--property=StandardError=append:' + str(log),
             '--property=ExecStopPost=' + recover,
             '/usr/bin/python3', str(script), '--run-id', stamp,
-            '--output-root', str(args.output_root), '--key-directory', str(args.key_directory)], check=True)
+            '--output-root', str(args.output_root), '--key-directory', str(args.key_directory),
+            *(['--plain'] if args.plain else [])], check=True)
     announce('BACKUP_STARTED', unit + '.service')
     announce('LOG', log)
     announce('EXPECTED_DIRECTORY', args.output_root / stamp)
@@ -962,13 +1048,12 @@ def main(argv=None):
     parser.add_argument('--key-directory', type=Path, default=Path('/root/ramessenger-backup-keys'))
     parser.add_argument('--verify', type=Path)
     parser.add_argument('--key-file', type=Path)
+    parser.add_argument('--plain', action='store_true', help='Ordinary tar.gz/dump files, no encryption and no GitHub access')
     parser.add_argument('--start', action='store_true', help='Run independently in systemd with recovery')
     parser.add_argument('--run-id', type=valid_run_id)
     parser.add_argument('--recover-run', type=valid_run_id)
     args = parser.parse_args(argv)
     if args.verify:
-        if not args.key_file:
-            parser.error('--verify requires --key-file')
         value = verify_integrity(args.verify, args.key_file)
         announce('INTEGRITY_VERIFIED', 'parts=' + str(len(value['parts'])))
         return 0
@@ -981,17 +1066,20 @@ def main(argv=None):
     if args.start:
         return start_background(args)
     private_directory(args.output_root)
-    private_directory(args.key_directory)
+    if not args.plain:
+        private_directory(args.key_directory)
     stamp = args.run_id or datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid4().hex[:12]
     directory = args.output_root / stamp
     directory.mkdir(mode=0o700)
-    key_file = args.key_directory / (stamp + '.key')
-    with key_file.open('xb') as stream:
-        stream.write(os.urandom(48).hex().encode() + b'\n')
-        stream.flush()
-        os.fsync(stream.fileno())
-    sync_directory(key_file.parent)
-    backup = FullBackup(directory, key_file)
+    key_file = None
+    if not args.plain:
+        key_file = args.key_directory / (stamp + '.key')
+        with key_file.open('xb') as stream:
+            stream.write(os.urandom(48).hex().encode() + b'\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        sync_directory(key_file.parent)
+    backup = FullBackup(directory, key_file, plain=args.plain)
     def interrupted(signum, frame):
         raise BackupError('Backup interrupted by signal ' + str(signum))
     signal.signal(signal.SIGTERM, interrupted)

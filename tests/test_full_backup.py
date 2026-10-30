@@ -187,7 +187,7 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(state['api_stop_intent'])
 
     def test_background_unit_has_independent_recovery_and_no_deploy(self):
-        args = Mock(output_root=self.root / 'backups', key_directory=self.root / 'keys')
+        args = Mock(output_root=self.root / 'backups', key_directory=self.root / 'keys', plain=False)
         fake_log = self.root / 'log'
         original_path = m.Path
         def path(value):
