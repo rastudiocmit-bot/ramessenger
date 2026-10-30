@@ -166,6 +166,8 @@ def repair_batch(service, db, workspace, channel, cursor, *, on_progress=None, o
     if only_contacts is None:
         from center_messenger.alfa_shared_parent import repair_batch as repair_shared
         shared_changed = repair_shared(service, db, workspace, channel, snapshot, cursor)
+        from center_messenger.native_archive_relink import repair_batch as repair_archived
+        shared_changed = repair_archived(service, db, workspace, channel, snapshot, cursor) or shared_changed
     previous = cursor.get("client_repair", {}) if only_contacts is None else {}
     if only_contacts is None and cursor.get("sync_policy") == 1 and previous.get("version") == REPAIR_VERSION and previous.get("complete"):
         return shared_changed

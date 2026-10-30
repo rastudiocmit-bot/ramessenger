@@ -62,7 +62,8 @@ def canonical_alias(db, workspace, channel, snapshot, contact):
     ), {"w": workspace, "run": snapshot["run"], "crm": snapshot["connection_id"],
         "contact": contact}).scalar_one()
     if not phones or len(phones) != 1 or not phones[0]:
-        return None
+        from center_messenger.native_archive_relink import canonical_alias as archived_alias
+        return archived_alias(db, workspace, channel, snapshot, contact)
     family = members(db, workspace, channel, snapshot, contact, phones[0])
     if len(family) < 2:
         return None

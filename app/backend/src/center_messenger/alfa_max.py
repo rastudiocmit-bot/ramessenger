@@ -676,7 +676,7 @@ class AlfaMaxConnections:
             {"w": workspace, "old": old, "canonical": canonical},
         )
 
-    def _merge_contact_conversations(self, db, workspace, channel, contact, canonical, *, family_contacts=None):
+    def _merge_contact_conversations(self, db, workspace, channel, contact, canonical, *, family_contacts=None, only_conversations=None):
         """Unify a verified CRM contact or proven shared incoming MAX sender.
 
         Retain the old conversation IDs as aliases. All messages, pending sends
@@ -691,11 +691,13 @@ class AlfaMaxConnections:
             text("SELECT c.id FROM conversations c WHERE c.workspace_id=:w "
                  "AND c.connection_id=:channel AND c.contact_id=ANY(CAST(:contacts AS uuid[])) "
                  "AND c.id<>:canonical AND NOT c.crm_link_manual "
+                 + ("AND c.id=ANY(CAST(:only_conversations AS uuid[])) " if only_conversations is not None else "") +
                  "AND (EXISTS(SELECT 1 FROM messages m WHERE m.workspace_id=c.workspace_id "
                  "AND m.conversation_id=c.id) OR EXISTS(SELECT 1 FROM send_commands s "
                  "WHERE s.workspace_id=c.workspace_id AND s.conversation_id=c.id)) "
                  "ORDER BY c.id FOR UPDATE"),
-            {"w": workspace, "channel": channel, "contacts": contacts, "canonical": canonical},
+            {"w": workspace, "channel": channel, "contacts": contacts, "canonical": canonical} |
+            ({"only_conversations": only_conversations} if only_conversations is not None else {}),
         ).scalars())
         if not old:
             return
