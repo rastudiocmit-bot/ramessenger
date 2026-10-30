@@ -5,7 +5,7 @@ Install explicitly from a reviewed checkout. Never self-updates from main.
 The systemd entrypoint, policy, runner, helper and tests live outside checkouts.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -335,7 +335,7 @@ def allow(trusted, sha, expected_diff, reason):
         print('MAX APPROVAL SAVED for exact SHA; pinned compatibility tests remain mandatory', flush=True)
 
 
-def install(source, expected_policy, expected_live, previous_policy=None):
+def install(source, expected_policy, expected_live, previous_policy=None, *, lock_held=False):
     """Explicit root bootstrap/update; no API/DB restarts, no deployment."""
     policy = load_policy(source)
     body = regular(source, POLICY)
@@ -344,7 +344,7 @@ def install(source, expected_policy, expected_live, previous_policy=None):
     mismatches = changes(source, source)
     if mismatches:
         raise GuardError('Checkout differs from its manifest: ' + json.dumps(mismatches))
-    with project_lock():
+    with nullcontext() if lock_held else project_lock():
         current = json.loads(command('docker', 'inspect', 'center-messenger-api-1'))[0]
         if current['Config']['Image'] != 'center-messenger:local-' + full_sha(expected_live)[:12]:
             raise GuardError('Unexpected live API image')

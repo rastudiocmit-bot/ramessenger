@@ -1,7 +1,7 @@
-"""Pinned offline MAX behaviour gate, run against each proposed image.
+"""Pinned MAX behaviour gates, run against each proposed image.
 
 No credentials, live CRM calls, production database or customer sends.
-Database/concurrency end-to-end checks remain a separate staging procedure.
+--database additionally uses a fresh isolated PostgreSQL with synthetic data.
 """
 import sys
 import os

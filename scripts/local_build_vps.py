@@ -8,6 +8,8 @@ one transaction, then swaps the API. If the new API fails readiness, the
 database is downgraded back and the previous API is restored.
 """
 import argparse, fcntl, json, os, re, subprocess, sys, tempfile, time
+import hashlib
+import importlib.util
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -15,6 +17,39 @@ ROOT=Path("/opt/center-messenger-github")
 REPO="rastudiocmit-bot/ramessenger"
 STATE=ROOT/"local-build-state.json"
 COMPOSE=["docker","compose","-p","center-messenger","-f",str(ROOT/"compose.yaml")]
+MAX_GUARD=Path("/etc/ramessenger-max-guard/active")
+
+def enter_max_guard():
+    # exec closes the original deploy-lock descriptor (Python opens it with
+    # close-on-exec); the pinned entrypoint reacquires the same project lock.
+    entry=MAX_GUARD/"scripts/max_release_guard.py"
+    os.execv(sys.executable,[sys.executable,str(entry),"run"])
+
+def bootstrap_max_guard(sha):
+    """One-time establishment of trust from this explicitly published release.
+
+    Future updates never reach this code: systemd runs the installed guard.
+    The existing runner already owns the deploy lock during first bootstrap.
+    No API replacement or DB migration takes place before this returns.
+    """
+    if MAX_GUARD.exists() or MAX_GUARD.is_symlink():
+        enter_max_guard()
+        return
+    with tempfile.TemporaryDirectory(prefix="max-guard-bootstrap-",dir=ROOT) as td:
+        source=Path(td)/"source"
+        run("gh","repo","clone",REPO,str(source),"--","--depth","1","--branch","main",timeout=300)
+        if run("git","-C",str(source),"rev-parse","HEAD")!=sha:
+            raise RuntimeError("Main advanced before MAX guard bootstrap; retry")
+        policy=source/"deploy/max-protection.json"
+        body=policy.read_bytes()
+        baseline=json.loads(body)["application_baseline"]
+        spec=importlib.util.spec_from_file_location("max_guard_bootstrap",source/"scripts/max_release_guard.py")
+        module=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.install(source,hashlib.sha256(body).hexdigest(),baseline,lock_held=True)
+    # Cleanup the clone before exec; never leave another source export behind.
+    announce("MAX GUARD BOOTSTRAP COMPLETE: entering pinned release checks")
+    enter_max_guard()
 
 def main_sha():
     value=run("gh","api",f"repos/{REPO}/commits/main","--jq",".sha",timeout=60)
@@ -175,8 +210,8 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
     if not preview and s.get("enabled") is not True:
         announce("DISABLED: local-build-state enabled is not true")
         return
-    # Only the independently installed MAX guard calls this API. The normal
-    # CLI keeps its old behaviour until the operator installs the systemd guard.
+    # Only the independently installed MAX guard supplies verified_source.
+    # The normal CLI performs the one-time bootstrap, then enters that guard.
     sha=verified_source[1] if verified_source else main_sha()
     current=inspect("center-messenger-api-1")["Config"]["Image"]
     target="center-messenger:local-"+sha[:12]
@@ -184,12 +219,19 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
     if preview:
         announce("PREVIEW: no clone, build or changes")
         return
+    if not verified_source and (MAX_GUARD.exists() or MAX_GUARD.is_symlink()):
+        # Even a direct invocation of the old runner must not self-update once
+        # the external guard has established trust.
+        enter_max_guard()
+        return
     if current!=target:
         # Validate before self-update too: otherwise a reset of main could
         # replace this protection with an older runner before it is checked.
         require_forward(s,current,sha)
     if not verified_source:
         self_update(sha)
+        bootstrap_max_guard(sha)
+        return
     if current==target:
         s["last_deployed_sha"]=sha
         safe_state(s)

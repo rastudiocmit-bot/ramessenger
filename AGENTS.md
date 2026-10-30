@@ -11,7 +11,9 @@
 - Queues, message storage, identity, CRM publications and the shared loader also
   affect MAX. Keep their contracts compatible; never treat them as isolated UI
   changes. All candidate images pass the pinned MAX regression gate.
-- The guard is effective only after its explicit server installation. It lives
+- The first explicitly published guard release installs it once through the
+  existing deployment owner, before the API is changed. Subsequent guard and
+  baseline updates require explicit server installation. It lives
   under `/etc/ramessenger-max-guard`, outside Git checkouts, and never updates
   itself from a candidate commit. Do not bypass/remove its systemd drop-in,
   edit its policy/approvals or invoke another runner to get a blocked build out.

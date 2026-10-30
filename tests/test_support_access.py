@@ -247,7 +247,7 @@ class BuildFreshnessTests(unittest.TestCase):
                     return ''
                 with patch.object(build, 'ROOT', root), patch.object(build, 'STATE', state), \
                      patch.object(build.os, 'geteuid', return_value=0), \
-                     patch.object(build, 'main_sha', side_effect=heads), \
+                     patch.object(build, 'main_sha', side_effect=heads[1:]), \
                      patch.object(build, 'inspect', return_value={'Config': {'Image': OLD}}), \
                      patch.object(build, 'guard', return_value=(OLD, 'revision')), \
                      patch.object(build, 'run', side_effect=run), \
@@ -257,7 +257,7 @@ class BuildFreshnessTests(unittest.TestCase):
                      patch.object(build.subprocess, 'run'), \
                      patch.object(build, 'backup', return_value=root / 'backup.dump') as backup, \
                      patch.object(build, 'migrate') as migrate:
-                    build.main(False)
+                    build.main(False, verified_source=(root, A))
                 self.assertEqual(backup.call_count, backups)
                 migrate.assert_not_called()
                 self.assertNotIn('last_deployed_sha', json.loads(state.read_text()))

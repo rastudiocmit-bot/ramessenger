@@ -206,6 +206,67 @@ class GuardTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_existing_guard_is_entered_before_self_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / 'state.json'
+            state.write_text('{"enabled":true}')
+            with patch.object(build, 'MAX_GUARD', root), patch.object(build, 'STATE', state), \
+                 patch.object(build.os, 'geteuid', return_value=0), patch.object(build, 'main_sha', return_value=SHA), \
+                 patch.object(build, 'inspect', return_value={'Config': {'Image': 'center-messenger:local-' + 'b'*12}}), \
+                 patch.object(build, 'enter_max_guard') as enter, patch.object(build, 'self_update') as update, \
+                 patch.object(build, 'bootstrap_max_guard') as bootstrap:
+                build.main(False)
+            enter.assert_called_once()
+            update.assert_not_called()
+            bootstrap.assert_not_called()
+
+    def test_first_release_bootstraps_before_any_build_or_database_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / 'state.json'
+            state.write_text('{"enabled":true}')
+            with patch.object(build, 'MAX_GUARD', root / 'not-installed'), patch.object(build, 'STATE', state), \
+                 patch.object(build.os, 'geteuid', return_value=0), patch.object(build, 'main_sha', return_value=SHA), \
+                 patch.object(build, 'inspect', return_value={'Config': {'Image': 'center-messenger:local-' + 'b'*12}}), \
+                 patch.object(build, 'require_forward'), patch.object(build, 'self_update') as update, \
+                 patch.object(build, 'bootstrap_max_guard') as bootstrap, patch.object(build, 'guard') as db_guard:
+                build.main(False)
+            update.assert_called_once_with(SHA)
+            bootstrap.assert_called_once_with(SHA)
+            db_guard.assert_not_called()
+
+    def test_bootstrap_reuses_lock_and_cleans_checkout_before_entering_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            module = Mock()
+            def run(*args, **kwargs):
+                if args[0] == 'gh':
+                    source = Path(args[4])
+                    (source / 'deploy').mkdir(parents=True)
+                    (source / 'deploy/max-protection.json').write_text(json.dumps({'application_baseline': SHA}))
+                return SHA
+            def enter():
+                self.assertEqual(list(root.glob('max-guard-bootstrap-*')), [])
+            with patch.object(build, 'ROOT', root), patch.object(build, 'MAX_GUARD', root / 'absent'), \
+                 patch.object(build, 'run', side_effect=run), patch.object(build, 'enter_max_guard', side_effect=enter), \
+                 patch.object(build.importlib.util, 'spec_from_file_location'), \
+                 patch.object(build.importlib.util, 'module_from_spec', return_value=module):
+                build.bootstrap_max_guard(SHA)
+            self.assertTrue(module.install.call_args.kwargs['lock_held'])
+            self.assertEqual(module.install.call_args.args[2], SHA)
+
+    def test_bootstrap_does_not_install_from_a_different_main(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(build, 'ROOT', root), patch.object(build, 'MAX_GUARD', root / 'absent'), \
+                 patch.object(build, 'run', return_value='b'*40), patch.object(build, 'enter_max_guard') as enter, \
+                 patch.object(build.importlib.util, 'spec_from_file_location') as load:
+                with self.assertRaisesRegex(RuntimeError, 'Main advanced'):
+                    build.bootstrap_max_guard(SHA)
+            load.assert_not_called()
+            enter.assert_not_called()
+
     def test_verified_source_never_self_updates_or_reloads_main_as_target(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / 'state.json'
