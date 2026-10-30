@@ -11,7 +11,7 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
   await go('connections');await page.waitForSelector('#connections-wizard-view:not([hidden])');await page.evaluate(()=>document.fonts.ready);
   const reference=await page.locator('#connections-wizard-view .connection-page-header').boundingBox();
   const save=async(name)=>{if(process.env.CM_TEST_SCREENSHOTS){fs.mkdirSync(process.env.CM_TEST_SCREENSHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`${name}-${width}-${theme}.png`)});}};
-  const targets={clients:'.directory-list-panel,.directory-toolbar,.sync-bar',team:'.table-card',overview:'.card',security:'.card',profile:'.cabinet-content>.card,.cabinet-content>.group'};
+  const targets={clients:'.directory-list-panel,.directory-toolbar,.sync-bar',team:'.team-member',overview:'.card',security:'.card',profile:'.cabinet-content>.card,.cabinet-content>.group'};
   for(const [pane,selector] of Object.entries(targets)){
    await go(pane);
    if(pane==='clients')await page.waitForSelector('#directory-list .contact-row');
@@ -30,8 +30,8 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
     assert.equal(await page.locator('#directory-list .contact-select').first().isVisible(),true,'Closing a modal keeps the clients list visible');
    }
    if(pane==='team'){
-    await page.getByRole('button',{name:'Действия с сотрудником: Мария Петрова'}).click();await page.waitForSelector('#member-options-dialog[open]');await page.locator('[data-close=member-options-dialog]').click();
-    await page.locator('#invite-open').click();await page.waitForSelector('#invitation-dialog[open]');await page.locator('[data-close=invitation-dialog]').first().click();
+    await page.getByRole('button',{name:'Доступы: Мария Петрова',exact:true}).click();await page.waitForSelector('[data-member=operator-1] .team-access-panel:not([hidden])');await page.getByRole('button',{name:'Доступы: Мария Петрова',exact:true}).click();
+    await page.locator('#invite-open').click();await page.waitForSelector('#team-invite:not([hidden])');await page.locator('#team-invite-close').click();
    }
    if(pane==='overview')assert.equal(await page.locator('#workspace-form [name=name]').inputValue(),'Развивайся');
    if(pane==='security'){

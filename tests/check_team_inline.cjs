@@ -1,0 +1,24 @@
+// Synthetic employees only; all network requests are intercepted.
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs');
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.CM_TEST_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--disable-dev-shm-usage']});
+ try{for(const width of [1440,800,390,320])for(const theme of ['light','dark']){
+  const ctx=await browser.newContext({viewport:{width,height:1000},isMobile:width<720,hasTouch:width<720});const data=await fixture(ctx);await ctx.addInitScript(t=>{try{localStorage.setItem('cm-theme',t);}catch(_){}},theme);
+  const page=await ctx.newPage();page.setDefaultTimeout(12000);await page.goto('https://cabinet.example.test/');
+  const go=async pane=>{if(width<720){await page.locator('#more-tab').click();await page.locator(`#navigation-options [data-pane=${pane}]`).click();}else await page.locator(`#navrail [data-pane=${pane}]`).click();await page.waitForSelector(`#pane-${pane}:not([hidden])`);};
+  await go('connections');const ref=await page.locator('#connections-wizard-view .connection-page-header').boundingBox();await go('team');await page.waitForSelector('[data-member=operator-1]');await page.evaluate(()=>document.fonts.ready);
+  const row=page.locator('[data-member=operator-1]'),access=row.locator('.team-access-toggle');await access.focus();await page.keyboard.press('Enter');await page.waitForSelector('[data-member=operator-1] .team-access-panel:not([hidden])');
+  assert.equal(await page.locator('dialog[open]').count(),0,'Access is inline');assert.equal(await row.locator('input[value=tasks]').isChecked(),true);
+  const geometry=await page.locator('#pane-team').evaluate(p=>{const sc=p.querySelector('.scroll');return {overflow:sc.scrollWidth-sc.clientWidth,cards:[...p.querySelectorAll('.team-member')].map(c=>{const r=c.getBoundingClientRect();return {x:r.x,w:r.width,shadow:getComputedStyle(c).boxShadow};}),bounds:[...p.querySelectorAll('.team-access-panel:not([hidden]) input,.team-access-panel:not([hidden]) select,.team-access-panel:not([hidden]) button')].filter(e=>e.getClientRects().length).map(e=>({x:e.getBoundingClientRect().x,right:e.getBoundingClientRect().right}))};});
+  assert.ok(geometry.overflow<=1,JSON.stringify({width,geometry}));assert.ok(geometry.cards.every(c=>Math.abs(c.x-ref.x)<1&&Math.abs(c.w-ref.width)<1),'Same Connections width');assert.equal(new Set(geometry.cards.map(c=>c.shadow)).size,1);assert.ok(geometry.bounds.every(c=>c.x>=0&&c.right<=width+1),'All controls within viewport');
+  const save=async name=>{if(process.env.CM_TEST_SCREENSHOTS){fs.mkdirSync(process.env.CM_TEST_SCREENSHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`${name}-${width}-${theme}.png`)});}};await save('team-open');
+  // Switch has a named discard confirmation, and cancel keeps the draft.
+  await row.locator('input[value=tasks]').uncheck();await page.getByRole('button',{name:'Доступы: Олег Иванов',exact:true}).click();await page.waitForSelector('#confirm-dialog[open]');await page.locator('#confirm-cancel').click();assert.equal(await row.locator('input[value=tasks]').isChecked(),false);
+  await row.getByRole('button',{name:'Сохранить',exact:true}).click();await page.waitForFunction(()=>document.querySelector('[data-member=operator-1] .team-save-status').textContent==='Доступ сохранён');
+  const write=data.mutations.filter(c=>c.path.endsWith('/members/operator-1/access'));assert.equal(write.length,1);assert.deepEqual(write[0].body,{role:'operator',sections:['messages','security']});assert.ok(write[0].csrf);assert.equal(data.mutations.filter(c=>/\/(role|sections)$/.test(c.path)).length,0);
+  await page.getByRole('button',{name:'Доступы: Олег Иванов',exact:true}).click();await page.waitForSelector('[data-member=test] .team-access-panel:not([hidden])');assert.equal(await page.locator('[data-member=test] select').count(),0);
+  await page.locator('#invite-open').click();await page.waitForSelector('#team-invite:not([hidden])');assert.equal(await page.locator('dialog[open]').count(),0);await page.locator('#create-invite-form [name=email]').fill('new@example.test');await save('team-invite');await page.locator('#create-invite-form [type=submit]').click();await page.waitForSelector('#invite-result:not([hidden])');assert.deepEqual(data.mutations.find(c=>c.path.endsWith('/invitations')).body,{email:'new@example.test',role:'operator',sections:['messages','tasks','security']});await page.locator('#team-invite-close').click();assert.equal(await page.locator('#invite-url').inputValue(),'');
+  assert.deepEqual(data.errors,[]);assert.deepEqual(data.unexpected,[]);console.log(`team inline ${width} ${theme}: ok`);await ctx.close();
+ }}finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1);});

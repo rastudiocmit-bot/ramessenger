@@ -75,10 +75,10 @@ const { fixture } = require('./browser_fixture.cjs');
       }
       if (admin) {
         await page.locator('#team-tab').click(); await page.waitForSelector('#members-list .mrow'); await save('installed-team');
-        await page.getByRole('button', { name: 'Действия с сотрудником: Мария Петрова' }).click();
-        await page.locator('#member-options-dialog select').selectOption('branch_manager'); await page.getByRole('button', { name: 'Сохранить роль', exact: true }).click();
-        await page.waitForFunction(() => !document.querySelector('#member-options-dialog').open);
-        assert.ok(data.mutations.some(c => c.path.endsWith('/members/operator-1/role') && c.body.role === 'branch_manager'));
+        await page.getByRole('button', { name: 'Доступы: Мария Петрова' }).click();
+        await page.locator('[data-member=operator-1] select').selectOption('branch_manager'); await page.getByRole('button', { name: 'Сохранить', exact: true }).click();
+        await page.waitForFunction(() => document.querySelector('[data-member=operator-1] .team-save-status').textContent === 'Доступ сохранён');
+        assert.ok(data.mutations.some(c => c.path.endsWith('/members/operator-1/access') && c.body.role === 'branch_manager'));
         await page.locator('#connections-tab').click(); await page.locator('#connections-settings-tab').click();
         await page.waitForSelector('#max-channels .mrow'); await save('installed-connections');
         await page.getByRole('button', { name: 'Настройки бота: MAX-бот' }).click();
