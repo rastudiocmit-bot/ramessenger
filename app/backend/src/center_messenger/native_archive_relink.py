@@ -76,7 +76,7 @@ def counterpart(db, workspace, channel, row):
         "AND coalesce(m.payload->>'deleted','false')<>'true' "
         "AND EXISTS(SELECT 1 FROM source_records s WHERE s.workspace_id=m.workspace_id "
         "AND s.connection_id=:channel AND s.namespace='alfa_max' AND s.message_id=m.id "
-        "AND s.external_record_id IN (:source,concat(:source,'|recipient|',m.payload->>'customer_branch_id',':',m.payload->>'customer_id'))) "
+        "AND s.external_record_id IN (CAST(:source AS text),concat(CAST(:source AS text),'|recipient|',m.payload->>'customer_branch_id',':',m.payload->>'customer_id'))) "
         "ORDER BY m.id LIMIT 3"),
         {'w': workspace, 'channel': channel, 'id': row['id'], 'branch': str(row['payload']['branch_id']),
          'record': str(row['payload']['crm_record_id']), 'at': row['occurred_at'],
