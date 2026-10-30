@@ -114,7 +114,10 @@ def active(unit):
 
 def guard(src):
     if (src/"compose.yaml").read_bytes()!=(ROOT/"compose.yaml").read_bytes():
-        raise RuntimeError("Compose changed: manual review required")
+        from max_runtime_deploy import validate_transition
+        validate_transition(ROOT, src)
+    from max_runtime_deploy import verify_runtime_layout
+    verify_runtime_layout(ROOT, src)
     for unit in ("center-messenger-gitverse-runner.service","center-messenger-deploy.timer",
                  "ramessenger-github-deploy.timer"):
         if active(unit):
@@ -232,6 +235,13 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
         self_update(sha)
         bootstrap_max_guard(sha)
         return
+    # Finish an interrupted first split before planning any further promotion.
+    if helper_root:
+        sys.path.insert(0, str(helper_root))
+        import github_promote_vps as promoter
+        from max_runtime_deploy import recover
+        recover(ROOT, promoter)
+        current=inspect("center-messenger-api-1")["Config"]["Image"]
     if current==target:
         s["last_deployed_sha"]=sha
         safe_state(s)
@@ -255,6 +265,8 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
             "-p","test_github_deploy_rollback.py",cwd=src,timeout=120)
         run("python3","-m","unittest","discover","-s","tests",
             "-p","test_support_access.py",cwd=src,timeout=120)
+        run("python3","-m","unittest","discover","-s","tests",
+            "-p","test_max_runtime_deploy.py",cwd=src,timeout=120)
         announce("BUILD",target)
         subprocess.run(["docker","build","--platform","linux/amd64","--build-arg","CM_BUILD_SHA="+sha,"-t",target,"."],
                        cwd=src,check=True,timeout=1500)
@@ -276,6 +288,9 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
             # replacement. They have no production secrets, DB or CRM network.
             compatibility(target)
         if head!=db_rev:
+            transition = ROOT/'max-runtime-transition.json'
+            if transition.exists():
+                raise RuntimeError('Frozen MAX worker requires a separately reviewed paired schema update')
             # The database must be an ancestor of the new head (no branches, no downgrades).
             history=alembic(target,"history","-r",db_rev+":head")
             if not history or db_rev not in history:
@@ -300,7 +315,10 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
                 announce("MIGRATE",db_rev,"->",head)
                 migrate(target)
                 migrated=True
-            deploy_api_with_rollback(old,target,dest)
+            from max_runtime_deploy import promote
+            import github_promote_vps as promoter
+            if not promote(ROOT,src,sha,old,target,dest,promoter):
+                deploy_api_with_rollback(old,target,dest)
         except Exception:
             s["last_failed_sha"]=sha
             safe_state(s)

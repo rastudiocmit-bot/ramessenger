@@ -47,6 +47,9 @@ def status(workspace_id: UUID, request: Request):
 @router.post("/connect")
 def connect(workspace_id: UUID, model: ConnectInput, request: Request):
     service(request)
+    if getattr(service(request).settings, 'runtime_role', 'combined') == 'api':
+        from center_messenger.max_worker_control import forward_control
+        return forward_control(request, workspace_id, 'connect', model)
     return request.app.state.alfa_max.connect(
         identity(request, mutation=True),
         workspace_id,
@@ -59,6 +62,9 @@ def connect(workspace_id: UUID, model: ConnectInput, request: Request):
 @router.post("/verify")
 def verify(workspace_id: UUID, model: OTPInput, request: Request):
     service(request)
+    if getattr(service(request).settings, 'runtime_role', 'combined') == 'api':
+        from center_messenger.max_worker_control import forward_control
+        return forward_control(request, workspace_id, 'verify', model)
     return request.app.state.alfa_max.verify_otp(
         identity(request, mutation=True), workspace_id, model.code
     )

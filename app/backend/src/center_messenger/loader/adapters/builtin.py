@@ -4,12 +4,17 @@ from ..contracts import Capability as C, Manifest, Step
 
 
 def register_builtin(registry, services, config):
-    if config.crm_sync_worker and services.alfa_sync:
+    role = getattr(config, 'runtime_role', 'combined')
+    if role not in {'combined', 'api', 'max'}:
+        raise ValueError('Unknown runtime role')
+    primary = role != 'max'
+    native = role != 'api'
+    if primary and config.crm_sync_worker and services.alfa_sync:
         registry.register(Manifest("alfa_directory", frozenset({C.DIRECTORY})), lambda: [
             Step("page", C.DIRECTORY, lambda op: services.alfa_sync.run_next(),
                  lane="maintenance", active_delay=.2, idle_delay=2, budget=90)])
-    native_read = bool(config.crm_sync_worker and services.alfa_max)
-    native_send = bool(config.max_worker and services.messaging)
+    native_read = bool(native and (config.crm_sync_worker or role == 'max') and services.alfa_max)
+    native_send = bool(native and config.max_worker and services.messaging)
     if native_read or native_send:
         def native():
             steps = []
@@ -24,17 +29,17 @@ def register_builtin(registry, services, config):
             return steps
         capabilities = ({C.RECEIVE} if native_read else set()) | ({C.SEND} if native_send else set())
         registry.register(Manifest("alfa_max", frozenset(capabilities)), native)
-    if config.max_worker and services.messaging:
+    if primary and config.max_worker and services.messaging:
         registry.register(Manifest("max_bot", frozenset({C.RECEIVE, C.SEND})), lambda: [
             Step("incoming", C.RECEIVE, lambda op: services.messaging.run_next("event", "max_bot"), idle_delay=.5),
             Step("outgoing", C.SEND, lambda op: services.messaging.run_next("send", "max_bot"), idle_delay=.5)])
-    if services.accounts:
+    if primary and services.accounts:
         def projection():
             from center_messenger.chat_queue import QueueProjectionWorker
             worker = QueueProjectionWorker(services.accounts)
             return [Step("batch", C.PROJECTION, lambda op: worker.run_next(), lane="maintenance", idle_delay=10)]
         registry.register(Manifest("chat_projection", frozenset({C.PROJECTION})), projection)
-    if config.crm_sync_worker and services.alfa:
+    if primary and config.crm_sync_worker and services.alfa:
         def cards():
             from center_messenger.family_cache import FamilyCacheWorker
             worker = FamilyCacheWorker(services.alfa)

@@ -204,6 +204,19 @@ class GuardTests(unittest.TestCase):
                 guard.install(self.source, 'wrong-checksum', SHA)
         command.assert_not_called()
 
+    def test_same_reviewed_installation_can_resume_after_a_later_preparation_error(self):
+        external = self.source.parent / 'external'
+        dropin = self.source.parent / 'units/50-max-guard.conf'
+        policy_hash = guard.digest(guard.regular(self.source, guard.POLICY))
+        live = [{'Config': {'Image': 'center-messenger:local-' + SHA[:12], 'Env': ['CM_BUILD_SHA=' + SHA]},
+                 'State': {'Status': 'running'}}]
+        with patch.object(guard, 'TRUST', external), patch.object(guard, 'DROP_IN', dropin), \
+             patch.object(guard, 'project_lock'), patch.object(guard, 'root_owned'), \
+             patch.object(guard, 'command', side_effect=[json.dumps(live), '', json.dumps(live), '']):
+            guard.install(self.source, policy_hash, SHA)
+            guard.install(self.source, policy_hash, SHA, previous_policy='former-policy')
+        self.assertEqual((external / 'active').resolve().name, policy_hash)
+
 
 class RunnerTests(unittest.TestCase):
     def test_support_suite_is_isolated_from_an_installed_host_guard(self):

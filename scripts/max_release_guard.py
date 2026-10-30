@@ -357,7 +357,8 @@ def install(source, expected_policy, expected_live, previous_policy=None, *, loc
         if link.exists() or link.is_symlink():
             old = link.resolve(strict=True)
             trusted_bundle(old)
-            if digest(regular(old, POLICY)) != previous_policy:
+            installed_policy = digest(regular(old, POLICY))
+            if installed_policy != previous_policy and installed_policy != digest(body):
                 raise GuardError('Expected installed policy checksum required for replacement')
         elif expected_live != policy['application_baseline']:
             raise GuardError('First installation requires the documented application baseline')

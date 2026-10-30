@@ -1,5 +1,6 @@
 from pathlib import Path
 from urllib.parse import urlsplit
+from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +29,10 @@ class Settings(BaseSettings):
     trust_proxy_ip: bool = False
     crm_sync_worker: bool = False
     max_worker: bool = False
+    runtime_role: Literal['combined', 'api', 'max'] = 'combined'
+    max_worker_key_file: Path | None = None
+    db_pool_size: int = Field(default=6, ge=1, le=8)
+    db_max_overflow: int = Field(default=2, ge=0, le=3)
     session_hours: int = Field(default=1200, ge=1, le=8760)
     session_idle_minutes: int = Field(default=6000, ge=5, le=525600)
 

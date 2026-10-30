@@ -47,7 +47,9 @@ services:
       CM_TRUST_PROXY_IP: 'true'
       CM_CRM_SYNC_WORKER: 'true'
       CM_MAX_WORKER: 'true'
-    secrets: [db_app_password, owner_bootstrap_token, connection_master_key]
+      CM_RUNTIME_ROLE: api
+      CM_MAX_WORKER_KEY_FILE: /run/secrets/max_worker_key
+    secrets: [db_app_password, owner_bootstrap_token, connection_master_key, max_worker_key]
     ports: ["127.0.0.1:8100:8000"]
     networks: [private]
     depends_on:
@@ -62,8 +64,53 @@ services:
     tmpfs: ["/tmp:rw,noexec,nosuid,size=256m"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 1536m
-    cpus: 1.25
+    mem_limit: 1024m
+    cpus: 1.0
+    pids_limit: 192
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  max-worker:
+    # Pinned separately in the server .env. Ordinary API deployments neither
+    # change this image nor recreate the service.
+    image: ${CM_MAX_IMAGE:?A reviewed MAX worker image must be pinned}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    command: ["uvicorn", "center_messenger.max_worker:app", "--factory", "--host", "0.0.0.0", "--port", "8001", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
+    environment:
+      CM_ENVIRONMENT: production
+      CM_RUNTIME_ROLE: max
+      CM_CRM_SYNC_WORKER: 'false'
+      CM_MAX_WORKER: 'true'
+      CM_DB_HOST: db
+      CM_DB_NAME: center_messenger
+      CM_DB_USER: cm_app
+      CM_EXPECTED_DB_ROLE: cm_app
+      CM_DB_PASSWORD_FILE: /run/secrets/db_app_password
+      CM_DB_POOL_SIZE: '2'
+      CM_DB_MAX_OVERFLOW: '1'
+      CM_CONNECTION_MASTER_KEY_FILE: /run/secrets/connection_master_key
+      CM_MAX_WORKER_KEY_FILE: /run/secrets/max_worker_key
+      CM_PUBLIC_URL: ${CM_PUBLIC_URL:-https://messenger.rastudio.org}
+    secrets: [db_app_password, connection_master_key, max_worker_key]
+    networks: [private]
+    # No host ports, Docker socket, source bind mounts or DB owner password.
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=256m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1024m
+    cpus: 0.75
     pids_limit: 192
     logging:
       driver: json-file
@@ -97,6 +144,8 @@ volumes:
   database: {}
 
 secrets:
+  max_worker_key:
+    file: ./.secrets/max_worker_key
   db_owner_password:
     file: ./.secrets/db_owner_password
   db_app_password:

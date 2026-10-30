@@ -23,8 +23,8 @@ def make_engine(settings: Settings) -> Engine:
         settings.database_url(),
         # The API shares this bounded pool with six background workers. Three
         # connections let a slow history read starve even lightweight requests.
-        pool_size=6,
-        max_overflow=2,
+        pool_size=getattr(settings, 'db_pool_size', 6),
+        max_overflow=getattr(settings, 'db_max_overflow', 2),
         pool_timeout=3,
         pool_pre_ping=True,
         hide_parameters=True,

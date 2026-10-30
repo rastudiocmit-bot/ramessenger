@@ -2,6 +2,14 @@
 
 ## Protected MAX / AlfaCRM connector
 
+- For the container split read `docs/operations/max-container.md`. The native
+  browser and its queues belong to the pinned `max-worker` image. An ordinary
+  API release must never recreate that service or change `CM_MAX_IMAGE`.
+  The initial transition is executed only by the existing pinned deploy owner,
+  after an explicit exact-SHA plan. Never run a second deployment controller.
+  New telephony/channel adapters publish through the shared application/event
+  layer, not through the native MAX worker or direct writes to its queues.
+
 - Read `docs/operations/max-release-protection.md` and the pinned file list in
   `deploy/max-protection.json` before changing messaging, dependencies or schema.
 - Design, CRM-card, AI and future-channel tasks must not modify that contour.

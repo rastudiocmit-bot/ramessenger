@@ -22,6 +22,7 @@ CASES = (
     'test_history_audit.BrowserAuditContextTests',
     'test_history_audit.HistoryNavigationRecoveryTests',
     'test_native_relink',
+    'test_max_container',
 )
 
 DATABASE_CASES = (

@@ -53,6 +53,8 @@ def create_app(
     max_client_factory=MaxClient,
 ) -> FastAPI:
     config = settings or Settings()
+    if config.runtime_role == 'max':
+        raise ValueError('MAX runtime must use center_messenger.max_worker:app')
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -76,7 +78,11 @@ def create_app(
         app.state.alfa_sync = AlfaSync(app.state.alfa) if app.state.alfa else None
         app.state.ai_voice = AiVoice(app.state.alfa) if app.state.alfa else None
         app.state.tasks = Tasks(app.state.alfa, app.state.ai_voice) if app.state.alfa else None
-        app.state.alfa_max = AlfaMaxConnections(app.state.alfa) if app.state.alfa else None
+        if app.state.alfa and config.runtime_role == 'api':
+            from center_messenger.max_worker_control import BrowserDisabled
+            app.state.alfa_max = AlfaMaxConnections(app.state.alfa, browser=BrowserDisabled())
+        else:
+            app.state.alfa_max = AlfaMaxConnections(app.state.alfa) if app.state.alfa else None
         app.state.directory = DirectoryReader(app.state.alfa) if app.state.alfa else None
         app.state.max_connections = (
             MaxConnections(app.state.alfa, max_client_factory) if app.state.alfa else None
@@ -155,6 +161,7 @@ def create_app(
             "stage": "message_unread",
             "build": os.environ.get("CM_BUILD_SHA", "unknown")[:12],
             "schema": SCHEMA_REVISION,
+            "runtime_role": config.runtime_role,
         }
 
     @app.get("/health/live")
