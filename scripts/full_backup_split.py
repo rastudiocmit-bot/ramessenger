@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import fcntl
 import glob
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -278,13 +279,27 @@ def audit(runner, root=ROOT, trust=None):
         issues.append('Database schema disagrees with installed MAX policy')
     if database['accepted_without_saved_message']:
         issues.append('Accepted commands without saved messages require investigation')
+    if database.get('waiting_over_5_minutes'):
+        issues.append('Native send commands have waited for over 5 minutes')
     for connection in database['connections']:
         if connection['state'] != 'active':
             issues.append('Native session is not active: ' + connection['workspace_id'])
+        elif 'last_sync_at' in connection and connection['last_sync_at'] is None:
+            issues.append('Native history has no recorded successful read: ' + connection['workspace_id'])
         elif (connection.get('sync_lag_seconds') or 0) > 300:
             issues.append('Native history has no successful read for over 5 minutes: ' + connection['workspace_id'])
-    with urllib.request.urlopen('http://127.0.0.1:8100/health/ready', timeout=5) as response:
-        api_ready = response.status == 200 and json.load(response).get('status') == 'ready'
+        if connection.get('error_code'):
+            issues.append('Native history reports ' + connection['error_code'] + ': ' + connection['workspace_id'])
+        elif connection.get('activity_phase') == 'error':
+            issues.append('Native history activity reports an error: ' + connection['workspace_id'])
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:8100/health/ready', timeout=5) as response:
+            value = json.load(response)
+            api_ready = response.status == 200 and isinstance(value, dict) and value.get('status') == 'ready'
+    except (OSError, ValueError, HTTPException):
+        # An audit during API replacement still returns the DB/runtime evidence;
+        # a connection reset here is not a failure of a completed backup.
+        api_ready = False
     if not api_ready:
         issues.append('Public API readiness failed')
     return {'checked_at': now(), 'read_only': True, 'crm_requests': 0, 'message_posts': 0,
@@ -824,5 +839,6 @@ if __name__ == '__main__':
     except Exception as error:
         # PostgreSQL stderr can contain private data; normal logs show a bounded
         # operational error. Detailed command errors stay in private-work/.
-        announce('BACKUP_FAILED', str(error) if isinstance(error, BackupError) else type(error).__name__)
+        announce('AUDIT_FAILED' if '--audit' in sys.argv[1:] else 'BACKUP_FAILED',
+                 str(error) if isinstance(error, BackupError) else type(error).__name__)
         sys.exit(1)

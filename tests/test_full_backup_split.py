@@ -99,6 +99,30 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(len(report['issues']),1)
         self.assertIn('no successful read',report['issues'][0])
 
+    def test_recent_success_does_not_hide_current_native_internal_error(self):
+        containers,trust,result=self.audit_fixture()
+        result['connections'][0].update(sync_lag_seconds=90,error_code='internal',activity_phase='error')
+        response=Mock(status=200)
+        response.read.return_value=b'{"status":"ready"}'
+        response.__enter__=Mock(return_value=response)
+        response.__exit__=Mock(return_value=None)
+        with patch.object(backup,'inspect',side_effect=lambda r,n:containers[n]), \
+             patch.object(backup,'read_sql',return_value=json.dumps(result)), \
+             patch.object(backup.urllib.request,'urlopen',return_value=response):
+            report=backup.audit(Mock(),self.root,trust)
+        self.assertEqual(len(report['issues']),1)
+        self.assertIn('reports internal',report['issues'][0])
+
+    def test_api_restart_returns_runtime_evidence_instead_of_crashing_audit(self):
+        containers,trust,result=self.audit_fixture()
+        with patch.object(backup,'inspect',side_effect=lambda r,n:containers[n]), \
+             patch.object(backup,'read_sql',return_value=json.dumps(result)), \
+             patch.object(backup.urllib.request,'urlopen',side_effect=ConnectionResetError):
+            report=backup.audit(Mock(),self.root,trust)
+        self.assertFalse(report['api_ready'])
+        self.assertEqual(report['database'],result)
+        self.assertEqual(report['issues'],['Public API readiness failed'])
+
     def test_sql_enforces_read_only_transaction_and_timeout(self):
         runner = Mock()
         backup.read_sql(runner, 'db-id', 'SELECT 1')
@@ -107,6 +131,45 @@ class BackupTests(unittest.TestCase):
         self.assertIn('BEGIN READ ONLY', kwargs['input_text'])
         self.assertIn('statement_timeout', kwargs['input_text'])
         self.assertTrue(kwargs['input_text'].endswith('ROLLBACK;\n'))
+
+    def test_active_session_without_any_successful_read_is_not_healthy_history(self):
+        containers, trust, result = self.audit_fixture()
+        result['connections'][0]['last_sync_at'] = None
+        response = Mock(status=200)
+        response.read.return_value = b'{"status":"ready"}'
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+        with patch.object(backup, 'inspect', side_effect=lambda r,n:containers[n]), \
+             patch.object(backup, 'read_sql', return_value=json.dumps(result)), \
+             patch.object(backup.urllib.request, 'urlopen', return_value=response):
+            report = backup.audit(Mock(), self.root, trust)
+        self.assertIn('no recorded successful read', report['issues'][0])
+
+    def test_pending_send_queue_over_five_minutes_is_reported(self):
+        containers, trust, result = self.audit_fixture()
+        result['waiting_over_5_minutes'] = 1
+        response = Mock(status=200)
+        response.read.return_value = b'{"status":"ready"}'
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+        with patch.object(backup, 'inspect', side_effect=lambda r,n:containers[n]), \
+             patch.object(backup, 'read_sql', return_value=json.dumps(result)), \
+             patch.object(backup.urllib.request, 'urlopen', return_value=response):
+            report = backup.audit(Mock(), self.root, trust)
+        self.assertEqual(report['issues'], ['Native send commands have waited for over 5 minutes'])
+
+    def test_readiness_with_invalid_json_shape_is_a_readiness_issue(self):
+        containers, trust, result = self.audit_fixture()
+        response = Mock(status=200)
+        response.read.return_value = b'null'
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+        with patch.object(backup, 'inspect', side_effect=lambda r,n:containers[n]), \
+             patch.object(backup, 'read_sql', return_value=json.dumps(result)), \
+             patch.object(backup.urllib.request, 'urlopen', return_value=response):
+            report = backup.audit(Mock(), self.root, trust)
+        self.assertFalse(report['api_ready'])
+        self.assertEqual(report['issues'], ['Public API readiness failed'])
 
     def test_dump_and_counts_use_same_snapshot_without_stopping_any_container(self):
         containers = {name:self.container(name) for name in (backup.API, backup.MAX, backup.DB)}
