@@ -5,7 +5,7 @@
   <title>Личный кабинет · РазвивайсяMessenger</title>
   <script src="/assets/appearance.js?v=2.0"></script>
   <link rel="stylesheet" href="/assets/app.css?v=0.8.36">
-  <link rel="stylesheet" href="/assets/cabinet.css?v=2.38.0-tasks">
+  <link rel="stylesheet" href="/assets/cabinet.css?v=2.38.1-task-toolbar">
   <script src="/assets/icons.js?v=1.4" defer=""></script><script src="/assets/directory.js?v=0.9.1" defer=""></script>
   <script src="/assets/chat.js?v=0.17.0-preferences" defer=""></script><script src="/assets/voice.js?v=1.7.0" defer=""></script><script src="/assets/ai.js?v=1.5.0" defer=""></script>
   <script src="/assets/alfa-progress.js?v=0.12.4-queue-state" defer=""></script><script src="/assets/card-loader.js?v=1.3.0-editable" defer=""></script><script src="/assets/sync-master.js?v=1.0.0" defer=""></script>
@@ -64,7 +64,7 @@
 <div id="chat-header" class="chat-head"><button id="chat-list-toggle" class="backbtn" type="button" aria-label="К списку" data-icon="back"></button><button id="chat-person-open" class="chat-id" type="button"><span id="chat-header-avatar" class="ava me" aria-hidden="true"></span><span id="chat-person" class="chat-id-text"></span></button><button id="chat-handled" class="iconbtn plain" type="button" aria-label="Отметить обработанным" title="Обработано" data-icon="check" hidden=""></button><button id="chat-details" class="iconbtn plain" type="button" aria-label="Карточка семьи" data-icon="info" hidden=""></button></div>
 <form id="chat-compose" class="compose" hidden=""><p id="chat-send-hint" class="chat-compose-hint" hidden=""></p><span class="field"><button id="chat-templates" class="iconbtn" type="button" aria-label="Быстрые ответы" data-icon="bolt"></button><label class="sr" for="chat-input">Текст сообщения</label><textarea id="chat-input" name="text" rows="1" maxlength="4000" placeholder="Сообщение" required=""></textarea><span class="field-side"><button id="chat-clear" class="field-clear" type="button" aria-label="Очистить сообщение" title="Очистить поле" hidden=""><span class="field-clear-x" data-icon="close" aria-hidden="true"></span><span class="field-clear-label">Очистить</span></button><button id="chat-attachment" class="iconbtn" type="button" aria-label="Вложение" title="Отправка вложений пока недоступна" data-icon="clip" disabled=""></button></span></span><div id="chat-voice-panel" class="voice-panel" role="status" aria-live="polite" hidden=""><span class="voice-dot" aria-hidden="true"></span><span id="chat-voice-label" class="voice-label">Идёт запись</span><span id="chat-voice-time" class="voice-time">0:00 / 3:00</span><span class="voice-meter" aria-hidden="true"><i id="chat-voice-level"></i></span><span class="voice-actions"><button id="chat-voice-cancel" type="button" class="voice-cancel">Отмена</button><button id="chat-voice-retry" type="button" class="voice-retry" hidden="">Повторить</button><button id="chat-voice-done" type="button" class="voice-done"><span data-icon="check"></span>Готово</button></span></div><button id="chat-voice" class="voice-btn" type="button" aria-label="Голосовой ввод" title="Голосовой ввод" data-icon="mic" hidden=""></button><button id="chat-send" class="send" type="submit" aria-label="Отправить" disabled=""><span class="send-plane" data-icon="send"></span><span class="chat-send-retry" aria-hidden="true">↻</span></button></form>
 </div></section><div id="chat-resizer" class="directory-resizer" role="separator" aria-label="Ширина списка диалогов" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="640" aria-valuenow="450" tabindex="0"></div></div></section><section class="pane pane-page task-pane" id="pane-tasks" data-page="tasks" hidden="">
-  <div class="page-head task-head"><h1>Задачи</h1><button class="btn primary task-new" type="button"><span>Новая задача</span></button></div>
+  <div class="page-head task-head"><h1>Задачи</h1></div>
   <div class="scroll">
     <div class="tasks-page-tabs" role="tablist" aria-label="Раздел задач">
       <button type="button" role="tab" id="tasks-list-tab" data-tasks-view="list" aria-controls="tasks-list-panel" aria-selected="true" tabindex="0">Список задач</button>
@@ -72,7 +72,7 @@
     </div>
     <section id="tasks-list-panel" class="tasks-page-view" role="tabpanel" aria-labelledby="tasks-list-tab">
       <header class="tasks-page-header"><h2>Обещания клиентам — под контролем</h2><p>Ближайшие сроки выше. Откройте задачу, чтобы посмотреть детали; отметьте кружок, когда всё готово.</p></header>
-      <div class="task-scope" role="tablist" aria-label="Чьи задачи"><button type="button" role="tab" data-scope="mine" aria-selected="true">Мои</button><button type="button" role="tab" data-scope="all" aria-selected="false">Все</button></div>
+      <div class="task-list-toolbar"><div class="task-scope" role="tablist" aria-label="Чьи задачи"><button type="button" role="tab" data-scope="mine" aria-selected="true">Мои</button><button type="button" role="tab" data-scope="all" aria-selected="false">Все</button></div><button class="btn primary task-new" type="button"><span>Новая задача</span></button></div>
       <p class="notice error task-pane-error" role="alert" hidden=""></p>
       <div class="task-groups"><p class="note">Загружаем задачи…</p></div>
     </section>
