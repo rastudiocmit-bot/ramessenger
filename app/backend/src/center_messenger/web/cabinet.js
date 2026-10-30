@@ -136,7 +136,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
       const operators = node("div");
       for (const operator of result.operators) { const row = node("div", undefined, "split"); row.append(node("span", operator.name, "nm"), node("span", duration(operator.average_response_seconds), "vl muted"), node("span", String(operator.answered), "vl")); operators.append(row); }
       if (!result.operators.length) operators.append(node("p", "Ответов сотрудников за этот период пока нет.", "note"));
-      content.append(kpis, card("Обращения по дням", chart), card("Разбивка по филиалам", branches), card("Операторы за неделю", operators, "отв. · ср. время"), node("p", (summaryComputedAt ? `Данные на ${summaryComputedAt}. ` : "") + "Показатели рассчитываются по сохранённым сообщениям. Во время загрузки истории значения могут уточняться.", "note summary-note"));
+      content.append(kpis, card("Обращения по дням", chart), card("Разбивка по филиалам", branches), card("Операторы за неделю", operators, "ср. время · ответов"), node("p", (summaryComputedAt ? `Данные на ${summaryComputedAt}. ` : "") + "Показатели рассчитываются по сохранённым сообщениям. Во время загрузки истории значения могут уточняться.", "note summary-note"));
     } catch (error) {
       if (current() && error.name !== "AbortError") {
         canRetry = ![401, 403].includes(error.status);

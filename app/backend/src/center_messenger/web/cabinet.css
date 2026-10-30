@@ -2226,3 +2226,43 @@ body:has(#cabinet[hidden]){overflow:auto}
  #pane-tasks .task-days{gap:4px}
  #pane-tasks .task-days span{font-size:12px}
 }
+
+/* Summary shares the Connections content width, card surfaces and spacing. */
+#pane-summary{--summary-width:1280px;--summary-padding:18px}
+#pane-summary .summary-page{width:100%;min-width:0;max-width:var(--summary-width);margin:0 auto;padding:6px var(--gut-r) 24px var(--gut-l)}
+#pane-summary #summary-content{display:grid;gap:16px;min-width:0}
+#pane-summary .kpi-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;padding:0;min-width:0}
+#pane-summary :is(.kpi,.card){min-width:0;border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:var(--card-soft)}
+#pane-summary .kpi{padding:16px var(--summary-padding)}
+#pane-summary .kpi dt{font-size:12px;line-height:1.5;letter-spacing:0;text-transform:none;color:var(--muted);font-weight:500}
+#pane-summary .kpi dd{margin-top:10px;font-size:28px;line-height:1.2;letter-spacing:-.7px;color:var(--ink)}
+#pane-summary .kpi .trend{display:block;margin-top:8px;font-size:11.5px;line-height:1.6;font-weight:500;overflow-wrap:anywhere}
+#pane-summary .card{width:100%;margin:0}
+#pane-summary .card-h{padding:16px var(--summary-padding);gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--line-soft)}
+#pane-summary .card-h h2{margin:0;font-size:15px;line-height:1.45;letter-spacing:0}
+#pane-summary .card-h .tag{white-space:normal;font-size:11px;line-height:1.5}
+#pane-summary .card-b{padding:16px var(--summary-padding);min-width:0}
+#pane-summary .chart{height:164px;gap:12px}
+#pane-summary .chart .bar{max-width:96px;border-radius:8px 8px 3px 3px}
+#pane-summary .chart small{font-size:11px;line-height:1.5;color:var(--muted)}
+#pane-summary .split{padding:12px 0;gap:12px}
+#pane-summary .split:first-child{padding-top:0}
+#pane-summary .split:last-child{padding-bottom:0}
+#pane-summary .split .nm{font-size:13px;line-height:1.6;white-space:normal;overflow-wrap:anywhere}
+#pane-summary .split .vl{font-size:13px;line-height:1.6}
+#pane-summary .meter{width:120px}
+#pane-summary #summary-content>.note{margin:0;font-size:12px;line-height:1.6;color:var(--muted)}
+#pane-summary #summary-error{margin:0 0 16px;font-size:12px;line-height:1.6}
+@media(max-width:719px){
+ #pane-summary{--summary-padding:14px}
+ #pane-summary .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+ #pane-summary .kpi{padding:14px}
+ #pane-summary .kpi dt{font-size:11px}
+ #pane-summary .kpi dd{font-size:25px}
+ #pane-summary .kpi .trend{font-size:11px}
+ #pane-summary .card-h{padding-top:14px;padding-bottom:14px}
+ #pane-summary .chart{height:132px;gap:8px}
+ #pane-summary .meter{width:72px}
+ #pane-summary .split{gap:8px}
+ #pane-summary .split .vl{font-size:12px}
+}
