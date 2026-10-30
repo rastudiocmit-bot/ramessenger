@@ -2356,3 +2356,80 @@ body:has(#cabinet[hidden]){overflow:auto}
  #pane-profile .item-main>select{margin-top:8px;font-size:16px}
  #pane-profile .item .val{max-width:30%;font-size:11px;overflow-wrap:anywhere}
 }
+
+/* Clients: an open, compact update panel and a complete saved family view. */
+#pane-clients .sync-bar{display:block;padding:0}
+#pane-clients .directory-sync-head{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px var(--cabinet-padding)}
+#pane-clients .directory-sync-head>.btn-row{flex:none;margin:0}
+#pane-clients .sync-options{display:grid;grid-template-columns:minmax(0,1fr) auto 180px;gap:10px 20px;align-items:center;width:100%;max-width:none;min-width:0;padding:14px var(--cabinet-padding);border-top:1px solid var(--line-soft)}
+#pane-clients .directory-sync-policy strong{display:block;font-size:12px;line-height:1.6;color:var(--ink)}
+#pane-clients .directory-sync-policy small{display:block;font-size:11.5px;line-height:1.6;color:var(--muted)}
+#pane-clients .sync-options .check-label{display:flex;align-items:center;gap:8px;min-height:44px;margin:0;font-size:12px}
+#pane-clients .sync-options .interval-label{display:flex;align-items:center;gap:10px;margin:0;font-size:12px}
+#pane-clients .sync-options select{flex:1;min-width:0;min-height:44px;border-radius:10px;background:var(--surface-2);border-color:var(--line);font-size:13px}
+#pane-clients .directory-sync-note{grid-column:1/-1;text-align:left;font-size:11px;line-height:1.5;margin:0}
+#pane-clients .directory-list-facts{display:flex;flex-wrap:wrap;gap:3px 16px;margin-top:5px;font-size:11.5px;line-height:1.6;color:var(--muted);text-align:left}
+#pane-clients .directory-list-facts>span{white-space:normal;overflow-wrap:anywhere}
+#pane-clients .directory-list-review{color:var(--primary-ink)}
+#pane-clients .contact-row .contact-select{gap:3px}
+#directory-contact-dialog{width:min(980px,calc(100% - 32px));padding:0;overflow:hidden;max-height:calc(100dvh - 32px)}
+#directory-contact-dialog[open]{display:flex;flex-direction:column}
+#directory-contact-dialog>.sheet-head{flex:none;padding:16px 20px;border-bottom:1px solid var(--line-soft)}
+#directory-contact-dialog>.sheet-head h2{font-size:18px;margin:0}
+#directory-contact-dialog .directory-detail{flex:1 1 auto;min-height:0;max-height:calc(100dvh - 112px);overflow:auto;overscroll-behavior:contain;padding:18px;background:var(--surface)}
+#directory-contact-dialog .directory-family-head{margin:0 0 12px;padding:0 0 16px}
+#directory-contact-dialog .directory-family-head h2{font-size:22px;line-height:1.4;margin:0;overflow-wrap:anywhere}
+#directory-contact-dialog .directory-data-channels{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+#directory-contact-dialog .contact-channels{margin-top:12px;font-size:13px;line-height:1.6;overflow-wrap:anywhere;color:var(--ink)}
+#directory-contact-dialog .directory-data-chip{display:inline-block;border-radius:7px;padding:4px 8px;background:var(--primary-tint);color:var(--primary-ink);font-size:11px;line-height:1.5;white-space:normal}
+#directory-contact-dialog .directory-data-note{margin:10px 0 0;font-size:12px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
+#directory-contact-dialog .directory-student{padding:18px;margin:16px 0 0;border:1px solid var(--line);border-radius:14px;box-shadow:var(--card-soft);background:var(--surface)}
+#directory-contact-dialog .student-heading{align-items:flex-start;gap:12px;margin-bottom:14px}
+#directory-contact-dialog .directory-student-name{min-width:0;flex:1}
+#directory-contact-dialog .directory-student-name h3{margin:0;font-size:17px;line-height:1.5;overflow-wrap:anywhere}
+#directory-contact-dialog .directory-student-name small{display:block;font-size:12px;line-height:1.6;color:var(--muted);margin-top:3px}
+#directory-contact-dialog .directory-data-part{margin-top:18px;padding-top:16px;border-top:1px solid var(--line-soft)}
+#directory-contact-dialog .directory-data-part h4{margin:0 0 10px;font-size:13px;line-height:1.6}
+#directory-contact-dialog .directory-data-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 24px;margin:12px 0 0}
+#directory-contact-dialog .directory-data-fact{min-width:0}
+#directory-contact-dialog .directory-data-fact dt{font-size:11px;font-weight:500;line-height:1.6;color:var(--muted)}
+#directory-contact-dialog .directory-data-fact dd{margin:3px 0 0;font-size:12.5px;line-height:1.6;white-space:pre-line;overflow-wrap:anywhere}
+#directory-contact-dialog .directory-totals{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0}
+#directory-contact-dialog .directory-totals>.directory-data-fact{padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
+#directory-contact-dialog .directory-totals dd{font-size:20px;font-weight:650}
+#directory-contact-dialog .directory-totals.negative>.directory-data-fact:first-child dd,#directory-contact-dialog .directory-subscription.negative .directory-data-fact:nth-child(2) dd{color:var(--debt-ink)}
+#directory-contact-dialog .directory-totals.positive>.directory-data-fact:first-child dd{color:var(--st-client-ink)}
+#directory-contact-dialog :is(.directory-subscription,.directory-data-group,.directory-source-card){margin:10px 0 0;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
+#directory-contact-dialog .directory-data-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0}
+#directory-contact-dialog .directory-data-row>strong{font-size:13px;line-height:1.6;overflow-wrap:anywhere;min-width:0}
+#directory-contact-dialog .directory-data-link{color:var(--primary-ink);font-size:12px;line-height:1.6;flex:none;text-decoration:none}
+#directory-contact-dialog .directory-data-link:hover{text-decoration:underline}
+#directory-contact-dialog .directory-lesson{display:grid;grid-template-columns:155px minmax(0,1fr) auto;gap:4px 12px;padding:12px 0;border-bottom:1px solid var(--line-soft);font-size:12px;line-height:1.6}
+#directory-contact-dialog .directory-lesson>*{min-width:0;overflow-wrap:anywhere}
+#directory-contact-dialog .directory-lesson>small{grid-column:1/-1;color:var(--muted);font-size:11px}
+#directory-contact-dialog .directory-lessons-more{margin-top:10px;min-height:44px;white-space:normal;text-align:left;box-shadow:none}
+#directory-contact-dialog .directory-cache-status{padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-2)}
+@media(min-width:720px){#directory-contact-dialog{inset:0;margin:auto;height:fit-content;border-radius:18px}}
+@media(max-width:719px){
+ #pane-clients .directory-sync-head{align-items:flex-start;flex-direction:column;gap:12px}
+ #pane-clients .sync-options{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;padding-top:12px;padding-bottom:12px}
+ #pane-clients .directory-sync-policy{grid-column:1/-1}
+ #pane-clients .sync-options .interval-label{max-width:none;flex-direction:column;align-items:stretch;gap:4px}
+ #pane-clients .sync-options select{font-size:16px}
+ #pane-clients .directory-list-facts{display:flex;flex-direction:column;gap:2px;font-size:11px}
+ #pane-clients .contact-row{align-items:flex-start;gap:8px;position:relative}
+ #pane-clients .contact-row .contact-select{min-width:0}
+ #pane-clients .contact-row>.pill{font-size:9px;padding:4px 6px}
+ #pane-clients .contact-row>.iconbtn{width:32px;min-width:32px;flex:none}
+ #directory-contact-dialog{width:100%;max-height:calc(100dvh - 12px);border-radius:18px 18px 0 0}
+ #directory-contact-dialog>.sheet-head{padding:14px}
+ #directory-contact-dialog .directory-detail{padding:14px;max-height:calc(100dvh - 92px)}
+ #directory-contact-dialog .directory-student{padding:12px}
+ #directory-contact-dialog .student-heading{flex-wrap:wrap}
+ #directory-contact-dialog .directory-family-head h2{font-size:19px}
+ #directory-contact-dialog .directory-student-name h3{font-size:16px}
+ #directory-contact-dialog .directory-data-facts{grid-template-columns:minmax(0,1fr);gap:10px}
+ #directory-contact-dialog .directory-data-row{flex-wrap:wrap;gap:6px}
+ #directory-contact-dialog .directory-lesson{grid-template-columns:minmax(0,1fr)}
+ #directory-contact-dialog .directory-totals dd{font-size:17px}
+}

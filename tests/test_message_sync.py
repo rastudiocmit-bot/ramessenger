@@ -3272,6 +3272,17 @@ class MessageSyncTests(unittest.TestCase):
         self.db.execute(text("UPDATE alfa_customers SET student_id=:student,balance=3962.50,paid_lesson_count=3 WHERE workspace_id=:w"),{'w':self.workspace,'student':student})
         return DirectoryReader(SimpleNamespace(_transaction=self.accounts.transaction,chat_transaction=self.accounts.transaction,accounts=self.accounts)),student
 
+    def test_directory_list_exposes_saved_contacts_and_scoped_branch_names(self):
+        reader, _ = self.family_balance_fixture()
+        self.db.execute(text("UPDATE alfa_directory SET phones=CAST(:phones AS jsonb),emails=CAST(:emails AS jsonb) WHERE workspace_id=:w AND contact_id=:c"),
+            {'w':self.workspace,'c':self.contact,'phones':json.dumps(['+79000000000']),'emails':json.dumps(['parent@example.test'])})
+        result=reader.listing(None,self.workspace,branch=1)
+        item=next(row for row in result['contacts'] if row['id']==str(self.contact))
+        self.assertEqual(item['phones'],['+79000000000'])
+        self.assertEqual(item['emails'],['parent@example.test'])
+        self.assertEqual([branch['id'] for branch in item['branches']],['1'])
+        self.assertEqual(item['branches'][0]['name'], next(branch['name'] for branch in result['branches'] if branch['id']=='1'))
+
     def test_family_balance_is_customer_total_before_any_subscription_cache_is_loaded(self):
         reader,student=self.family_balance_fixture()
         result=reader.detail(None,self.workspace,self.contact)
@@ -3296,6 +3307,7 @@ class MessageSyncTests(unittest.TestCase):
         self.assertEqual(len(person['subscriptions'][0]['branches']),1)
         self.assertEqual(len(person['subscriptions'][0]['observed_branches']),2)
         self.assertEqual(person['paid_lesson_count'],9)
+        self.assertEqual(person['lessons'],[lesson], 'saved branch observations resolve to one canonical lesson')
         self.assertEqual(person['balance'],'8062.50')
         self.assertEqual(self.db.execute(text('SELECT count(*) FROM alfa_family_details WHERE workspace_id=:w'),{'w':self.workspace}).scalar(),2)
 
