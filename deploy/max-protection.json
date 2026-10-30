@@ -71,13 +71,13 @@
     "tests/test_compose_recipient.py": "e32ecd4c6c9613871b8354e02d433a9ad3b075f6541dc13857cb972f76aba4a8",
     "tests/test_github_deploy_rollback.py": "a18de8704c89c1f624bc32c789101193b7e29a3063158a68579f2bc9b409e165",
     "tests/test_history_audit.py": "86d404e24da7df39f2335a958e9e8b166bc805e0b7aaf2cbe42998bc6ee04d5e",
-    "tests/test_max_release_guard.py": "7e17307536d44f8b6b98d2fee49d42e8788863b3ac6ea728b1647ab6fe47b4b4",
+    "tests/test_max_release_guard.py": "a6b65bdb8134db9684d376b0e54583c3dee991cbbcb1adb08004d70746a41f05",
     "tests/test_message_sync.py": "f85cca6eb5eefe1e10229d575298b83d023548fa2cda26bd8e309eda35a46030",
     "tests/test_native_priority.py": "7b2113efbd67875cbd24fe209572813328566d45189d1977b9d707d18f04495e",
     "tests/test_native_relink.py": "81c2b34bcb0919d0ee1c689f753fb11630bb8b2af33e4d5eb60ab48f73f58693",
     "tests/test_native_send_runtime.py": "a5e71a0ee1d6434eeb005e38790c051cb7b42528f5b75a2b383e51474dde3c16",
     "tests/test_native_session.py": "93a530d8dde1209dc1a4069bfbfc807dcab2bd24bb82d28f1e6c838dbf668d08",
-    "tests/test_support_access.py": "8c1408ceadf0915fb569daab2d938e836362e8f9a2daa9dc539c6b6c8a768a6f"
+    "tests/test_support_access.py": "20635c574d605a7bcab75bc46571af1962b3acabfdfa57cf954fee7fbf3430c7"
   },
   "protected_patterns": [
     "app/backend/src/center_messenger/alfa_max*.py",

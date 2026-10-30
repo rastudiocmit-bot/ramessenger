@@ -201,6 +201,20 @@ class AccessTests(unittest.TestCase):
 
 
 class BuildFreshnessTests(unittest.TestCase):
+    def setUp(self):
+        # A deploy unit test must not discover the host's installed guard and
+        # exec into it while the real deployment owns .deploy.lock. These tests
+        # model the pre-bootstrap runner; installed-guard routing is covered in
+        # test_max_release_guard with its own isolated paths.
+        temporary = tempfile.TemporaryDirectory(prefix='cm-build-test-')
+        self.addCleanup(temporary.cleanup)
+        guard_path = patch.object(build, 'MAX_GUARD', Path(temporary.name) / 'not-installed')
+        guard_path.start()
+        self.addCleanup(guard_path.stop)
+        execute = patch.object(build.os, 'execv', side_effect=AssertionError('Unit tests must never exec the live deploy guard'))
+        execute.start()
+        self.addCleanup(execute.stop)
+
     def test_backward_main_is_rejected_before_runner_self_update(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / 'state.json'

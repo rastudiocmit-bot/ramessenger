@@ -206,6 +206,20 @@ class GuardTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_support_suite_is_isolated_from_an_installed_host_guard(self):
+        import test_support_access
+        # Reproduce the deployment host, where /etc/.../active exists. The
+        # nested suite must override this host path and must never exec it.
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(build, 'MAX_GUARD', Path(directory)), \
+                 patch.object(build.os, 'execv', side_effect=AssertionError('Host guard executed')) as execute:
+                suite = unittest.defaultTestLoader.loadTestsFromTestCase(test_support_access.BuildFreshnessTests)
+                result = unittest.TestResult()
+                suite.run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual(result.testsRun, 4)
+            execute.assert_not_called()
+
     def test_existing_guard_is_entered_before_self_update(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
