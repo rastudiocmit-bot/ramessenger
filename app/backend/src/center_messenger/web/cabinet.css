@@ -2478,7 +2478,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 #pane-team .team-revoke{font-size:12px;color:var(--muted);min-height:44px;padding:8px 0;background:none;box-shadow:none;white-space:normal;text-align:left}
 #pane-team .team-revoke:hover{color:var(--ink);text-decoration:underline}
 #pane-team .team-invite{margin:0;width:100%}
-#pane-team .team-invite .card-h{align-items:flex-start}
+#pane-team .team-invite .card-h{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start}
 #pane-team .team-invite .card-h .team-help{margin-top:5px}
 #pane-team .team-invite-footer{display:flex;align-items:center;gap:16px;margin-top:18px}
 #pane-team .team-invite-footer>.btn{flex:none;box-shadow:none;font-size:13px;min-height:44px}
