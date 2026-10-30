@@ -8,6 +8,7 @@ one transaction, then swaps the API. If the new API fails readiness, the
 database is downgraded back and the previous API is restored.
 """
 import argparse, fcntl, json, os, re, subprocess, sys, tempfile, time
+from contextlib import nullcontext
 from pathlib import Path
 
 ROOT=Path("/opt/center-messenger-github")
@@ -167,14 +168,16 @@ def backup():
         raise RuntimeError("Backup verification failed: "+validation.stderr.decode(errors="replace")[:500])
     return dest
 
-def main(preview):
+def main(preview, *, verified_source=None, compatibility=None, helper_root=None):
     if os.geteuid()!=0:
         raise RuntimeError("Root required")
     s=json.loads(STATE.read_text()) if STATE.exists() else {"enabled":False}
     if not preview and s.get("enabled") is not True:
         announce("DISABLED: local-build-state enabled is not true")
         return
-    sha=main_sha()
+    # Only the independently installed MAX guard calls this API. The normal
+    # CLI keeps its old behaviour until the operator installs the systemd guard.
+    sha=verified_source[1] if verified_source else main_sha()
     current=inspect("center-messenger-api-1")["Config"]["Image"]
     target="center-messenger:local-"+sha[:12]
     announce("MAIN",sha,"CURRENT",current,"TARGET",target)
@@ -185,7 +188,8 @@ def main(preview):
         # Validate before self-update too: otherwise a reset of main could
         # replace this protection with an older runner before it is checked.
         require_forward(s,current,sha)
-    self_update(sha)
+    if not verified_source:
+        self_update(sha)
     if current==target:
         s["last_deployed_sha"]=sha
         safe_state(s)
@@ -194,9 +198,11 @@ def main(preview):
     if sha==s.get("last_failed_sha"):
         announce("SKIP: SHA blocked after prior failed promotion")
         return
-    with tempfile.TemporaryDirectory(prefix="local-source-",dir=ROOT) as td:
-        src=Path(td)/"source"
-        run("gh","repo","clone",REPO,str(src),"--","--depth","1","--branch","main",timeout=300)
+    context = nullcontext(None) if verified_source else tempfile.TemporaryDirectory(prefix="local-source-",dir=ROOT)
+    with context as td:
+        src=Path(verified_source[0]) if verified_source else Path(td)/"source"
+        if not verified_source:
+            run("gh","repo","clone",REPO,str(src),"--","--depth","1","--branch","main",timeout=300)
         if run("git","-C",str(src),"rev-parse","HEAD")!=sha:
             announce("Main advanced while cloning; will retry")
             return
@@ -223,6 +229,10 @@ def main(preview):
         if runtime_revision!=head:
             raise RuntimeError("Image readiness revision does not match migration head: "+
                                runtime_revision+" != "+head)
+        if compatibility is not None:
+            # Trusted tests run in the new image, before backup/migrations/API
+            # replacement. They have no production secrets, DB or CRM network.
+            compatibility(target)
         if head!=db_rev:
             # The database must be an ancestor of the new head (no branches, no downgrades).
             history=alembic(target,"history","-r",db_rev+":head")
@@ -240,7 +250,7 @@ def main(preview):
         # rollback; a newer request is processed on the next service run.
         if not promotion_fresh(sha,old):
             return
-        sys.path.insert(0,str(ROOT))
+        sys.path.insert(0,str(helper_root or ROOT))
         from github_promote_vps import deploy_api_with_rollback
         migrated=False
         try:
