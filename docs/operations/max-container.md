@@ -153,11 +153,13 @@ curl -fsS http://127.0.0.1:8100/health/ready
 journalctl -u ramessenger-local-build.service -n 100 --no-pager -o cat
 ```
 
-В новом полном бэкапе должны быть оба runtime image, Compose, `.env`, новый
-control secret, connection master key, DB dump/roles и весь внешний guard.
-Старый full-backup helper, рассчитанный на API+DB, нельзя считать проверенным
-для трёх контейнеров без отдельной адаптации его остановки/восстановления и
-списка образов. Бэкап, созданный до перехода, остаётся копией прежнего режима.
+Обычный онлайн-бэкап трёх контейнеров и read-only аудит описаны в
+[отдельной инструкции](full-backup-split.md): `scripts/full_backup_split.py`.
+В копию входят оба runtime image, Compose, `.env`, control secret, connection
+master key, DB dump/roles и весь внешний guard. Старый helper для API+DB не
+использовать после разделения. Бэкап, созданный до перехода, остаётся копией
+прежнего режима. Подготовка нового скрипта не означает, что его бэкап уже
+создан на VPS: завершение подтверждает `BACKUP_COMPLETE` с проверкой восстановления.
 
 ## Телефония и будущие каналы
 

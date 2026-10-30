@@ -2,6 +2,7 @@
 
 Отдельный runtime MAX: [границы контейнера, подготовка перехода и откат](docs/operations/max-container.md).
 Общая история и PostgreSQL сохраняются; обычный API-деплой не обновляет MAX image.
+Обслуживание: [read-only аудит и обычный онлайн-бэкап API/MAX/DB](docs/operations/full-backup-split.md).
 
 Кабинет мессенджера для клиентов студии: единое окно с переписками,
 командой, настройками подключений CRM и ботами MAX.
@@ -114,14 +115,15 @@ npm run test:progress
 ## Репозиторий и развёртывание
 
 **Актуальный репозиторий:** `rastudiocmit-bot/ramessenger`, ветка `main`.
-**Целевой VPS:** `83.222.25.109`, приложение на `messenger.rastudio.org`.
+**Целевой VPS:** `83.222.25.109`, действующее приложение на `https://rachat.ru/`.
 
-GitHub Actions (`.github/workflows/verify.yml`) проверяет синтаксис Python,
-Docker Compose, сборку образа и граф миграций при push/PR.
-**Автоматическая публикация на VPS не включена.** Включать её только после
-аудита установленного на сервере контроллера, миграции доверия с прежнего
-`устаревший репозиторий (отключён)` и проверки резервного копирования.
-Прежний GitVerse workflow остаётся историческим и не управляет GitHub Actions.
+GitHub Actions не используем; публикации помечаются `[skip ci]`.
+Единственный владелец деплоя — `ramessenger-local-build.service` с существующим
+серверным таймером и внешней защитой MAX. Сборка, обязательные проверки,
+резервный дамп, readiness и откат выполняются на VPS. Обычный выпуск меняет
+только API; MAX закреплён отдельным image. Подробности — в
+[правилах серверного доступа](docs/operations/multi-agent-server-access.md) и
+[защите выпуска](docs/operations/max-release-protection.md).
 
 Не изменять работающие Nginx/PM2 и сайт `rastudio.org`; не выполнять
 `docker compose down --volumes` на сервере.
