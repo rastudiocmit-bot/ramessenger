@@ -29,6 +29,15 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    await page.locator('#notification-bell').click();assert.equal(await page.locator('.notification-row').count(),1);
    await page.getByRole('button',{name:'Настройки уведомлений',exact:true}).click();await page.waitForSelector('#notification-settings-dialog[open]');
    await page.waitForFunction(()=>document.querySelector('#notification-preferences-status').textContent.includes('Сохранено'));
+   // Only the inset body scrolls: neither the title nor saved-status footer can
+   // be dragged into the dialog's rounded corners by a native wheel gesture.
+   const before=await page.locator('#notification-settings-dialog').evaluate(d=>{const b=d.querySelector('.notification-settings-body'),h=d.querySelector('.dialog-heading'),f=d.querySelector('.notification-settings-footer'),r=d.getBoundingClientRect(),br=b.getBoundingClientRect();return {outerY:d.scrollTop,outerOverflow:getComputedStyle(d).overflowY,bodyScrollable:b.scrollHeight>b.clientHeight,bodyRight:br.right,dialogRight:r.right,bodyTop:br.top,headerBottom:h.getBoundingClientRect().bottom,bodyBottom:br.bottom,footerTop:f.getBoundingClientRect().top,headY:h.getBoundingClientRect().y,footY:f.getBoundingClientRect().y};});
+   assert.equal(before.outerOverflow,'hidden');assert.ok(before.bodyScrollable);assert.ok(before.dialogRight-before.bodyRight>=4);assert.ok(before.bodyTop>=before.headerBottom);assert.ok(before.bodyBottom<=before.footerTop+1);
+   await page.locator('#notification-settings-dialog .notification-settings-body').hover();await page.mouse.wheel(0,480);
+   await page.waitForFunction(()=>document.querySelector('#notification-settings-dialog .notification-settings-body').scrollTop>50);
+   const after=await page.locator('#notification-settings-dialog').evaluate(d=>({outerY:d.scrollTop,headY:d.querySelector('.dialog-heading').getBoundingClientRect().y,footY:d.querySelector('.notification-settings-footer').getBoundingClientRect().y}));
+   assert.equal(after.outerY,0);assert.equal(after.headY,before.headY);assert.equal(after.footY,before.footY);
+   await page.locator('#notification-settings-dialog .notification-settings-body').evaluate(b=>b.scrollTop=0);
    assert.equal(await page.locator('#notices-enabled').isChecked(),false);
    await page.locator('#chat-tone-client').selectOption('low');
    await page.waitForFunction(()=>document.querySelector('#notification-preferences-status').textContent==='Настройки сохранены в аккаунте.');
@@ -38,7 +47,7 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    await page.locator('#notification-service-preview').click();assert.match(await page.locator('#notification-service-example').innerText(),/Спокойный режим/);
    assert.equal(await page.locator('.notice-capsule').isVisible(),false);
    assert.ok(await page.locator('#notification-settings-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth+1));
-   if(process.env.CM_TEST_SCREENSHOTS){await page.locator('#notification-settings-dialog').evaluate(el=>el.scrollTop=0);await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`notification-settings-${width}-${theme}.png`)});}
+   if(process.env.CM_TEST_SCREENSHOTS){await page.locator('#notification-settings-dialog .notification-settings-body').evaluate(el=>el.scrollTop=0);await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`notification-settings-${width}-${theme}.png`)});}
    await page.locator('[data-close="notification-settings-dialog"]').click();
    phase='active';await page.reload();await page.waitForSelector('.chat-bubble');
    await page.locator('#notification-bell').click();await page.getByRole('button',{name:'Настройки уведомлений',exact:true}).click();

@@ -2,6 +2,7 @@
 // Employee access is edited in place. No CRM calls or changes to login sessions.
 window.CenterTeam = ({ $, state, api, node, show, roles, initials, confirm }) => {
   const keys = ["messages", "tasks", "overview", "security"];
+  const sectionIcons = {messages: "chats", tasks: "task", overview: "building", security: "shield"};
   const sections = {
     messages: ["Чаты", "Переписка с клиентами в MAX"],
     tasks: ["Задачи", "Поручения и напоминания. Нужен доступ к чатам"],
@@ -39,7 +40,10 @@ window.CenterTeam = ({ $, state, api, node, show, roles, initials, confirm }) =>
     keys.forEach(k => {
       const label = node("label", undefined, "team-section-option"), text = node("span"), input = node("input");
       input.type = "checkbox"; input.name = "sections"; input.value = k; input.id = `${prefix}-${k}`; input.checked = chosen.includes(k);
-      text.append(node("strong", sections[k][0]), node("small", sections[k][1])); label.append(input, text); box.append(label);
+      const icon = node("span", undefined, "team-section-icon"), track = node("span", undefined, "team-permission-track");
+      icon.append(window.CenterIcon(sectionIcons[k])); track.setAttribute("aria-hidden", "true");
+      text.className = "team-section-copy"; input.setAttribute("aria-label", sections[k][0]);
+      text.append(node("strong", sections[k][0]), node("small", sections[k][1])); label.append(input, icon, text, track); box.append(label);
       input.addEventListener("change", () => {
         if (k === "tasks" && input.checked) box.querySelector('[value="messages"]').checked = true;
         if (k === "messages" && !input.checked) box.querySelector('[value="tasks"]').checked = false;
@@ -78,13 +82,22 @@ window.CenterTeam = ({ $, state, api, node, show, roles, initials, confirm }) =>
     if (!await releaseActive()) return;
     active = e; show(e.panel); e.toggle.setAttribute("aria-expanded", "true"); e.row.classList.add("is-open");
   }
+  function paintSummary(e) {
+    e.short.replaceChildren();
+    summary(e.member).split(" · ").forEach(title => {
+      const chip = node("span", undefined, "team-access-chip");
+      const key = keys.find(k => sections[k][0] === title);
+      chip.append(window.CenterIcon(sectionIcons[key] || (title === "Клиенты" ? "people" : title === "Сводка" ? "chart" : "shield")), node("span", title));
+      e.short.append(chip);
+    });
+  }
   function build(member, i) {
     const e = {member, busy: false};
-    e.row = node("article", undefined, "team-member card"); e.row.dataset.member = member.user_id;
+    e.row = node("article", undefined, "team-member card"); e.row.dataset.member = member.user_id; e.row.dataset.role = member.role;
     const header = node("div", undefined, "mrow member-row"), avatar = node("span", initials(member.display_name), "ava me"), info = node("div", undefined, "mrow-main");
     avatar.setAttribute("aria-hidden", "true");
     const name = node("strong", member.display_name); if (member.user_id === state.user?.id) name.append(node("span", "Вы", "team-self"));
-    e.short = node("small", summary(member), "team-access-summary"); info.append(name, node("small", member.email), e.short);
+    e.short = node("div", undefined, "team-access-summary"); paintSummary(e); info.append(name, node("small", member.email), e.short);
     e.pill = node("span", roles[member.role] || "Сотрудник", `rolepill ${member.role === "branch_manager" ? "branch" : member.role}`);
     e.toggle = button("Доступы", "team-access-toggle"); const arrow = window.CenterIcon("down"); arrow.classList.add("team-chevron"); e.toggle.append(arrow);
     e.toggle.setAttribute("aria-label", `Доступы: ${member.display_name}`); e.toggle.setAttribute("aria-expanded", "false");
@@ -101,7 +114,9 @@ window.CenterTeam = ({ $, state, api, node, show, roles, initials, confirm }) =>
     right.append(node("legend", "Доступные разделы")); e.checks = node("div", undefined, "team-section-checks"); e.full = node("p", "Администратору доступны все разделы центра. Ограничить отдельные разделы можно, выбрав другую роль.", "team-full-access"); right.append(e.checks, e.full); grid.append(left, right);
     e.preview = node("p", "", "team-effective"); e.status = node("p", "", "team-save-status"); e.status.setAttribute("role", "status"); e.status.setAttribute("aria-live", "polite");
     const actions = node("div", undefined, "team-save-actions"), saves = node("div", undefined, "btn-row"); e.save = button("Сохранить", "btn primary"); e.save.type = "submit"; e.cancel = button("Отмена", "btn sec"); e.remove = button("Отозвать доступ", "text-button team-revoke"); saves.append(e.save, e.cancel); actions.append(saves, e.remove);
-    e.form.append(grid, e.preview, e.status, actions); e.panel.append(e.form); fill(e);
+    const footer = node("div", undefined, "team-editor-footer"), copy = node("div", undefined, "team-footer-copy");
+    copy.append(e.preview, e.status); footer.append(copy, actions);
+    e.form.append(grid, footer); e.panel.append(e.form); fill(e);
     e.select.addEventListener("change", () => { line(e.status, "Есть несохранённые изменения"); controls(e); });
     e.cancel.addEventListener("click", () => { fill(e); close(e); e.toggle.focus(); });
     e.form.addEventListener("submit", async event => {
@@ -112,7 +127,7 @@ window.CenterTeam = ({ $, state, api, node, show, roles, initials, confirm }) =>
       try {
         await api(`/workspaces/${workspace}/members/${member.user_id}/access`, {method: "POST", data: value, timeoutMs: 20000});
         if (!valid(token)) return;
-        Object.assign(member, value); e.short.textContent = summary(member); e.pill.textContent = roles[member.role]; e.pill.className = `rolepill ${member.role === "branch_manager" ? "branch" : member.role}`;
+        Object.assign(member, value); e.row.dataset.role = member.role; paintSummary(e); e.pill.textContent = roles[member.role]; e.pill.className = `rolepill ${member.role === "branch_manager" ? "branch" : member.role}`;
         line(e.status, "Доступ сохранён");
       } catch (error) { if (valid(token) && error.name !== "AbortError") line(e.status, error.message, true); }
       finally { if (valid(token)) { e.busy = false; [...e.form.querySelectorAll("input,select")].forEach(c => c.disabled = false); controls(e); } }
