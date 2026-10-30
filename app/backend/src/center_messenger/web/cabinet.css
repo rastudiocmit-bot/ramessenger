@@ -2307,8 +2307,10 @@ body:has(#cabinet[hidden]){overflow:auto}
 #pane-clients .directory-toolbar{display:grid;grid-template-columns:minmax(0,2fr) repeat(2,minmax(0,1fr));gap:12px;padding:16px var(--cabinet-padding);border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:var(--card-soft)}
 #pane-clients .directory-toolbar .fld{min-width:0;width:100%;margin:0}
 #pane-clients .directory-toolbar :is(input,select){width:100%;min-width:0;max-width:none;min-height:44px;border-radius:10px;background:var(--surface-2);font-size:13px}
-#pane-clients .directory-layout{width:100%;min-width:0}
-#pane-clients .directory-list-panel{margin:0;width:100%;height:auto;overflow:hidden}
+#pane-clients .directory-layout{width:100%;min-width:0;height:auto}
+/* The page owns scrolling. Clip the card corners without creating a nested
+   scroll container that can trap wheel/touch gestures at its boundary. */
+#pane-clients .directory-list-panel{margin:0;width:100%;height:auto;overflow:clip;overscroll-behavior:auto}
 #pane-clients .directory-layout.has-selection .directory-list-panel{display:block}
 #directory-contact-dialog .directory-detail{display:block;height:auto}
 #directory-contact-dialog .detail-back{display:none}
