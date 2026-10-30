@@ -69,7 +69,7 @@
   }
   function clearPrivateViews() {
     notices?.reset();
-    $("#members-list").replaceChildren(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
+    team.reset(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
     cabinet.reset(); cardLoader.reset();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
     ["#user-name", "#user-email", "#user-avatar", "#workspace-role", "#workspace-timezone"].forEach(selector => { $(selector).textContent = ""; });
@@ -144,7 +144,7 @@
     const previousWorkspace = state.workspace?.id;
     state.epoch += 1; state.user = payload.user; state.csrf = payload.csrf; state.workspaces = payload.workspaces; state.chatProtocol = payload.chat_protocol || 1;
     state.workspace = state.workspaces.find(item => item.id === state.workspace?.id) || state.workspaces[0] || null;
-    if (previousWorkspace !== state.workspace?.id) { resetAlfa(); resetAlfaMax(); cardLoader.reset(); directory.reset(); chat.reset(); }
+    if (previousWorkspace !== state.workspace?.id) { team.reset(); resetAlfa(); resetAlfaMax(); cardLoader.reset(); directory.reset(); chat.reset(); }
   }
   async function enter(payload) {
     setSession(payload);
@@ -218,85 +218,10 @@
     if (state.pane === "summary") await cabinet.summary();
     if (state.pane === "clients") await directory.enter();
     if (["profile", "overview"].includes(state.pane) && sections.messages) await cabinet.metadata();
-    if (state.pane === "team") await loadMembers();
+    if (state.pane === "team") await team.load();
     if (state.pane === "security") await loadSessions();
   }
-  const sectionMeta = {
-    overview: { icon: "◈", title: "Организация", hint: "Название центра и общая информация" },
-    messages: { icon: "▤", title: "Сообщения", hint: "Переписка с клиентами в MAX" },
-    tasks: { icon: "☑", title: "Задачи", hint: "Раздел «Задачи» в меню. Работает вместе с «Сообщениями»" },
-    security: { icon: "◇", title: "Безопасность", hint: "Пароль и сессии сотрудника" },
-  };
-  let sectionsMember = null;
-  function openMemberSections(member) {
-    sectionsMember = member;
-    $("#member-sections-avatar").textContent = initials(member.display_name);
-    $("#member-sections-name").textContent = member.display_name;
-    $("#member-sections-role").textContent = `${roles[member.role] || "Сотрудник"} · ${member.email}`;
-    const box = $("#member-sections-checks"); box.replaceChildren();
-    ["overview", "messages", "tasks", "security"].forEach(key => {
-      const meta = sectionMeta[key];
-      const row = node("div", undefined, "section-option");
-      const icon = node("span", meta.icon, "section-option-icon");
-      const text = node("div", undefined, "section-option-text");
-      text.append(node("strong", meta.title), node("small", meta.hint));
-      const label = node("label", undefined, "switch");
-      const input = node("input"); input.type = "checkbox"; input.value = key;
-      input.checked = (member.sections && member.sections.length ? member.sections : ["overview", "security"]).includes(key);
-      label.append(input, node("span", undefined, "switch-slider"));
-      row.append(icon, text, label);
-      box.append(row);
-    });
-    notice("", $("#member-sections-error"));
-    $("#member-sections-dialog").showModal();
-  }
-  async function setMemberRole(member, role) {
-    const workspace = state.workspace;
-    await busy($("#members-list"), async () => {
-      await api(`/workspaces/${workspace.id}/members/${member.user_id}/role`, { method: "POST", data: { role } });
-      feedback("Роль сотрудника обновлена."); await loadMembers();
-    });
-  }
-  async function loadMembers() {
-    const workspace = state.workspace;
-    const payload = await api(`/workspaces/${workspace.id}/members`);
-    if (workspace.id !== state.workspace?.id) return;
-    const list = $("#members-list"); list.replaceChildren();
-    if ($("#team-count")) $("#team-count").textContent = `${payload.members.length} человек в центре`;
-    payload.members.forEach(member => {
-      const row = node("div", undefined, "mrow member-row");
-      const avatar = node("span", initials(member.display_name), "ava me");
-      const info = node("span", undefined, "mrow-main"); info.append(node("strong", member.display_name), node("small", member.email));
-      const pill = node("span", roles[member.role], `rolepill ${member.role === "branch_manager" ? "branch" : member.role}`);
-      row.append(avatar, info, pill);
-      const canManage = member.user_id !== state.user.id && member.role !== "owner" && (workspace.role === "owner" || member.role !== "admin");
-      if (canManage) {
-        const gear = node("button", undefined, "iconbtn plain"); gear.type = "button"; gear.setAttribute("aria-label", `Действия с сотрудником: ${member.display_name}`); gear.append(window.CenterIcon("cog"));
-        gear.addEventListener("click", () => openMemberOptions(member)); row.append(gear);
-      } else row.append(node("span", undefined, "member-action-space"));
-      list.append(row);
-    });
-    show($("#team-empty"), payload.members.length === 0);
-  }
-  function openMemberOptions(member) {
-    const workspace = state.workspace, dialog = $("#member-options-dialog"), body = $("#member-options-body");
-    $("#member-options-name").textContent = member.display_name; body.replaceChildren();
-    const label = node("label", "Роль сотрудника", "fld"), select = node("select"); select.setAttribute("aria-label", "Роль сотрудника");
-    const allowed = workspace.role === "owner" ? ["admin", "branch_manager", "operator", "observer"] : ["branch_manager", "operator", "observer"];
-    for (const role of allowed) select.append(new Option(roles[role], role)); select.value = member.role; label.append(select);
-    const save = node("button", "Сохранить роль", "btn"); save.type = "button";
-    save.addEventListener("click", () => busy(dialog, async () => { await setMemberRole(member, select.value); dialog.close(); }));
-    body.append(label, save);
-    if (!["owner", "admin"].includes(member.role)) {
-      const sections = node("button", "Доступные разделы", "btn sec"); sections.type = "button";
-      sections.addEventListener("click", () => { dialog.close(); openMemberSections(member); }); body.append(sections);
-    }
-    const remove = node("button", "Отозвать доступ", "btn sec danger-text"); remove.type = "button";
-    remove.addEventListener("click", async () => {
-      if (!await confirm("Отозвать доступ?", `${member.display_name} потеряет доступ к этому центру.`, "Отозвать доступ")) return;
-      await busy(dialog, async () => { await api(`/workspaces/${workspace.id}/members/${member.user_id}/remove`, { method: "POST" }); dialog.close(); feedback("Доступ сотрудника отозван."); await loadMembers(); });
-    }); body.append(remove); dialog.showModal();
-  }
+  const team = window.CenterTeam({ $, state, api, node, show, roles, initials, confirm });
   async function loadSessions() {
     const payload = await api("/auth/sessions");
     const list = $("#sessions-list"); list.replaceChildren();
@@ -387,7 +312,7 @@
     cabinet.navigate(button.dataset.pane).catch(error => { if (error.name !== "AbortError") feedback(error.message, true); });
   });
   $("#workspace-select").addEventListener("change", async event => {
-    state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
+    state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; team.reset(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
     try { await renderPane(state.pane); } catch (error) { if (error.name !== "AbortError") feedback(error.message, true); }
   });
   $("#workspace-form").addEventListener("submit", event => {
@@ -407,37 +332,9 @@
     if (!await confirm("Выйти на всех устройствах?", "Все текущие сессии будут завершены, включая эту.", "Выйти везде")) return;
     try { await api("/auth/logout-all", { method: "POST" }); clearSession("Все сессии завершены."); } catch (error) { if (error.name !== "AbortError") feedback(error.message, true); }
   });
-  $("#members-refresh").addEventListener("click", () => loadMembers().catch(error => { if (error.name !== "AbortError") feedback(error.message, true); }));
-  $("#member-sections-form").addEventListener("submit", event => {
-    event.preventDefault(); const form = event.currentTarget, member = sectionsMember, workspace = state.workspace;
-    if (!member) return;
-    const selected = [...$("#member-sections-checks").querySelectorAll("input")].filter(input => input.checked).map(input => input.value);
-    busy(form, async () => {
-      await api(`/workspaces/${workspace.id}/members/${member.user_id}/sections`, { method: "POST", data: { sections: selected } });
-      $("#member-sections-dialog").close(); feedback("Права сотрудника сохранены."); await loadMembers();
-    }, $("#member-sections-error"));
-  });
   $("#sessions-refresh").addEventListener("click", () => loadSessions().catch(error => { if (error.name !== "AbortError") feedback(error.message, true); }));
   $("#access-refresh").addEventListener("click", () => refreshSession().catch(error => { if (error.name !== "AbortError") feedback(error.message, true); }));
-  $("#invite-open").addEventListener("click", () => {
-    $("#create-invite-form").reset(); show($("#create-invite-form")); show($("#invite-result"), false); notice("", $("#invite-error"));
-    $("#admin-role-option").hidden = state.workspace.role !== "owner";
-    $("#invite-url").value = ""; $("#invitation-dialog").showModal();
-  });
-  $("#create-invite-form").addEventListener("submit", event => {
-    event.preventDefault(); const form = event.currentTarget;
-    busy(form, async () => {
-      const payload = await api(`/workspaces/${state.workspace.id}/invitations`, { method: "POST", data: { email: form.elements.email.value, role: form.elements.role.value } });
-      $("#invite-url").value = payload.url; show(form, false); show($("#invite-result"));
-    }, $("#invite-error"));
-  });
-  $("#invite-copy").addEventListener("click", async () => {
-    const input = $("#invite-url");
-    try { await navigator.clipboard.writeText(input.value); feedback("Ссылка скопирована."); }
-    catch (_) { input.focus(); input.select(); feedback("Ссылка выделена. Скопируйте её через меню или Ctrl+C."); }
-  });
   document.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => document.getElementById(button.dataset.close).close()));
-  $("#invitation-dialog").addEventListener("close", () => { $("#invite-url").value = ""; });
   $("#confirm-cancel").addEventListener("click", () => $("#confirm-dialog").close("no"));
   $("#confirm-yes").addEventListener("click", () => $("#confirm-dialog").close("yes"));
 

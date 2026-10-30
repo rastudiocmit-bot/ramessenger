@@ -2433,3 +2433,75 @@ body:has(#cabinet[hidden]){overflow:auto}
  #directory-contact-dialog .directory-lesson{grid-template-columns:minmax(0,1fr)}
  #directory-contact-dialog .directory-totals dd{font-size:17px}
 }
+
+/* Employee roles and grants remain visually attached to their employee. */
+#pane-team .team-toolbar{display:flex;align-items:center;justify-content:space-between;gap:18px}
+#pane-team .team-toolbar>.btn-row{flex:none;margin:0;gap:10px}
+#pane-team .team-toolbar .primary{min-height:44px;font-size:13px;box-shadow:none}
+#pane-team .team-help{font-size:12px;line-height:1.7;color:var(--muted);margin:0;overflow-wrap:anywhere}
+#pane-team .members-list{display:grid;gap:12px}
+#pane-team .team-member{width:100%;margin:0;border-radius:14px;overflow:clip}
+#pane-team .team-member .member-row{display:grid;grid-template-columns:42px minmax(0,1fr) auto auto;align-items:center;gap:14px;padding:16px var(--cabinet-padding);border:0}
+#pane-team .team-member .mrow-main :is(strong,small){white-space:normal;overflow:visible;overflow-wrap:anywhere}
+#pane-team .team-member .mrow-main strong{font-size:14px;line-height:1.5}
+#pane-team .team-member .mrow-main small{font-size:12px;line-height:1.6;margin-top:3px}
+#pane-team .team-member .mrow-main .team-access-summary{font-size:11px;color:var(--primary-ink);margin-top:5px}
+#pane-team .team-self{display:inline-block;margin-left:8px;font-size:10px;line-height:1.5;font-weight:500;color:var(--muted);letter-spacing:0}
+#pane-team .team-access-toggle{display:inline-flex;align-items:center;justify-content:center;gap:10px;min-height:44px;padding:6px 2px 6px 14px;background:none;border:0;border-radius:0;box-shadow:none;color:var(--primary-ink);font-size:12px;font-weight:600;white-space:nowrap}
+#pane-team .team-access-toggle:hover{color:var(--ink)}
+#pane-team .team-access-toggle:focus-visible,#pane-team .team-revoke:focus-visible{outline:2px solid var(--primary);outline-offset:3px}
+#pane-team .team-chevron{display:inline-block;width:16px;height:16px;flex:none;transition:transform .18s ease}
+#pane-team .team-access-toggle[aria-expanded=true] .team-chevron{transform:rotate(180deg)}
+#pane-team .team-member.is-open>.member-row{background:var(--surface-2)}
+#pane-team .team-access-panel{border-top:1px solid var(--line-soft);padding:20px var(--cabinet-padding)}
+#pane-team .team-access-panel>p+p{margin-top:8px}
+#pane-team .team-access-grid{display:grid;grid-template-columns:minmax(200px,.85fr) minmax(0,1.45fr);gap:28px;align-items:start}
+#pane-team .team-access-grid>*{min-width:0}
+#pane-team .team-access-grid .fld{font-size:12px;margin:0 0 12px}
+#pane-team .team-access-grid :is(input[type=email],select){width:100%;min-width:0;max-width:none;min-height:44px;border-radius:10px;border-color:var(--line);font-size:13px;background:var(--surface-2)}
+#pane-team .team-section-list{border:0;padding:0;margin:0;min-width:0}
+#pane-team .team-section-list legend{padding:0;margin:0 0 10px;font-size:12px;font-weight:600;color:var(--ink)}
+#pane-team .team-section-checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+#pane-team .team-section-option{display:flex;flex-direction:row;align-items:flex-start;gap:10px;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--surface);cursor:pointer;margin:0;min-width:0}
+#pane-team .team-section-option:has(input:checked){border-color:color-mix(in srgb,var(--primary) 32%,var(--line));background:var(--primary-tint)}
+#pane-team .team-section-option input{flex:none;width:17px;height:17px;margin:2px 0 0;accent-color:var(--primary)}
+#pane-team .team-section-option>span{min-width:0}
+#pane-team .team-section-option strong{display:block;font-size:12px;font-weight:600;line-height:1.6}
+#pane-team .team-section-option small{display:block;font-size:10.5px;line-height:1.6;margin-top:2px;color:var(--muted);overflow-wrap:anywhere}
+#pane-team .team-effective,#pane-team .team-full-access{border:1px solid var(--line);border-radius:10px;background:var(--surface-2);padding:12px 14px;font-size:12px;line-height:1.7;margin:18px 0 0;overflow-wrap:anywhere}
+#pane-team .team-full-access{margin:0;background:var(--primary-tint);color:var(--primary-ink)}
+#pane-team .team-save-status{margin:12px 0 0;font-size:12px;line-height:1.7;color:var(--primary-ink);overflow-wrap:anywhere}
+#pane-team .team-save-status.is-error{padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--primary-tint);color:var(--ink)}
+#pane-team .team-save-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:18px}
+#pane-team .team-save-actions .btn-row{margin:0;gap:8px}
+#pane-team .team-save-actions .btn{min-height:44px;font-size:12px;box-shadow:none}
+#pane-team .team-revoke{font-size:12px;color:var(--muted);min-height:44px;padding:8px 0;background:none;box-shadow:none;white-space:normal;text-align:left}
+#pane-team .team-revoke:hover{color:var(--ink);text-decoration:underline}
+#pane-team .team-invite{margin:0;width:100%}
+#pane-team .team-invite .card-h{align-items:flex-start}
+#pane-team .team-invite .card-h .team-help{margin-top:5px}
+#pane-team .team-invite-footer{display:flex;align-items:center;gap:16px;margin-top:18px}
+#pane-team .team-invite-footer>.btn{flex:none;box-shadow:none;font-size:13px;min-height:44px}
+#pane-team .team-result-title{font-size:16px;font-weight:600;margin:0 0 6px}
+#pane-team #invite-result>.fld{margin-top:16px}
+#pane-team .team-footnote{font-size:11px;line-height:1.7;color:var(--muted);margin:0}
+@media(max-width:1000px){#pane-team .team-access-grid{grid-template-columns:minmax(0,1fr);gap:18px}}
+@media(max-width:719px){
+ #pane-team .team-toolbar{align-items:stretch;flex-direction:column;gap:10px}
+ #pane-team .team-toolbar>.btn-row{justify-content:space-between}
+ #pane-team .team-member .member-row{grid-template-columns:38px minmax(0,1fr) auto;gap:5px 10px;padding-top:14px;padding-bottom:14px}
+ #pane-team .team-member .member-row>.ava{grid-column:1;grid-row:1;align-self:start;margin-top:2px}
+ #pane-team .team-member .mrow-main{grid-column:2;grid-row:1}
+ #pane-team .team-member .mrow-main strong{font-size:13px}
+ #pane-team .team-member .mrow-main small{font-size:11px}
+ #pane-team .team-member .member-row>.rolepill{grid-column:2;grid-row:2;justify-self:start;font-size:10px;white-space:normal}
+ #pane-team .team-member .team-access-toggle{grid-column:3;grid-row:1/span 2;padding-left:0;gap:5px;font-size:11px;align-self:start}
+ #pane-team .team-access-panel{padding-top:16px;padding-bottom:16px}
+ #pane-team .team-access-grid :is(input[type=email],select){font-size:16px}
+ #pane-team .team-section-checks{grid-template-columns:minmax(0,1fr)}
+ #pane-team .team-section-option{padding:11px 12px}
+ #pane-team .team-save-actions,#pane-team .team-invite-footer{align-items:stretch;flex-direction:column;gap:8px}
+ #pane-team .team-save-actions .btn-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+ #pane-team .team-invite-footer>.btn{align-self:flex-start}
+}
+@media(prefers-reduced-motion:reduce){#pane-team .team-chevron{transition:none}}

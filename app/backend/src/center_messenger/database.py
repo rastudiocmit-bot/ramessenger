@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0028_card_loader_snapshots"
+SCHEMA_REVISION = "0029_invitation_sections"
 
 
 def log_database_error(logger, error, *, operation):

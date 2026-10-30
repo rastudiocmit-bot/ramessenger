@@ -211,6 +211,8 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     else if (/\/(directory|chat-contacts)\/sync$/.test(p)) payload = { configured: true, state: 'idle', last_success_at: '2026-10-24T11:00:00Z', auto_refresh: false, interval_minutes: 30, stats: {} };
     else if (/\/(directory|chat-contacts)$/.test(p)) payload = { contacts, total: contacts.length, branches, snapshot: 'run-1', page: 0, has_more: false };
     else if (p.endsWith('/members')) payload = { members };
+    else if (/\/members\/.*\/access$/.test(p)) { Object.assign(members.find(m => p.includes('/' + m.user_id + '/')), entry.body); payload = {}; }
+    else if (p.endsWith('/invitations')) payload = {url:'https://cabinet.example.test/#invite=synthetic-test-only',expires_in_hours:48};
     else if (/\/members\/.*\/sections$/.test(p)) { members.find(m => p.includes('/' + m.user_id + '/')).sections = entry.body.sections; payload = {}; }
     else if (/\/members\/.*\/role$/.test(p)) { members.find(m => p.includes('/' + m.user_id + '/')).role = entry.body.role; payload = {}; }
     else if (p.endsWith('/integrations/max')) payload = { vault_ready: true, channels: [{ id: 'bot', name: 'MAX-бот', kind: 'max_bot', bot_name: '@center_bot', enabled: true, verified: true, can_send: true }] };

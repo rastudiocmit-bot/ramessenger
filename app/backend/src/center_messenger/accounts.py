@@ -16,6 +16,7 @@ from center_messenger.auth_security import (
     InvitationInput,
     LoginInput,
     MEMBER_SECTIONS,
+    MemberAccessInput,
     MemberRoleInput,
     MemberSectionsInput,
     PasswordInput,
@@ -474,8 +475,8 @@ class Accounts:
             )
             db.execute(
                 text(
-                    "INSERT INTO auth_invitations(id, workspace_id, email, role, token_hash, "
-                    "issued_by, expires_at) VALUES (:id, :w, :e, :r, :t, :by, "
+                    "INSERT INTO auth_invitations(id, workspace_id, email, role, sections, token_hash, "
+                    "issued_by, expires_at) VALUES (:id, :w, :e, :r, :s, :t, :by, "
                     "now() + interval '48 hours')"
                 ),
                 {
@@ -483,6 +484,7 @@ class Accounts:
                     "w": workspace_id,
                     "e": email,
                     "r": model.role,
+                    "s": model.sections,
                     "t": digest(raw),
                     "by": identity.user_id,
                 },
@@ -504,7 +506,7 @@ class Accounts:
         row = (
             db.execute(
                 text(
-                    "SELECT id, workspace_id, email, role, issued_by FROM auth_invitations "
+                    "SELECT id, workspace_id, email, role, sections, issued_by FROM auth_invitations "
                     "WHERE token_hash=:t AND used_at IS NULL AND revoked_at IS NULL "
                     "AND expires_at > now()" + (" FOR UPDATE" if lock else "")
                 ),
@@ -594,13 +596,13 @@ class Accounts:
                     raise AuthError(401, "Войдите снова.")
             db.execute(
                 text(
-                    "INSERT INTO workspace_memberships(workspace_id, user_id, role) "
-                    "VALUES (:w, :u, :r) ON CONFLICT (workspace_id, user_id) DO UPDATE "
-                    "SET active=true, role=EXCLUDED.role "
+                    "INSERT INTO workspace_memberships(workspace_id, user_id, role, sections) "
+                    "VALUES (:w, :u, :r, :s) ON CONFLICT (workspace_id, user_id) DO UPDATE "
+                    "SET active=true, role=EXCLUDED.role, sections=EXCLUDED.sections "
                     "WHERE NOT workspace_memberships.active "
                     "AND workspace_memberships.role <> 'owner'"
                 ),
-                {"w": current["workspace_id"], "u": user_id, "r": current["role"]},
+                {"w": current["workspace_id"], "u": user_id, "r": current["role"], "s": current["sections"]},
             )
             # An invitation must never elevate an already participating user's role.
             db.execute(
@@ -615,6 +617,29 @@ class Accounts:
                 subject_id=current["id"],
             )
             return self._issue(db, user, device)
+
+    def set_member_access(self, identity: Identity, workspace_id: UUID, user_id: UUID, model: MemberAccessInput):
+        """Publish role and section grants in one authorized transaction."""
+        with self.transaction(identity) as db:
+            actor = self._workspace(db, identity, workspace_id, manage=True)
+            target = db.execute(
+                text("SELECT role FROM workspace_memberships "
+                     "WHERE workspace_id=:w AND user_id=:u AND active FOR UPDATE"),
+                {"w": workspace_id, "u": user_id},
+            ).scalar_one_or_none()
+            if target is None:
+                raise AuthError(404, "Сотрудник недоступен.")
+            if target == "owner" or user_id == identity.user_id:
+                raise AuthError(403, "Собственный доступ и права владельца здесь не изменяются.")
+            if (target == "admin" or model.role == "admin") and actor["role"] != "owner":
+                raise AuthError(403, "Права администратора может менять только владелец.")
+            db.execute(
+                text("UPDATE workspace_memberships SET role=:r, sections=:s "
+                     "WHERE workspace_id=:w AND user_id=:u AND active"),
+                {"r": model.role, "s": model.sections, "w": workspace_id, "u": user_id},
+            )
+            audit(db, "member_access_updated", user_id=identity.user_id,
+                  workspace_id=workspace_id, subject_id=user_id)
 
     def set_member_role(self, identity: Identity, workspace_id: UUID, user_id: UUID, model: MemberRoleInput):
         with self.transaction(identity) as db:

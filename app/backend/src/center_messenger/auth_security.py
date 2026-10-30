@@ -12,7 +12,7 @@ from uuid import UUID
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 from argon2.low_level import Type
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator, model_validator
 
 
 class AuthError(Exception):
@@ -184,16 +184,22 @@ class MemberRoleInput(InputModel):
         return value
 
 
-class InvitationInput(InputModel):
-    email: EmailStr
-    role: str
+class MemberAccessInput(MemberRoleInput, MemberSectionsInput):
+    @model_validator(mode="after")
+    def effective_access(self):
+        if self.role == "admin":
+            self.sections = []  # Admin has full access, never a misleading partial grant.
+        elif not self.sections:
+            raise ValueError("Select at least one section")
+        elif "tasks" in self.sections and "messages" not in self.sections:
+            raise ValueError("Tasks require messages")
+        return self
 
-    @field_validator("role")
-    @classmethod
-    def allowed_role(cls, value):
-        if value not in {"admin", "branch_manager", "operator", "observer"}:
-            raise ValueError("Invalid invitation role")
-        return value
+
+class InvitationInput(MemberAccessInput):
+    email: EmailStr
+    # Old invitation clients retain their previous effective default.
+    sections: list[str] = Field(default_factory=lambda: ["overview", "security"], max_length=len(MEMBER_SECTIONS))
 
 
 class AcceptInvitationInput(InputModel):
