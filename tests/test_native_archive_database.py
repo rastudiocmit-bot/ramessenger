@@ -30,8 +30,9 @@ class ArchiveDatabaseTests(unittest.TestCase):
             self.project(self.row(record, branch=branch, customer=8, body='Original incoming'), branch=branch)
         self.db.execute(text("UPDATE alfa_customers SET status='archive',phones='[]'::jsonb "
             "WHERE workspace_id=:w AND run_id=:r AND external_id=7"), {'w':self.workspace,'r':self.run})
-        self.db.execute(text("UPDATE messages SET payload=payload||'{\"crm_recipient_stale\":true}'::jsonb "
-            "WHERE workspace_id=:w AND payload->>'customer_id'='7'"), {'w':self.workspace})
+        self.db.execute(text("UPDATE messages SET payload=payload||CAST(:payload AS jsonb) "
+            "WHERE workspace_id=:w AND payload->>'customer_id'='7'"),
+            {'w':self.workspace,'payload':json.dumps({'crm_recipient_stale':True})})
         old = self.db.execute(text("SELECT id FROM conversations WHERE workspace_id=:w AND contact_id=:c"),
             {'w':self.workspace,'c':self.contact}).scalar_one()
         new = self.db.execute(text("SELECT id FROM conversations WHERE workspace_id=:w AND contact_id=:c"),
@@ -41,8 +42,9 @@ class ArchiveDatabaseTests(unittest.TestCase):
             "state,last_error_code) VALUES(:w,:id,:c,:request,'{}',:hash,'failed','recipient_missing')"),
             {'w':self.workspace,'id':command,'c':old,'request':str(uuid4()),'hash':'a'*64})
         self.db.execute(text("INSERT INTO messages(workspace_id,id,conversation_id,send_command_id,direction,actor_type,text,payload,occurred_at) "
-            "VALUES(:w,:id,:c,:command,'out','human','Saved failed reply','{\"failed\":true}',:at)"),
-            {'w':self.workspace,'id':outgoing,'c':old,'command':command,'at':self.at+timedelta(minutes=1)})
+            "VALUES(:w,:id,:c,:command,'out','human','Saved failed reply',CAST(:payload AS jsonb),:at)"),
+            {'w':self.workspace,'id':outgoing,'c':old,'command':command,
+             'payload':json.dumps({'failed':True}),'at':self.at+timedelta(minutes=1)})
         refresh_unread(self.db,self.workspace,old)
         return old,new,current_contact,command
 

@@ -5,12 +5,35 @@ import sys
 import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
+import json
+
+from sqlalchemy.dialects import postgresql
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'app/backend/src'))
 from center_messenger import native_archive_relink as archive
 
 
 class ArchiveRelinkTests(unittest.TestCase):
+    def test_database_fixture_binds_json_without_interpreting_true_as_a_sql_parameter(self):
+        from test_native_archive_database import ArchiveDatabaseTests
+        fixture = ArchiveDatabaseTests()
+        fixture.workspace, fixture.run, fixture.contact, fixture.channel = [uuid4() for _ in range(4)]
+        fixture.at = datetime.now(UTC)
+        fixture.db = Mock()
+        fixture.db.execute.return_value.scalar_one.side_effect = [uuid4(), uuid4()]
+        fixture.add_customer = fixture.customer_phone = fixture.project = Mock()
+        with patch('test_native_archive_database.refresh_unread'):
+            fixture.archived_source_fixture()
+        json_values = []
+        for call in fixture.db.execute.call_args_list:
+            statement, values = call.args
+            compiled = statement.compile(dialect=postgresql.dialect())
+            compiled.construct_params(params=values)
+            self.assertNotIn('true', compiled.params)
+            if 'payload' in values:
+                json_values.append(json.loads(values['payload']))
+        self.assertEqual(json_values, [{'crm_recipient_stale': True}, {'failed': True}])
+
     def cards(self):
         old = {'customer_id':7,'contact_id':uuid4(),'global_id_verified':True,'status':'archive',
                'primary_phone':None,'available':True,'empty_archive':True}
