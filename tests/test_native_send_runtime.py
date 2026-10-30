@@ -176,14 +176,25 @@ class InlineSendTests(unittest.TestCase):
         self.assertEqual(seen[:2], ['crm_rejected', 'cookies'])
 
     def test_post_script_actually_aborts_a_stalled_fetch(self):
-        import subprocess
+        from playwright.sync_api import sync_playwright
         self.send()
         script = self.page.evaluate.call_args.args[0]
-        # Execute the production JS with a synthetic fetch; no network request.
-        program = ("global.fetch=(url,options)=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('aborted'))));"
-                   "const send=" + script + ";send({url:'https://example.test',fields:[],timeoutMs:5}).then(()=>process.exit(1),e=>{if(e.message!=='aborted')process.exit(2)});")
-        result = subprocess.run(['node', '-e', program], timeout=3, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        # Execute the exact production JS in the Chromium shipped with the
+        # application. A synthetic fetch never touches the network. The test
+        # used to depend on a system `node`, absent from the production image.
+        program = ("async () => {const originalFetch=globalThis.fetch;let timer;"
+                   "globalThis.fetch=(url,options)=>new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('aborted'))));"
+                   "try {const send=" + script + ";return await Promise.race(["
+                   "send({url:'https://example.test',fields:[],timeoutMs:5}).then(()=> 'unexpected_success',e=>e.message),"
+                   "new Promise(resolve=>{timer=setTimeout(()=>resolve('test_deadline'),1000)})]);"
+                   "} finally {clearTimeout(timer);globalThis.fetch=originalFetch;}}")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                self.assertEqual(page.evaluate(program), 'aborted')
+            finally:
+                browser.close()
 
     def test_supervised_child_forwards_expected_dialog_peer(self):
         from center_messenger import native_send_runtime
