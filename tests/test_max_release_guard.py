@@ -1,8 +1,10 @@
 """Release fence regressions. Only temporary files and mocked Docker/systemd."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -203,6 +205,41 @@ class GuardTests(unittest.TestCase):
             with self.assertRaises(guard.GuardError):
                 guard.install(self.source, 'wrong-checksum', SHA)
         command.assert_not_called()
+
+    def test_install_under_private_umask_keeps_container_tests_readable(self):
+        # Root's WinSCP shell can retain umask 077 after creating a backup.
+        # Docker mounts tests/ itself: the image's UID 10001 must traverse all
+        # directories inside it, without changing the host's private parents.
+        nested = self.source / 'tests/fixtures/nested/example.json'
+        nested.parent.mkdir(parents=True)
+        nested.write_text('{}')
+        self.policy['tests'].append('tests/fixtures/nested/example.json')
+        self.policy['protected']['tests/fixtures/nested/example.json'] = guard.digest(b'{}')
+        (self.source / guard.POLICY).write_bytes(guard.encode(self.policy))
+        external = self.source.parent / 'private-host/guard'
+        external.parent.mkdir(mode=0o700)
+        dropin = self.source.parent / 'units/private-umask.conf'
+        policy_hash = guard.digest(guard.regular(self.source, guard.POLICY))
+        live = [{'Config': {'Image': 'center-messenger:local-' + SHA[:12], 'Env': ['CM_BUILD_SHA=' + SHA]},
+                 'State': {'Status': 'running'}}]
+        old_umask = os.umask(0o077)
+        try:
+            with patch.object(guard, 'TRUST', external), patch.object(guard, 'DROP_IN', dropin), \
+                 patch.object(guard, 'project_lock'), patch.object(guard, 'root_owned'), \
+                 patch.object(guard, 'command', side_effect=[json.dumps(live), '']):
+                guard.install(self.source, policy_hash, SHA)
+            # The installer must not weaken the caller's process-wide umask.
+            probe = self.source.parent / 'private-probe'
+            probe.write_text('private')
+        finally:
+            os.umask(old_umask)
+        generation = (external / 'active').resolve()
+        for path in [generation, *generation.rglob('*')]:
+            with self.subTest(path=path.relative_to(generation)):
+                expected = 0o755 if path.is_dir() else (0o600 if path.name == 'integrity.json' else 0o644)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), expected)
+        self.assertEqual(stat.S_IMODE(external.parent.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(probe.stat().st_mode), 0o600)
 
     def test_same_reviewed_installation_can_resume_after_a_later_preparation_error(self):
         external = self.source.parent / 'external'

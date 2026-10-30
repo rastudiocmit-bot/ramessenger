@@ -373,7 +373,14 @@ def install(source, expected_policy, expected_live, previous_policy=None, *, loc
                     target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
                     target.write_bytes(regular(source, path))
                     target.chmod(0o644)
-                (stage / 'integrity.json').write_bytes(encode({p: digest(regular(stage, p)) for p in paths}))
+                # mkdir(mode=...) is still filtered by the root shell's umask.
+                # Docker mounts tests/ directly and runs as UID 10001, so all
+                # bundle directories must be searchable before publication.
+                # Only this new bundle is touched; private host parents, keys
+                # and the process-wide umask retain their original settings.
+                for directory in [stage, *(p for p in stage.rglob('*') if p.is_dir())]:
+                    directory.chmod(0o755)
+                atomic_write(stage / 'integrity.json', encode({p: digest(regular(stage, p)) for p in paths}))
                 stage.rename(generation)
         trusted_bundle(generation)
         replacement = TRUST / '.active-new'
