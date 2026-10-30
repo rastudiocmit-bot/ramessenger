@@ -2266,3 +2266,91 @@ body:has(#cabinet[hidden]){overflow:auto}
  #pane-summary .split{gap:8px}
  #pane-summary .split .vl{font-size:12px}
 }
+
+/* A shared page shell for clients, team, organization, security and profile. */
+:is(#pane-clients,#pane-team,#pane-overview,#pane-security,#pane-profile){--cabinet-width:1280px;--cabinet-padding:18px}
+:is(#pane-clients,#pane-team,#pane-overview,#pane-security,#pane-profile) .cabinet-content{display:flex;flex-direction:column;gap:16px;width:100%;min-width:0;max-width:var(--cabinet-width);margin:0 auto;padding:6px var(--gut-r) 24px var(--gut-l)}
+:is(#pane-clients,#pane-team,#pane-overview,#pane-security,#pane-profile) .cabinet-content>:is(.card,.group,.directory-layout,.directory-toolbar,.sync-bar,.ro,.page-actions,.page-note,.profile-footnote){margin:0;min-width:0}
+:is(#pane-clients,#pane-team,#pane-overview,#pane-security,#pane-profile) .cabinet-content :is(.card,.group,.directory-list-panel,.sync-bar){border:1px solid var(--line);border-radius:14px;box-shadow:var(--card-soft);background:var(--surface);min-width:0}
+:is(#pane-team,#pane-overview,#pane-security,#pane-profile) .cabinet-content .card-h{padding:16px var(--cabinet-padding);gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--line-soft)}
+:is(#pane-team,#pane-overview,#pane-security,#pane-profile) .cabinet-content .card-h h2{margin:0;font-size:15px;line-height:1.45;letter-spacing:0}
+:is(#pane-team,#pane-overview,#pane-security) .cabinet-content .card-b{padding:16px var(--cabinet-padding);min-width:0}
+:is(#pane-clients,#pane-team,#pane-overview,#pane-security,#pane-profile) .cabinet-content :is(.form-note,.page-note,.profile-footnote){font-size:12px;line-height:1.6;color:var(--muted)}
+:is(#pane-team,#pane-security) .cabinet-content .page-actions{padding:0;gap:10px;flex-wrap:wrap}
+#pane-overview .cabinet-content .inline-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr)) auto;gap:16px;align-items:end}
+#pane-overview .cabinet-content .inline-form>.fld{margin:0;min-width:0}
+#pane-overview .cabinet-content .inline-form>.btn{margin:0;min-height:44px}
+#pane-overview .cabinet-content .split{padding:12px 0}
+#pane-overview .cabinet-content .split:first-child{padding-top:0}
+#pane-overview .cabinet-content .split:last-child{padding-bottom:0}
+#pane-security .security-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
+#pane-security .security-grid>.card{width:100%;margin:0}
+#pane-security #password-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start}
+#pane-security #password-form>.fld{margin:0;min-width:0}
+#pane-security #password-form>:is(.btn,.form-note){grid-column:1/-1;justify-self:start;margin:0}
+#pane-security .session-row{padding:12px 0;gap:12px;min-width:0;flex-wrap:wrap}
+#pane-security .session-row:first-child{padding-top:0}
+#pane-security .session-row:last-child{padding-bottom:0}
+#pane-security .session-row>div{flex:1;min-width:0;overflow-wrap:anywhere}
+#pane-security .session-row :is(strong,small){line-height:1.6}
+#pane-team .table-card>.card-b{padding:0!important}
+#pane-team .member-row{padding:14px var(--cabinet-padding);gap:12px}
+#pane-team .member-row .mrow-main :is(strong,small){line-height:1.6}
+#pane-clients .sync-bar{display:grid;grid-template-columns:minmax(0,1fr) auto auto;padding:16px var(--cabinet-padding);gap:16px;align-items:center}
+#pane-clients .sync-summary{min-width:0}
+#pane-clients .sync-options{grid-column:3;grid-row:1}
+#pane-clients .sync-bar>.btn-row{grid-column:2;grid-row:1}
+#pane-clients .sync-summary strong{font-size:13px;line-height:1.5}
+#pane-clients .sync-summary p{font-size:12px;line-height:1.6;margin:4px 0 0}
+#pane-clients .sync-options{font-size:12px;line-height:1.6}
+#pane-clients .sync-bar .btn-row{gap:8px;flex-wrap:wrap}
+#pane-clients .directory-toolbar{display:grid;grid-template-columns:minmax(0,2fr) repeat(2,minmax(0,1fr));gap:12px;padding:16px var(--cabinet-padding);border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:var(--card-soft)}
+#pane-clients .directory-toolbar .fld{min-width:0;width:100%;margin:0}
+#pane-clients .directory-toolbar :is(input,select){width:100%;min-width:0;max-width:none;min-height:44px;border-radius:10px;background:var(--surface-2);font-size:13px}
+#pane-clients .directory-layout{width:100%;min-width:0}
+#pane-clients .directory-list-panel{margin:0;width:100%;height:auto;overflow:hidden}
+#pane-clients .directory-layout.has-selection .directory-list-panel{display:block}
+#directory-contact-dialog .directory-detail{display:block;height:auto}
+#directory-contact-dialog .detail-back{display:none}
+#pane-clients .contact-row{padding:14px var(--cabinet-padding)}
+#pane-clients #directory-error{margin:0;font-size:12px;line-height:1.6}
+#pane-profile .prof-head{display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:4px 16px;align-items:center;padding:18px var(--cabinet-padding);text-align:left}
+#pane-profile .prof-head>.ava{grid-column:1;grid-row:1/span 3;width:64px;height:64px;font-size:23px}
+#pane-profile .prof-head>strong{grid-column:2;font-size:19px;line-height:1.4;letter-spacing:-.3px;overflow-wrap:anywhere}
+#pane-profile .prof-head>#user-email{grid-column:2;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+#pane-profile .prof-head>.rolechip{grid-column:3;grid-row:1/span 3;margin:0;justify-self:end;color:var(--primary-ink)}
+#pane-profile .cabinet-content .profile-section>.group{margin:0;border:0;border-radius:0;box-shadow:none}
+#pane-profile .cabinet-content .item{padding:14px var(--cabinet-padding);gap:12px;box-shadow:none;border-radius:0;background:transparent}
+#pane-profile .cabinet-content button.item:hover{background:var(--surface-2)}
+#pane-profile .cabinet-content .item-main strong{font-size:13px;line-height:1.6;letter-spacing:0}
+#pane-profile .cabinet-content .item-main small{font-size:12px;line-height:1.6}
+#pane-profile .cabinet-content .item-icon{width:34px;height:34px;border-radius:10px}
+#pane-profile .cabinet-content .profile-footnote{text-align:left}
+#pane-profile .profile-chats .item-main:has(>select),#pane-profile .item-main:has(>#workspace-select){display:grid;grid-template-columns:minmax(0,1fr) minmax(200px,320px);column-gap:16px;align-items:center}
+#pane-profile .item-main>select{grid-column:2;grid-row:1/span 2;width:100%;margin:0;min-height:44px;border-radius:10px;font-size:13px;background:var(--surface-2);border-color:var(--line)}
+#pane-profile .chat-name-example{grid-column:1/-1}
+@media(max-width:719px){
+ :is(#pane-clients,#pane-team,#pane-overview,#pane-security,#pane-profile){--cabinet-padding:14px}
+ :is(#pane-team,#pane-overview,#pane-security,#pane-profile) .cabinet-content .card-h{padding-top:14px;padding-bottom:14px}
+ #pane-overview .cabinet-content .inline-form,#pane-security #password-form{grid-template-columns:minmax(0,1fr)}
+ #pane-overview .cabinet-content .inline-form>.btn{justify-self:start}
+ #pane-clients .sync-bar{grid-template-columns:minmax(0,1fr);align-items:stretch}
+ #pane-clients .sync-options,#pane-clients .sync-bar>.btn-row{grid-column:auto;grid-row:auto;min-width:0}
+ #pane-clients .directory-toolbar{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+ #pane-clients .directory-toolbar .directory-search{grid-column:1/-1}
+ #pane-clients .directory-toolbar :is(input,select){font-size:16px}
+ #pane-team .member-row{display:grid;grid-template-columns:38px minmax(0,1fr) 40px;gap:4px 10px}
+ #pane-team .member-row>.ava{grid-column:1;grid-row:1/span 2}
+ #pane-team .member-row .mrow-main{grid-column:2;min-width:0}
+ #pane-team .member-row .rolepill{grid-column:2;font-size:10px;justify-self:start}
+ #pane-team .member-row>:is(.iconbtn,.member-action-space){grid-column:3;grid-row:1/span 2}
+ #pane-profile .prof-head{grid-template-columns:48px minmax(0,1fr);gap:4px 12px}
+ #pane-profile .prof-head>.ava{width:48px;height:48px;font-size:19px}
+ #pane-profile .prof-head>strong{font-size:17px}
+ #pane-profile .prof-head>.rolechip{grid-column:2;grid-row:3;justify-self:start;margin-top:4px}
+ #pane-profile .cabinet-content .item{gap:10px}
+ #pane-profile .cabinet-content .item-icon{width:30px;height:30px}
+ #pane-profile .profile-chats .item-main:has(>select),#pane-profile .item-main:has(>#workspace-select){display:block}
+ #pane-profile .item-main>select{margin-top:8px;font-size:16px}
+ #pane-profile .item .val{max-width:30%;font-size:11px;overflow-wrap:anywhere}
+}
