@@ -8,7 +8,7 @@ requires a verified PostgreSQL base backup booted in a network-isolated clone.
 """
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, UTC
 import fcntl
 import glob
@@ -160,11 +160,11 @@ class Runner:
         self.index += 1
         return (self.work / ('command-%03d.stderr' % self.index)).open('wb')
 
-    def run(self, command, *, timeout=120, check=True):
+    def run(self, command, *, timeout=120, check=True, env=None):
         with self.log_file() as errors:
             try:
                 result = subprocess.run(command, stdout=subprocess.PIPE, stderr=errors,
-                                        timeout=timeout, check=False)
+                                        timeout=timeout, check=False, env=env)
             except subprocess.TimeoutExpired:
                 raise BackupError('Command timeout: ' + Path(command[0]).name) from None
         if check and result.returncode:
@@ -457,7 +457,21 @@ class FullBackup:
     def source_bundle(self):
         self.phase('source_repository')
         mirror = self.work / 'source.git'
-        self.runner.run(['gh', 'repo', 'clone', REPO, str(mirror), '--', '--mirror'], timeout=600)
+        # systemd intentionally does not inherit the SSH shell's token/config.
+        # Read its protected credential only for gh and its git subprocesses;
+        # never put the token in argv, unit Environment=, metadata or normal logs.
+        environment = os.environ.copy()
+        credentials = environment.get('CREDENTIALS_DIRECTORY')
+        if credentials:
+            token = (Path(credentials) / 'github-token').read_text().strip()
+            if not token:
+                raise BackupError('GitHub service credential is empty')
+            environment['GH_TOKEN'] = token
+            environment.pop('GITHUB_TOKEN', None)
+        environment.update(GH_HOST='github.com', GH_PROMPT_DISABLED='1')
+        self.runner.run(['gh', 'repo', 'clone', 'https://github.com/' + REPO + '.git',
+                        str(mirror), '--', '--mirror'],
+                        timeout=600, env=environment)
         self.runner.run(['git', '-C', str(mirror), 'cat-file', '-e', self.sha + '^{commit}'])
         bundle = self.work / 'source.bundle'
         self.runner.run(['git', '-C', str(mirror), 'bundle', 'create', str(bundle), '--all'], timeout=600)
@@ -895,6 +909,25 @@ def recover_run(output_root, run_id):
         announce('POST_BACKUP_RECOVERY_DONE')
 
 
+@contextmanager
+def github_credential(directory=Path('/run')):
+    """Reuse the authenticated caller without exposing credentials in the command."""
+    result = subprocess.run(['gh', 'auth', 'token', '--hostname', 'github.com'],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    if result.returncode or not result.stdout.strip():
+        raise BackupError('GitHub authentication is unavailable in the launching shell')
+    with tempfile.TemporaryDirectory(prefix='cm-backup-credential-', dir=directory) as temporary:
+        secret = Path(temporary) / 'github-token'
+        with secret.open('xb') as stream:
+            secret.chmod(0o600)
+            stream.write(result.stdout.strip() + b'\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield secret
+        # Type=exec has already copied LoadCredential into its protected runtime
+        # credential directory before systemd-run acknowledges the service start.
+
+
 def start_background(args):
     stamp = datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid4().hex[:12]
     script = Path(__file__).resolve()
@@ -908,13 +941,15 @@ def start_background(args):
         pass
     log.chmod(0o600)
     recover = '/usr/bin/python3 ' + str(script) + ' --recover-run ' + stamp + ' --output-root ' + str(args.output_root)
-    subprocess.run(['systemd-run', '--unit=' + unit, '--collect', '--property=Type=exec',
-        '--property=RuntimeMaxSec=3h', '--property=TimeoutStopSec=300',
-        '--property=StandardOutput=append:' + str(log),
-        '--property=StandardError=append:' + str(log),
-        '--property=ExecStopPost=' + recover,
-        '/usr/bin/python3', str(script), '--run-id', stamp,
-        '--output-root', str(args.output_root), '--key-directory', str(args.key_directory)], check=True)
+    with github_credential() as credential:
+        subprocess.run(['systemd-run', '--unit=' + unit, '--collect', '--property=Type=exec',
+            '--property=RuntimeMaxSec=3h', '--property=TimeoutStopSec=300',
+            '--property=LoadCredential=github-token:' + str(credential),
+            '--property=StandardOutput=append:' + str(log),
+            '--property=StandardError=append:' + str(log),
+            '--property=ExecStopPost=' + recover,
+            '/usr/bin/python3', str(script), '--run-id', stamp,
+            '--output-root', str(args.output_root), '--key-directory', str(args.key_directory)], check=True)
     announce('BACKUP_STARTED', unit + '.service')
     announce('LOG', log)
     announce('EXPECTED_DIRECTORY', args.output_root / stamp)

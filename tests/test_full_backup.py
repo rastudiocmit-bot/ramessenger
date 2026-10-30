@@ -1,6 +1,6 @@
 """Offline backup safety checks. No production Docker/SSH/database is used."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import hashlib
 import hmac
 import importlib.util
@@ -192,11 +192,16 @@ class BackupTests(unittest.TestCase):
         original_path = m.Path
         def path(value):
             return fake_log if value == '/var/log/ramessenger-full-backup.log' else original_path(value)
-        with patch.object(m, 'Path', side_effect=path), patch.object(m.subprocess, 'run') as run:
+        @contextmanager
+        def credential():
+            yield self.root / 'protected-token'
+        with patch.object(m, 'Path', side_effect=path), patch.object(m.subprocess, 'run') as run, \
+             patch.object(m, 'github_credential', credential):
             m.start_background(args)
         command = run.call_args.args[0]
         self.assertEqual(command[0], 'systemd-run')
         self.assertTrue(any(item.startswith('--property=ExecStopPost=') for item in command))
+        self.assertTrue(any(item.startswith('--property=LoadCredential=github-token:') for item in command))
         self.assertIn('--property=RuntimeMaxSec=3h', command)
         self.assertFalse(any(item in {'deploy', 'up', 'migrate', 'prune'} for item in command))
 
@@ -276,6 +281,40 @@ class BackupTests(unittest.TestCase):
         with patch.object(m.shutil, 'disk_usage', return_value=Mock(free=1)):
             with self.assertRaisesRegex(m.BackupError, 'preserve 2 GiB'):
                 self.backup.runner.pipeline([[sys.executable, '-c', 'import time;time.sleep(5)']], output=output)
+
+    def test_shell_credential_is_private_temporary_and_never_in_argv(self):
+        secret = b'offline-fake-token'
+        with patch.object(m.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                ['gh'], 0, secret + b'\n', b'')) as run:
+            with m.github_credential(self.root) as path:
+                self.assertEqual(path.read_bytes(), secret + b'\n')
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+                self.assertNotIn(secret.decode(), repr(run.call_args))
+            self.assertFalse(path.exists())
+
+    def test_missing_shell_authentication_prevents_service_start(self):
+        with patch.object(m.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                ['gh'], 4, b'', b'authentication required')):
+            with self.assertRaisesRegex(m.BackupError, 'launching shell'):
+                with m.github_credential(self.root):
+                    self.fail('Must not accept missing authentication')
+
+    def test_background_credential_only_reaches_github_child_environment(self):
+        credential_dir = self.root / 'credentials'
+        credential_dir.mkdir()
+        (credential_dir / 'github-token').write_text('offline-fake-token\n')
+        (self.backup.work / 'source.git').mkdir()
+        (self.backup.work / 'source.bundle').write_text('offline bundle')
+        self.backup.sha = 'a' * 40
+        self.backup.runner = Mock()
+        with patch.dict(os.environ, {'CREDENTIALS_DIRECTORY': str(credential_dir)}), \
+             patch.object(self.backup, 'part'):
+            self.backup.source_bundle()
+        clone = self.backup.runner.run.call_args_list[0]
+        self.assertEqual(clone.kwargs['env']['GH_TOKEN'], 'offline-fake-token')
+        self.assertNotIn('offline-fake-token', repr(clone.args))
+        self.assertNotIn('offline-fake-token', repr(self.backup.metadata))
 
 
 if __name__ == '__main__':
