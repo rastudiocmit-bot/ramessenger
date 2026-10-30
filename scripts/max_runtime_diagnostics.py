@@ -17,7 +17,11 @@ import subprocess
 import sys
 import time
 
-SPEC = importlib.util.spec_from_file_location('cm_backup_audit', Path(__file__).with_name('full_backup_split.py'))
+HELPER = Path(__file__).with_name('full_backup_split.py')
+if not HELPER.is_file():
+    # The established VPS support command uses a hyphenated filename.
+    HELPER = Path(__file__).with_name('full-backup-split.py')
+SPEC = importlib.util.spec_from_file_location('cm_backup_audit', HELPER)
 backup = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(backup)
 

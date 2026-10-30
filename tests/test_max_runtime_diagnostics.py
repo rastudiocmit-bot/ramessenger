@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,14 @@ SPEC.loader.exec_module(diagnostics)
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_installed_support_layout_loads_the_existing_hyphenated_helper(self):
+        with tempfile.TemporaryDirectory() as path:
+            root = Path(path)
+            (root/'max_runtime_diagnostics.py').write_bytes(Path(SPEC.origin).read_bytes())
+            (root/'full-backup-split.py').write_bytes(diagnostics.HELPER.read_bytes())
+            loaded = runpy.run_path(str(root/'max_runtime_diagnostics.py'))
+            self.assertEqual(Path(loaded['backup'].__file__).name, 'full-backup-split.py')
+
     def report(self):
         return {'checked_at': '2026-10-30T20:00:00+00:00', 'issues': [], 'limits': [],
                 'containers': [{'name': name, 'id': name+'-id', 'image_id': name+'-image',
