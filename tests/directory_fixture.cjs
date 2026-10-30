@@ -1,0 +1,10 @@
+// Synthetic family data with multiple pupils and independently identified CRM cards.
+const family=()=>({id:'contact-0',name:'Тестовый родитель',phones:['+79000000000','+0'],emails:['parent@example.test'],today:'2026-10-30',max_connected:true,max_bot_connected:false,snapshot_at:'2026-10-30T08:00:00Z',cache:{snapshot:{published_at:'2026-10-30T08:30:00Z'},sections:{finance:{status:'ready',updated_at:'2026-10-30T08:30:00Z'},groups:{status:'partial'},lessons:{status:'ready'},history:{status:'ready'}}},students:[
+ {id:'student-0',name:'Первый тестовый ученик',dob:'2015-05-14',balance:'3962.50',paid_lesson_count:4,
+  subscriptions:[{id:40,customer_id:100,tariff_id:9,name:'Программирование',balance:'2725',begin:'2026-10-01',end:'2026-11-01',relation_status:'confirmed'},{id:41,customer_id:100,tariff_id:9,name:'Архивный абонемент',balance:'0',archived:true,begin:'2025-01-01',end:'2025-02-01'}],
+  groups:[{id:'5',name:'Python — первая группа',branch_id:'1',branch_name:'Коломна 1',url:'https://test.s20.online/company/1/group/view?id=5',customer_ids:['100'],previous_lesson:{date:'2026-10-29',time:'17:00',attended:true},next_lesson:{date:'2026-11-05',time:'17:00'},subscriptions:[{id:40,name:'Программирование',balance:'2725',end:'2026-11-01'}],memberships:[{customer_id:'100',begin:'2026-09-01',end:null}]}],
+  cards:[1,2].map(branch=>({id:'100',branch_id:String(branch),branch_name:'Коломна '+branch,status:'client',legal_name:'Тестовый родитель',study_status:'Действующий',balance:'3962.50',paid_lesson_count:4,url:`https://test.s20.online/company/${branch}/customer/view?id=100`,refreshed_at:'2026-10-30T08:30:00Z'})),
+  lessons:Array.from({length:45},(_,i)=>({id:1000+i,date:new Date(Date.UTC(2026,8,1+i)).toISOString().slice(0,10),time:'17:00',branch_id:1,customer_id:100,subject_id:11,group_ids:[5],attended:i%2===0,subscription_id:40}))},
+ {id:'student-1',name:'Второй тестовый ученик',dob:null,balance:'-120.50',paid_lesson_count:null,subscriptions:[],groups:[],lessons:[],cards:[{id:'200',branch_id:'1',branch_name:'Коломна 1',status:'lead',balance:'-120.50',url:'https://test.s20.online/company/1/customer/view?id=200'}]}
+]});
+module.exports={family};

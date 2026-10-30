@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from center_messenger.accounts_api import identity, service
 from center_messenger.alfa_client import AlfaError
-from center_messenger.alfa_family import fetch_family_card, group_facts, customer_balance, customer_paid_lessons, customer_subscriptions, mapping_pending
+from center_messenger.alfa_family import fetch_family_card, group_facts, customer_balance, customer_paid_lessons, customer_subscriptions, current_lessons, mapping_pending
 from center_messenger.alfa_sync import SyncOptions
 from center_messenger.auth_security import AuthError
 from center_messenger.crm_directory import normalized_name, phone_number
@@ -209,6 +209,7 @@ class DirectoryReader:
                 for r in db.execute(
                     text(
                         "SELECT c.contact_id,count(DISTINCT c.student_id) AS student_count,"
+                        "array_agg(DISTINCT c.branch_id ORDER BY c.branch_id) AS branch_ids,"
                         "(array_agg(DISTINCT c.name ORDER BY c.name))[1:4] AS names,"
                         f"max({WEIGHT}) AS weight FROM alfa_customers c WHERE "
                         + scope
@@ -239,12 +240,17 @@ class DirectoryReader:
                     params,
                 ).mappings()
             }
+            branch_names = {item["id"]: item["name"] for item in result["branches"]}
             for row in records:
                 summary, group = summaries[row["contact_id"]], groups.get(row["contact_id"], {})
                 result["contacts"].append(
                     {
                         "id": str(row["contact_id"]),
                         "name": row["display_name"],
+                        "phones": row["phones"],
+                        "emails": row["emails"],
+                        "branches": [{"id": str(identifier), "name": branch_names.get(str(identifier), f"Филиал №{identifier}")}
+                                     for identifier in summary["branch_ids"]],
                         "status": STATUS[summary["weight"]],
                         "needs_review": row["needs_review"],
                         "max_connected": bool(row["max_connected"]),
@@ -261,7 +267,13 @@ class DirectoryReader:
     def detail(self, actor, workspace, contact_id, *, branch=None, conversation=None, diagnostics=False):
         transaction = self.connections.chat_transaction if conversation else self.connections._transaction
         with transaction(actor, workspace, snapshot=True) as db:
-            return self._detail(db, workspace, contact_id, branch=branch, conversation=conversation, diagnostics=diagnostics)
+            family = self._detail(db, workspace, contact_id, branch=branch, conversation=conversation, diagnostics=diagnostics)
+            # Directory details expose the already saved history through the same
+            # exact-ID/version resolution as group facts. Chat's fast snapshot path
+            # stays unchanged and no source request or refresh job is started here.
+            for person in family["students"]:
+                person["lessons"] = current_lessons(person["cards"])
+            return family
 
     def _detail(self, db, workspace, contact_id, *, branch=None, conversation=None, publish_snapshot=False,
                 compact=False, diagnostics=True, publish_missing=False):

@@ -5,6 +5,8 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   let timer, searchTimer, status = null, snapshot = null, items = [], selected = null;
   let page = 0, total = 0, more = false, actionBusy = false, listBusy = false;
   const cache = new Map();
+  const contactRequests = new Map();
+  const renderSavedCard = window.CenterDirectoryCard({ node, date });
   const active = () => state.user && state.workspace && state.pane === "clients";
   const readonly = () => !["owner", "admin"].includes(state.workspace?.role);
   const path = () => `/workspaces/${state.workspace.id}/${readonly() ? "chat-contacts" : "directory"}`;
@@ -20,7 +22,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   }
   function reset() {
     generation += 1; listRequest += 1; cardRequest += 1;
-    clearTimeout(timer); clearTimeout(searchTimer); cache.clear();
+    clearTimeout(timer); clearTimeout(searchTimer); cache.clear(); contactRequests.clear();
     status = null; snapshot = null; items = []; page = 0; total = 0; more = false; actionBusy = false; listBusy = false;
     $("#directory-list").replaceChildren(); $("#crm-card-options").replaceChildren();
     if ($("#crm-card-dialog").open) $("#crm-card-dialog").close();
@@ -124,8 +126,8 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
       branch.value = [...branch.options].some(option => option.value === chosen) ? chosen : "";
       renderList();
       if (!append && savedSelection) {
-        if (items.some(item => item.id === savedSelection)) await selectContact(savedSelection, false);
-        else resetDetail();
+        if (!items.some(item => item.id === savedSelection)) resetDetail();
+        else if ($("#directory-contact-dialog")?.open) await selectContact(savedSelection, false);
       }
     } finally {
       if (current(epoch, gen) && seq === listRequest) {
@@ -147,6 +149,14 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
       body.setAttribute("aria-label", `Выбрать контакт: ${item.name}`);
       body.setAttribute("aria-pressed", String(item.id === selected));
       body.append(node("strong", item.name), node("span", item.students.join(", ") + (item.student_count > item.students.length ? ` и ещё ${item.student_count - item.students.length}` : ""), "contact-students"));
+      const info = node("div", undefined, "directory-list-facts");
+      if ((item.phones || []).length) info.append(node("span", "Тел.: " + item.phones.join(" · ")));
+      if ((item.emails || []).length) info.append(node("span", "Почта: " + item.emails.join(" · ")));
+      if ((item.groups || []).length) info.append(node("span", "Группы: " + item.groups.join(" · ") + (item.group_count > item.groups.length ? ` · ещё ${item.group_count - item.groups.length}` : "")));
+      if ((item.branches || []).length) info.append(node("span", "Филиалы: " + item.branches.map(b => b.name).join(" · ")));
+      info.append(node("span", [item.max_connected ? "MAX через AlfaCRM" : null, item.max_bot_connected ? "MAX-бот" : null].filter(Boolean).join(" · ") || "MAX не подключён"));
+      if (item.needs_review) info.append(node("span", "Нужно уточнить данные", "directory-list-review"));
+      body.append(info);
       body.addEventListener("click", () => selectContact(item.id).catch(fail));
       const pill = node("span", labels[item.status], `pill ${item.status}`);
       const crm = node("button", undefined, "iconbtn plain"); crm.type = "button"; crm.setAttribute("aria-label", `Открыть в АльфаCRM: ${item.name}`);
@@ -162,14 +172,20 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   async function getContact(id) {
     const branch = $("#directory-branch").value;
     const key = `${snapshot}/${branch}/${id}`;
-    if (cache.has(key)) return cache.get(key);
+    const saved = cache.get(key);
+    if (saved && Date.now() - saved.at < 30000) return saved.value;
+    if (contactRequests.has(key)) return contactRequests.get(key);
     const epoch = state.epoch, gen = generation;
-    const payload = await api(`${path()}/contacts/${id}${branch ? `?branch=${encodeURIComponent(branch)}` : ""}`);
-    if (current(epoch, gen) && key === `${snapshot}/${$("#directory-branch").value}/${id}`) {
-      if (cache.size >= 60) cache.delete(cache.keys().next().value);
-      cache.set(key, payload);
-    }
-    return payload;
+    const request = api(`${path()}/contacts/${id}${branch ? `?branch=${encodeURIComponent(branch)}` : ""}`).then(payload => {
+      if (current(epoch, gen) && key === `${snapshot}/${$("#directory-branch").value}/${id}`) {
+        if (cache.size >= 60) cache.delete(cache.keys().next().value);
+        cache.set(key, { value: payload, at: Date.now() });
+      }
+      return payload;
+    });
+    contactRequests.set(key, request);
+    try { return await request; }
+    finally { if (contactRequests.get(key) === request) contactRequests.delete(key); }
   }
   async function selectContact(id, mobile = true) {
     const epoch = state.epoch, gen = generation, seq = ++detailRequest;
@@ -187,36 +203,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
     } finally { if (current(epoch, gen) && seq === detailRequest) detail.setAttribute("aria-busy", "false"); }
   }
   function renderDetail(contact) {
-    const detail = $("#directory-detail"); detail.replaceChildren();
-    const back = node("button", "← Все контакты", "text-button detail-back"); back.type = "button";
-    back.addEventListener("click", () => $("#directory-layout").classList.remove("has-selection"));
-    const head = node("header", undefined, "contact-heading");
-    head.append(back, node("span", "Родитель / контакт", "eyebrow"), node("h2", contact.name));
-    head.append(node("span", contact.max_bot_connected ? "MAX-бот подключён" : "MAX-бот не подключён", `status-label ${contact.max_bot_connected ? "status-client" : "status-unlinked"}`));
-    if (contact.max_connected) head.append(node("span", "MAX через AlfaCRM", "small-tag"));
-    const channels = node("div", undefined, "contact-channels");
-    for (const phone of contact.phones) channels.append(node("span", phone));
-    for (const email of contact.emails) channels.append(node("span", email));
-    head.append(channels); detail.append(head);
-    if (contact.needs_review) detail.append(node("p", "Есть совпадение контактных данных у разных плательщиков или расхождение в данных ребёнка. Карточки сохранены отдельно; уточните данные в CRM.", "notice contact-review"));
-    const students = node("div", undefined, "student-list");
-    students.append(node("h3", "Дети и занятия"));
-    for (const student of contact.students) {
-      const card = node("section", undefined, "student-card");
-      const heading = node("div", undefined, "student-heading"); heading.append(node("h3", student.name));
-      const weight = { client: 3, lead: 2, archive: 1 };
-      const kind = student.cards.reduce((value, item) => weight[item.status] > weight[value] ? item.status : value, "archive");
-      heading.append(node("span", labels[kind], `status-label status-${kind}`)); card.append(heading);
-      const groups = node("div", undefined, "student-groups");
-      for (const group of student.groups) groups.append(node("span", group.name, "group-tag"));
-      if (!student.groups.length) groups.append(node("span", "Актуальные группы не указаны", "muted small"));
-      card.append(groups);
-      const statuses = [...new Set(student.cards.map(item => item.study_status).filter(Boolean))];
-      if (statuses.length) card.append(node("p", statuses.join(" · "), "student-status"));
-      students.append(card);
-    }
-    detail.append(students);
-    if (contact.has_more) detail.append(node("p", "Показана часть карточек или групп. Выберите конкретный филиал, чтобы сузить список.", "notice contact-review"));
+    $("#directory-detail").replaceChildren(renderSavedCard(contact));
   }
   async function openCards(id) {
     const epoch = state.epoch, gen = generation, seq = ++cardRequest;
