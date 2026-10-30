@@ -21,7 +21,7 @@ import urllib.error
 REPO = "rastudiocmit-bot/ramessenger"
 ROOT = Path("/opt/center-messenger-github")
 EXPECTED_DB_VOLUME = "center-messenger_database"
-EXPECTED_DB_REVISION = "0029_invitation_sections"
+EXPECTED_DB_REVISION = "0030_novofon_settings"
 READY_LOCAL = "http://127.0.0.1:8100/health/ready"
 
 def public_url():
@@ -164,7 +164,7 @@ def run_promotion(bundle, sha, check_only=False):
         raise ValueError("Backup failed; refusing deployment")
     deploy_api_with_rollback(old_image, image, dest)
 
-def deploy_api_with_rollback(old_image, new_image, backup_path):
+def deploy_api_with_rollback(old_image, new_image, backup_path, before_rollback=None):
     """Recreate only API; revert to previous image on any failed readiness.
 
     The caller must validate provenance, DB compatibility and backup first.
@@ -183,6 +183,8 @@ def deploy_api_with_rollback(old_image, new_image, backup_path):
         print("DEPLOYED", new_image, "backup", backup_path, flush=True)
     except Exception:
         if changed:
+            if before_rollback is not None:
+                before_rollback()
             print("ERROR: rolling back API only to", old_image, file=sys.stderr, flush=True)
             try:
                 restore_env = dict(os.environ, CM_IMAGE=old_image)

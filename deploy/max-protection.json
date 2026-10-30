@@ -1,11 +1,17 @@
 {
-  "application_baseline": "c206a4266d4d9057b2f3c26416976f6501c0ece9",
+  "application_baseline": "5f0eacecd42bfac1468f019a7fff6de1f2873bc0",
   "bundle": [
     "scripts/max_release_guard.py",
     "scripts/local_build_vps.py",
     "scripts/github_promote_vps.py",
     "scripts/max_runtime_deploy.py"
   ],
+  "paired_schema_update": {
+    "from": "0029_invitation_sections",
+    "migration": "app/backend/migrations/versions/0030_novofon_settings.py",
+    "rollback_preserves_data": true,
+    "to": "0030_novofon_settings"
+  },
   "protected": {
     ".dockerignore": "fa95fb375aa3d84d25f69a3cb71d6b8a4451ebf836836fe7bdac683fa2859a02",
     "Dockerfile": "96b629402559752db1c15cf97fcbf3909af1ab4fcd4242e964bb057bfa22f062",
@@ -41,6 +47,7 @@
     "app/backend/migrations/versions/0027_card_loader_grant.py": "22f3596d5af8087afa4476a8cac6a4b080703693233b211259bf7409b94cbf63",
     "app/backend/migrations/versions/0028_card_loader_snapshots.py": "b3117481a551558306dc1b7acc6185d1b874a4b77d76ea11c05de7c8ff9b70a9",
     "app/backend/migrations/versions/0029_invitation_sections.py": "c1959080018bd585cab362d2f6aa1add16563d90a9f679ebd30622febafc26d8",
+    "app/backend/migrations/versions/0030_novofon_settings.py": "de4201f21334725e8f7650065e1fc5dbd11aa83ce4302c7675ee6610a836f90f",
     "app/backend/src/center_messenger/alfa_client.py": "c645c3ed5cae7538e8f30ddf01c65e9394bc8795ea130fecb87738061a5ba549",
     "app/backend/src/center_messenger/alfa_history.py": "9da982f15f4e64b2c19391625359e2b56f669f63bfa1b12d11024740a7bfef7f",
     "app/backend/src/center_messenger/alfa_max.py": "e94f879f179f6d2a31f0e9c65c202a3c62897d1e56eddf3303717317d34542c5",
@@ -49,7 +56,8 @@
     "app/backend/src/center_messenger/alfa_repair.py": "c7b095a5a937cf5d1611c309f479156666b5d9d77e28a8979322d660a27eea12",
     "app/backend/src/center_messenger/alfa_session.py": "5f6a918e92e89a6772f8070eed80db57a955b78ad72074a2c754efb861089971",
     "app/backend/src/center_messenger/alfa_shared_parent.py": "aca023f4ed365bde6c5cd3e4619850e0280a21996d40b11e56a7d3760c980cd1",
-    "app/backend/src/center_messenger/connector_vault.py": "d4f3209565a5334a7f0908326e421ba59bc5823d0ecd1d91399ac02c5db232f1",
+    "app/backend/src/center_messenger/connector_vault.py": "27cd123c7601eaadeedcaeed6c6f71a143b433bc3471ea903da27ede2d9fd1de",
+    "app/backend/src/center_messenger/database.py": "e17cdbdfbcdfe43c35464b9b406c7d1ecf1de44a521e94456d310d2cc1c50ea6",
     "app/backend/src/center_messenger/history_receipts.py": "b526287f15e34f8eb63548875453f22b347dd2ddc1e83715473298503959b46f",
     "app/backend/src/center_messenger/max_worker.py": "407b0dc34e6ceeacaf4ec7e92cf94b3e678ad7d6c8626319e5e352d4b1177e33",
     "app/backend/src/center_messenger/max_worker_control.py": "14d6521e10acb86340868abb95bb3b227008a2510d7a5913b1414f5e5c775b3b",
@@ -68,17 +76,17 @@
     "infra/systemd/ramessenger-support-queue.service": "de3f68a05e9dee0b9c2b0c07d09bd09933418ae06f820be44ef829905ad8687e",
     "infra/systemd/ramessenger-support-queue.timer": "baf4951168ef1c852c5c22555bd61868f69717572e3b7e2c6bcff7f74ab7f39e",
     "requirements.txt": "0cbd3813f37813ab2bff75750befdc5611cabf4969948b70f68f051e701f3448",
-    "scripts/github_promote_vps.py": "074d9508c1c463beb868887a98aea04f6ed20c5d0d4397c3caadf4f9cd860bbc",
-    "scripts/local_build_vps.py": "d400106b043b40956e5af0ccd84a62d2abf2811a88eacc0e14e24d39886178e8",
+    "scripts/github_promote_vps.py": "fb0cba7807bd8503e810c097a82884c57fc3e729ae5b1e7ec61eb0e903a12290",
+    "scripts/local_build_vps.py": "1604dd4c5a14b1f9b49520de2f634ee49bd8005cb35bdc5399f91c6a61d1d5dd",
     "scripts/max_release_guard.py": "32df2cf0e5fc9f66564c80f76fe79ea7ab7c6935cf58110b2facbdef8c0d0bdc",
-    "scripts/max_runtime_deploy.py": "8905e4d84362fca7e35e75c16be0ea35e60579175a0cdf1984a8a788e2154f04",
-    "tests/run_max_compatibility.py": "20687e7a04888fc8ab0ae4f06cb6d50c17bda9ae5322bcc899b6ab697fb545f8",
+    "scripts/max_runtime_deploy.py": "fb79cd42022ebc149455a1f89a50b05d71417778ed18132db7e451d693e3daca",
+    "tests/run_max_compatibility.py": "5283bb12a743340ccd003c8565279aadd49cf8714a2802562ba7c72894d2998c",
     "tests/test_compose_recipient.py": "e32ecd4c6c9613871b8354e02d433a9ad3b075f6541dc13857cb972f76aba4a8",
-    "tests/test_github_deploy_rollback.py": "a18de8704c89c1f624bc32c789101193b7e29a3063158a68579f2bc9b409e165",
+    "tests/test_github_deploy_rollback.py": "219e5ea565d5306b11b5c748acfd579bd17d3f3fef2146d70932f3542c84f5f0",
     "tests/test_history_audit.py": "86d404e24da7df39f2335a958e9e8b166bc805e0b7aaf2cbe42998bc6ee04d5e",
     "tests/test_max_container.py": "721e1a5f83a80945d00cf230ccb8a6033b1d877d18dc3c6e755402acd20f47fc",
     "tests/test_max_release_guard.py": "cd3a44a135fc162bdb747321e27c44ff5e0a22637a21baf9ffd7df9b70bb7185",
-    "tests/test_max_runtime_deploy.py": "7c05be87a06818fa7d6890c468e0931b8026025977409a2e03b326f2f56fdbad",
+    "tests/test_max_runtime_deploy.py": "d383db826993cd7a15713d3da6b5eb6e437bad9db78556144d69572976e573fc",
     "tests/test_message_sync.py": "f85cca6eb5eefe1e10229d575298b83d023548fa2cda26bd8e309eda35a46030",
     "tests/test_native_archive_database.py": "7fedc8bfd453427d109a10fe2c72e3a98585fd70f9eb15bf2485ae22f630b22c",
     "tests/test_native_archive_relink.py": "4b5a76f504fe8e4b8b21c5feb454177a06bbf3e0d04f3c9db840b6c35782cca2",
@@ -86,6 +94,8 @@
     "tests/test_native_relink.py": "81c2b34bcb0919d0ee1c689f753fb11630bb8b2af33e4d5eb60ab48f73f58693",
     "tests/test_native_send_runtime.py": "f14c3b7e7f44ff3eebdb93824470360448873dbd81a5f535d18275f55f987050",
     "tests/test_native_session.py": "93a530d8dde1209dc1a4069bfbfc807dcab2bd24bb82d28f1e6c838dbf668d08",
+    "tests/test_novofon_connection.py": "654143a9f0e056bc4ca4b8ed1e79ad437cdc73aa8ae6c333ad3507dd3fb4f55a",
+    "tests/test_novofon_diagnostic.py": "ce12dd8302faee1f743b1e4e139ff6f356d459afaf59af18180692749f6004ba",
     "tests/test_support_access.py": "20635c574d605a7bcab75bc46571af1962b3acabfdfa57cf954fee7fbf3430c7"
   },
   "protected_patterns": [
@@ -99,7 +109,7 @@
     "infra/systemd",
     "deploy/systemd"
   ],
-  "schema_revision": "0029_invitation_sections",
+  "schema_revision": "0030_novofon_settings",
   "tests": [
     "tests/run_max_compatibility.py",
     "tests/test_message_sync.py",
@@ -111,8 +121,10 @@
     "tests/test_native_relink.py",
     "tests/test_max_container.py",
     "tests/test_native_archive_relink.py",
-    "tests/test_native_archive_database.py"
+    "tests/test_native_archive_database.py",
+    "tests/test_novofon_connection.py",
+    "tests/test_novofon_diagnostic.py"
   ],
   "version": 1,
-  "worker_runtime_contract": "archived-source-relink-v1"
+  "worker_runtime_contract": "novofon-settings-schema-v1"
 }

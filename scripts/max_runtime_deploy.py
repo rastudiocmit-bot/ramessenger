@@ -78,7 +78,7 @@ def update_for(root, source, sha):
         raise RuntimeError('Invalid MAX worker update plan')
     if plan['phase'] == 'complete':
         return None
-    if plan['phase'] != 'prepared':
+    if plan['phase'] not in {'prepared', 'migrating'}:
         raise RuntimeError('MAX worker update requires explicit recovery/preparation')
     if plan['sha'] != sha or plan['compose'] != digest(source / 'compose.yaml'):
         raise RuntimeError('MAX worker update is for a different source SHA/Compose')
@@ -247,7 +247,7 @@ def recover(root, promoter):
     print('MAX RUNTIME SPLIT ROLLED BACK; DATABASE PRESERVED', flush=True)
 
 
-def prepare_update(root, source, sha, expected_api, expected_max, expected_policy):
+def prepare_update(root, source, sha, expected_api, expected_max, expected_policy, schema_from=None):
     if not re.fullmatch('[a-f0-9]{40}', sha) or run('git', '-C', str(source), 'rev-parse', 'HEAD') != sha:
         raise RuntimeError('Exact reviewed source SHA required')
     if digest(source / 'deploy/max-protection.json') != expected_policy:
@@ -268,12 +268,23 @@ def prepare_update(root, source, sha, expected_api, expected_max, expected_polic
     policy = json.loads((source / 'deploy/max-protection.json').read_text())
     revision = run('docker', 'exec', 'center-messenger-db-1', 'psql', '-XAt', '-v', 'ON_ERROR_STOP=1',
                    '-U', 'cm_owner', '-d', 'center_messenger', '-c', 'SELECT version_num FROM alembic_version;')
-    if revision != policy['schema_revision']:
+    transition = None
+    if schema_from is not None:
+        transition = policy.get('paired_schema_update')
+        if (not transition or schema_from != revision or transition.get('from') != revision
+                or transition.get('to') != policy['schema_revision']
+                or transition.get('rollback_preserves_data') is not True
+                or digest(source / transition['migration']) != policy['protected'].get(transition['migration'])):
+            raise RuntimeError('Exact reviewed paired schema update required')
+    elif revision != policy['schema_revision']:
         raise RuntimeError('Worker-only update requires the same database schema')
-    save_update(root, {'version':1, 'phase':'prepared', 'sha':sha, 'old_api':expected_api,
+    plan = {'version':1, 'phase':'prepared', 'sha':sha, 'old_api':expected_api,
         'old_worker':expected_max, 'old_worker_id':worker['Image'], 'old_container':worker['Id'],
         'compose':digest(root / 'compose.yaml'), 'environment':digest(root / '.env'),
-        'runtime_state':digest(root / PLAN), 'schema_revision':revision})
+        'runtime_state':digest(root / PLAN), 'schema_revision':revision}
+    if transition:
+        plan['schema_transition'] = transition
+    save_update(root, plan)
     state_path = root / 'local-build-state.json'
     if state_path.exists():
         status = json.loads(state_path.read_text())
@@ -281,6 +292,52 @@ def prepare_update(root, source, sha, expected_api, expected_max, expected_polic
             status.pop('last_failed_sha')
             write(state_path, (json.dumps(status, indent=2) + '\n').encode())
     print('MAX WORKER UPDATE PREPARED; start the existing local-build service', flush=True)
+
+
+def schema_revision():
+    return run('docker', 'exec', 'center-messenger-db-1', 'psql', '-XAt', '-v', 'ON_ERROR_STOP=1',
+               '-U', 'cm_owner', '-d', 'center_messenger', '-c', 'SELECT version_num FROM alembic_version;')
+
+
+def allows_schema_update(root, source, sha, previous, target):
+    plan = update_for(root, source, sha)
+    transition = plan.get('schema_transition', {}) if plan else {}
+    policy = json.loads((source / 'deploy/max-protection.json').read_text())
+    return bool(plan and plan['phase'] == 'prepared' and transition
+                and transition == policy.get('paired_schema_update')
+                and transition.get('from') == previous and transition.get('to') == target)
+
+
+def begin_schema_update(root, source, sha, image, backup):
+    plan = update_for(root, source, sha)
+    if not plan or not plan.get('schema_transition') or plan['phase'] != 'prepared':
+        raise RuntimeError('Reviewed paired schema preparation missing')
+    if (schema_revision() != plan['schema_transition']['from'] or
+            not Path(backup).is_file() or Path(backup).stat().st_size < 1024):
+        raise RuntimeError('Schema changed or verified backup missing')
+    # Persist before DDL: a crash immediately after COMMIT must be recoverable.
+    plan.update(phase='migrating', new_api=image, backup=str(backup),
+                new_api_id=json.loads(run('docker', 'image', 'inspect', image))[0]['Id'])
+    save_update(root, plan)
+
+
+def restore_schema(root, plan):
+    transition = plan.get('schema_transition')
+    if not transition:
+        return
+    revision = schema_revision()
+    if revision == transition['from']:
+        return
+    if revision != transition['to']:
+        raise RuntimeError('Unrelated schema revision; refusing paired rollback')
+    if json.loads(run('docker', 'image', 'inspect', plan['new_api']))[0]['Id'] != plan['new_api_id']:
+        raise RuntimeError('Schema recovery image identity changed')
+    env = dict(os.environ, CM_IMAGE=plan['new_api'])
+    run('docker', 'compose', '-p', 'center-messenger', '-f', str(root / 'compose.yaml'),
+        '--profile', 'tools', 'run', '--rm', '--no-deps', '--user', '0', 'migrate',
+        'alembic', 'downgrade', transition['from'], env=env, timeout=600)
+    if schema_revision() != transition['from']:
+        raise RuntimeError('Paired schema rollback did not reach reviewed revision')
 
 
 def promote_update(root, source, sha, old_api, new_api, backup, promoter):
@@ -291,7 +348,12 @@ def promote_update(root, source, sha, old_api, new_api, backup, promoter):
         raise RuntimeError('API changed after worker update preparation')
     if not Path(backup).is_file() or Path(backup).stat().st_size < 1024:
         raise RuntimeError('Verified database backup required before MAX update')
+    if plan.get('schema_transition') and (plan['phase'] != 'migrating' or
+            schema_revision() != plan['schema_transition']['to']):
+        raise RuntimeError('Paired migration must complete before API/MAX replacement')
     image_id = json.loads(run('docker', 'image', 'inspect', new_api))[0]['Id']
+    if plan.get('schema_transition') and image_id != plan['new_api_id']:
+        raise RuntimeError('Paired schema image identity changed before promotion')
     max_image = 'center-messenger:max-' + sha[:12]
     present = subprocess.run(['docker', 'image', 'inspect', max_image], capture_output=True, text=True, timeout=30)
     if present.returncode == 0 and json.loads(present.stdout)[0]['Id'] != image_id:
@@ -318,7 +380,11 @@ def promote_update(root, source, sha, old_api, new_api, backup, promoter):
         run(*compose, 'up', '-d', '--no-deps', '--no-build', '--force-recreate', 'max-worker', env=env, timeout=300)
         if not wait_worker(max_image):
             raise RuntimeError('Updated MAX worker did not become ready')
-        promoter.deploy_api_with_rollback(old_api, new_api, backup)
+        if plan.get('schema_transition'):
+            promoter.deploy_api_with_rollback(old_api, new_api, backup,
+                before_rollback=lambda: restore_schema(root, plan))
+        else:
+            promoter.deploy_api_with_rollback(old_api, new_api, backup)
         if not wait_worker(max_image):
             raise RuntimeError('Updated MAX worker stopped during API promotion')
         write(root / PLAN, next_body)
@@ -336,6 +402,21 @@ def recover_update(root, promoter):
     if not path.exists():
         return
     plan = json.loads(path.read_text())
+    if plan.get('phase') == 'migrating':
+        if (digest(root / 'compose.yaml') != plan['compose'] or digest(root / '.env') != plan['environment']
+                or digest(root / PLAN) != plan['runtime_state']):
+            raise RuntimeError('Runtime changed during paired migration; manual review required')
+        _, worker = verify_pin(root)
+        if (worker['Id'] != plan['old_container'] or worker['Image'] != plan['old_worker_id']
+                or inspect('center-messenger-api-1')['Config']['Image'] != plan['old_api']):
+            raise RuntimeError('Images changed during paired migration')
+        restore_schema(root, plan)
+        if not wait_worker(plan['old_worker']) or not promoter.wait_ready(plan['old_api']):
+            raise RuntimeError('Original processes did not recover after paired schema rollback')
+        plan['phase'] = 'failed'
+        save_update(root, plan)
+        print('PAIRED MIGRATION RECOVERED; ORIGINAL API/MAX AND DATA PRESERVED', flush=True)
+        return
     if plan.get('phase') != 'promoting':
         return
     archive = Path(plan['archive'])
@@ -356,6 +437,8 @@ def recover_update(root, promoter):
     if 'center-messenger-api-1' in present and inspect('center-messenger-api-1')['Config']['Image'] not in {plan['old_api'], plan['new_api']}:
         raise RuntimeError('Unexpected API identity during MAX update recovery')
     write(root / '.env', (archive / 'environment').read_bytes())
+    # Old images use exact schema readiness; downgrade before waiting for them.
+    restore_schema(root, plan)
     env = dict(os.environ, CM_IMAGE=plan['old_api'], CM_MAX_IMAGE=plan['old_worker'])
     compose = ['docker','compose','-p','center-messenger','-f',str(root / 'compose.yaml')]
     run(*compose, 'up', '-d', '--no-deps', '--no-build', '--force-recreate', 'max-worker', env=env, timeout=300)
@@ -421,6 +504,7 @@ if __name__ == '__main__':
     parser.add_argument('--expected-policy', required=True)
     parser.add_argument('--update-worker', action='store_true')
     parser.add_argument('--expected-max')
+    parser.add_argument('--schema-from', help='Explicit reviewed source revision for a paired schema update')
     options = parser.parse_args()
     if os.geteuid() != 0:
         raise SystemExit('Root required')
@@ -430,6 +514,6 @@ if __name__ == '__main__':
             if not options.expected_max:
                 parser.error('--update-worker requires --expected-max')
             prepare_update(guard.ROOT, options.source.resolve(), options.sha, options.expected_api,
-                           options.expected_max, options.expected_policy)
+                           options.expected_max, options.expected_policy, options.schema_from)
         else:
             prepare(guard.ROOT, options.source.resolve(), options.sha, options.expected_api, options.expected_policy)

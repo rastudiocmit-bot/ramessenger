@@ -69,7 +69,7 @@
   }
   function clearPrivateViews() {
     notices?.reset();
-    team.reset(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
+    team.reset(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); novofon.reset(); directory.reset(); chat.reset();
     cabinet.reset(); cardLoader.reset();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
     ["#user-name", "#user-email", "#user-avatar", "#workspace-role", "#workspace-timezone"].forEach(selector => { $(selector).textContent = ""; });
@@ -144,7 +144,7 @@
     const previousWorkspace = state.workspace?.id;
     state.epoch += 1; state.user = payload.user; state.csrf = payload.csrf; state.workspaces = payload.workspaces; state.chatProtocol = payload.chat_protocol || 1;
     state.workspace = state.workspaces.find(item => item.id === state.workspace?.id) || state.workspaces[0] || null;
-    if (previousWorkspace !== state.workspace?.id) { team.reset(); resetAlfa(); resetAlfaMax(); cardLoader.reset(); directory.reset(); chat.reset(); }
+    if (previousWorkspace !== state.workspace?.id) { team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); cardLoader.reset(); directory.reset(); chat.reset(); }
   }
   async function enter(payload) {
     setSession(payload);
@@ -189,6 +189,7 @@
     state.pane = pane === "queue" ? "messages" : pane;
     const sections = grantedSections();
     sections.profile = true;
+    if (!sections.connections) novofon.reset();
     sections.summary = sections.overview && sections.messages && state.workspace?.role !== "operator";
     if (!sections[state.pane]) state.pane = ["messages", "tasks", "summary", "clients", "overview", "security", "profile"].find(key => sections[key]);
     if (state.pane !== "connections") alfaMaxProgress.reset();
@@ -213,6 +214,7 @@
     show($("#workspace-readonly"), !manage);
     if (state.pane === "connections" && state.connectionsView === "wizard") syncMaster.enter();
     if (state.pane === "connections") await Promise.allSettled([ai.load(), cardLoader.load(), loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
+    if (state.pane === "connections" && state.connectionsView === "novofon") await novofon.load();
     if (state.pane === "messages") { chat.setView(state.chatView || "all", false); await chat.enter(); }
     if (state.pane === "tasks") await tasks?.enter();
     if (state.pane === "summary") await cabinet.summary();
@@ -312,7 +314,7 @@
     cabinet.navigate(button.dataset.pane).catch(error => { if (error.name !== "AbortError") feedback(error.message, true); });
   });
   $("#workspace-select").addEventListener("change", async event => {
-    state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; team.reset(); resetAlfa(); resetAlfaMax(); directory.reset(); chat.reset();
+    state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); directory.reset(); chat.reset();
     try { await renderPane(state.pane); } catch (error) { if (error.name !== "AbortError") feedback(error.message, true); }
   });
   $("#workspace-form").addEventListener("submit", event => {
@@ -374,23 +376,24 @@
     syncMaster.render();
   }
   function connectionView(view) {
-    if (!["wizard", "settings", "voice", "agents"].includes(view)) view = "wizard";
+    if (!["wizard", "novofon", "settings", "voice", "agents"].includes(view)) view = "wizard";
     const previous = state.connectionsView;
     if (previous === "wizard" && view !== "wizard") syncMaster.leave();
     state.connectionsView = view;
     if (view === "wizard") void cardLoader.load();
-    for (const name of ["wizard", "settings", "voice", "agents"]) {
+    for (const name of ["wizard", "novofon", "settings", "voice", "agents"]) {
       show($("#connections-" + name + "-view"), name === view);
       $("#connections-" + name + "-tab").setAttribute("aria-selected", String(name === view));
       $("#connections-" + name + "-tab").tabIndex = name === view ? 0 : -1;
     }
     if (view === "wizard") syncMaster.enter();
+    if (view === "novofon") void novofon.load();
   }
   for (const button of document.querySelectorAll("[data-connection-view]")) button.addEventListener("click", () => connectionView(button.dataset.connectionView));
   $(".connection-tabs").addEventListener("keydown", event => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const names = ["wizard", "settings", "voice", "agents"];
+    const names = ["wizard", "novofon", "settings", "voice", "agents"];
     const focusedView = event.target.closest("[data-connection-view]")?.dataset.connectionView;
     const index = names.indexOf(focusedView || state.connectionsView || "wizard");
     const view = event.key === "Home" ? names[0] : event.key === "End" ? names.at(-1)
@@ -632,6 +635,7 @@
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast: feedback, confirm, renderPane });
   window.CenterVoice({ $, state, api, toast: feedback });
   const tasks = window.CenterTasks ? window.CenterTasks({ $, state, api, node, show, toast: feedback, notices, renderPane }) : null;
+  const novofon = window.CenterNovofon({ $, state, api, show, notice, confirm });
   const ai = window.CenterAi({ $, state, api, node, show, notice, toast: feedback, confirm });
   const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date, onStatus: (payload, view) => {
     syncMaster.progress(payload, view);

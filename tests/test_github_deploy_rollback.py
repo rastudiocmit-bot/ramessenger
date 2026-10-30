@@ -41,6 +41,24 @@ class RollbackTests(unittest.TestCase):
         self.assert_compose_only_api([(a,None) for a,_ in calls])
         self.assertEqual(ready.call_count, 2)
 
+    def test_paired_schema_is_restored_before_old_api_is_started(self):
+        order = []
+        def command(*argv, **kwargs):
+            order.append(kwargs['env']['CM_IMAGE'])
+        with patch.object(deploy, 'cmd', side_effect=command), patch.object(deploy, 'wait_ready', side_effect=[False, True]):
+            with self.assertRaisesRegex(ValueError, 'failed readiness'):
+                deploy.deploy_api_with_rollback(OLD, NEW, '/backup.dump', before_rollback=lambda: order.append('schema-restored'))
+        self.assertEqual(order, [NEW, 'schema-restored', OLD])
+
+    def test_failed_schema_recovery_does_not_start_incompatible_old_api(self):
+        calls = []
+        with patch.object(deploy, 'cmd', side_effect=lambda *argv, **kwargs: calls.append(kwargs['env']['CM_IMAGE'])), \
+             patch.object(deploy, 'wait_ready', return_value=False):
+            with self.assertRaisesRegex(RuntimeError, 'schema recovery failed'):
+                deploy.deploy_api_with_rollback(OLD, NEW, '/backup.dump',
+                    before_rollback=lambda: (_ for _ in ()).throw(RuntimeError('schema recovery failed')))
+        self.assertEqual(calls, [NEW])
+
     def test_recreation_error_still_rolls_back(self):
         calls = []
         def fake_cmd(*argv, **kwargs):

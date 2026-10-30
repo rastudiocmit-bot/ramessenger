@@ -9,7 +9,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts import diagnose_novofon as n
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "app" / "backend" / "src"))
+from center_messenger import novofon_client as n
 
 
 TOKEN = "synthetic-private-token-123456"

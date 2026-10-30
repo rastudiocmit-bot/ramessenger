@@ -24,9 +24,12 @@ CASES = (
     'test_native_relink',
     'test_native_archive_relink',
     'test_max_container',
+    'test_novofon_diagnostic.DiagnosticTests',
+    'test_novofon_connection.NovofonServiceTests',
 )
 
 DATABASE_CASES = (
+    'test_novofon_connection.NovofonDatabaseTests',
     'test_native_archive_database.ArchiveDatabaseTests.test_empty_archive_redirect_is_invalidated_by_target_phone_change',
     'test_native_archive_database.ArchiveDatabaseTests.test_empty_archive_source_recovery_does_not_move_unproven_history_or_unknown_sends',
     'test_native_archive_database.ArchiveDatabaseTests.test_empty_archive_source_recovery_preserves_failed_sends_and_resolves_old_links',

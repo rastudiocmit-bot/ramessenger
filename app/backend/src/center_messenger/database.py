@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0029_invitation_sections"
+SCHEMA_REVISION = "0030_novofon_settings"
 
 
 def log_database_error(logger, error, *, operation):
@@ -108,6 +108,7 @@ TENANT_TABLES = (
     "ai_agents",
     "ai_agent_versions",
     "ai_usage",
+    "novofon_settings",
 )
 
 IDENTITY_RLS_TABLES = (

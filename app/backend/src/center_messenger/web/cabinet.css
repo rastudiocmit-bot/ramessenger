@@ -2050,7 +2050,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 #pane-connections .connection-page-header p{margin:5px 0 0;max-width:85ch;font-size:12px;line-height:1.6;color:var(--muted)}
 #pane-connections .connection-help{margin:0 0 16px}
 #pane-connections .connection-help dd{max-width:90ch}
-#pane-connections .connection-tabs{display:grid;grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(0,1fr));gap:4px;max-width:var(--connections-width);overflow:visible;border-bottom:0;margin-bottom:16px;padding-bottom:0}
+#pane-connections .connection-tabs{display:grid;grid-template-columns:minmax(0,1.5fr) repeat(4,minmax(0,1fr));gap:4px;max-width:var(--connections-width);overflow:visible;border-bottom:0;margin-bottom:16px;padding-bottom:0}
 #pane-connections .connection-tabs button{justify-content:center;min-width:0;min-height:46px;padding:9px 12px;white-space:normal;line-height:1.4;text-align:center;background:var(--surface-2);border:1px solid transparent;border-radius:10px;box-shadow:none;font-size:12px}
 #pane-connections .connection-tabs button[aria-selected=true]{background:var(--primary-tint);color:var(--primary-ink);border-color:color-mix(in srgb,var(--primary) 22%,var(--line))}
 #pane-connections .connection-tabs svg{flex:none}
@@ -2561,3 +2561,19 @@ body:has(#cabinet[hidden]){overflow:auto}
  #notification-settings-dialog .notification-settings-body{padding:0 9px 12px 16px;margin-right:5px}
  #notification-settings-dialog .notification-settings-footer{padding-left:16px;padding-right:16px}
 }
+
+/* Novofon uses the connection page's existing cards and spacing. */
+.novofon-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);gap:16px}
+.novofon-grid .card-h{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 18px;flex-wrap:wrap}
+.novofon-grid .card-h h3{margin:0;font-size:15px}.novofon-grid .card-b{padding:18px}
+.novofon-key-row{display:flex;align-items:center;gap:8px}.novofon-key-row input{flex:1;min-width:0}
+.novofon-period{margin:16px 0;max-width:420px}.novofon-checks{list-style:none;padding:0;margin:0}
+.novofon-checks li{display:grid;gap:5px;padding:12px 0;border-bottom:1px solid var(--line)}
+.novofon-checks li:first-child{padding-top:0}.novofon-checks strong{font-size:13px}
+.novofon-checks span,.novofon-next span{font-size:12px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
+.novofon-checks [data-state=error] span{color:var(--danger,#b33a3a)}
+.novofon-next{display:grid;gap:6px;margin:18px 0 0;padding-top:16px;border-top:1px solid var(--line)}
+.novofon-next strong{font-size:13px}#novofon-loading{display:flex;align-items:center;gap:7px}
+#novofon-loading[hidden]{display:none}
+@media(max-width:900px){.novofon-grid{grid-template-columns:1fr}}
+@media(max-width:640px){#pane-connections .connection-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}#connections-wizard-tab{grid-column:1/-1}.novofon-grid .card-b{padding:14px}.novofon-grid .card-h{padding:14px}.novofon-key-row{align-items:stretch;flex-wrap:wrap}.novofon-key-row input{flex-basis:200px}}

@@ -290,7 +290,9 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
         if head!=db_rev:
             transition = ROOT/'max-runtime-transition.json'
             if transition.exists():
-                raise RuntimeError('Frozen MAX worker requires a separately reviewed paired schema update')
+                from max_runtime_deploy import allows_schema_update
+                if not allows_schema_update(ROOT, src, sha, db_rev, head):
+                    raise RuntimeError('Frozen MAX worker requires a separately reviewed paired schema update')
             # The database must be an ancestor of the new head (no branches, no downgrades).
             history=alembic(target,"history","-r",db_rev+":head")
             if not history or db_rev not in history:
@@ -308,21 +310,28 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
         if not promotion_fresh(sha,old):
             return
         sys.path.insert(0,str(helper_root or ROOT))
+        import github_promote_vps as promoter
         from github_promote_vps import deploy_api_with_rollback
         migrated=False
+        paired_schema_started=False
         try:
             if head!=db_rev:
+                if (ROOT/'max-runtime-transition.json').exists():
+                    from max_runtime_deploy import begin_schema_update
+                    begin_schema_update(ROOT, src, sha, target, dest)
+                    paired_schema_started=True
                 announce("MIGRATE",db_rev,"->",head)
                 migrate(target)
                 migrated=True
             from max_runtime_deploy import promote
-            import github_promote_vps as promoter
             if not promote(ROOT,src,sha,old,target,dest,promoter):
                 deploy_api_with_rollback(old,target,dest)
         except Exception:
             s["last_failed_sha"]=sha
             safe_state(s)
-            if migrated:
+            from max_runtime_deploy import recover
+            recover(ROOT, promoter)
+            if migrated and not paired_schema_started:
                 announce("SCHEMA ROLLBACK",head,"->",db_rev,"backup",dest)
                 migrate(target,"alembic","downgrade",db_rev)
                 restore_api(old)

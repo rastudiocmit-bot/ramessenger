@@ -4,7 +4,7 @@ const fs=require('node:fs'),path=require('node:path');const {JSDOM}=require('jsd
 const web=path.join(__dirname,'../app/backend/src/center_messenger/web');
 function setup(t,notices=null){
   const dom=new JSDOM(fs.readFileSync(path.join(web,'index.html'),'utf8'),{runScripts:'outside-only',url:'https://test.example.test'}),w=dom.window;
-  for(const name of ['Directory','Chat','Voice','Ai','AlfaProgress','Cabinet','Team'])w['Center'+name]=()=>({});
+  for(const name of ['Directory','Chat','Voice','Ai','AlfaProgress','Cabinet','Team','Novofon'])w['Center'+name]=()=>({});
   if(notices)w.CenterNotices=()=>notices;
   let source=fs.readFileSync(path.join(web,'app.js'),'utf8');source=source.replace('  start();\n})();','  window.testApp = {api, feedback, busy, state, refreshConnectionNotices};\n})();');
   w.eval(source);t.after(()=>dom.window.close());return{w,$:s=>w.document.querySelector(s),...w.testApp};

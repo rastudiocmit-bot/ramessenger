@@ -320,4 +320,114 @@ class WorkerUpdateTests(unittest.TestCase):
         self.assertIn('CM_MAX_IMAGE='+self.max_image,(self.root/'.env').read_text())
 
 
+class PairedSchemaTests(unittest.TestCase):
+    inspect = WorkerUpdateTests.inspect
+    run_command = WorkerUpdateTests.run_command
+    def setUp(self):
+        WorkerUpdateTests.setUp(self)
+        self.transition = {'from':'0029_invitation_sections','to':'0030_novofon_settings',
+                           'migration':'app/backend/migrations/versions/0030_novofon_settings.py',
+                           'rollback_preserves_data':True}
+        path = self.source / self.transition['migration']
+        path.parent.mkdir(parents=True)
+        path.write_text('reviewed additive migration')
+        self.paired_policy = {'worker_runtime_contract':'novofon-settings-schema-v1',
+            'schema_revision':self.transition['to'], 'paired_schema_update':self.transition,
+            'protected':{self.transition['migration']:runtime.digest(path)}}
+
+    def prepare_paired(self):
+        path = self.source/'deploy/max-protection.json'
+        path.write_text(json.dumps(self.paired_policy))
+        with patch.object(runtime,'inspect',side_effect=self.inspect), patch.object(runtime,'run',side_effect=self.run_command):
+            runtime.prepare_update(self.root,self.source,SHA,OLD,self.max_image,runtime.digest(path),self.transition['from'])
+
+    def test_unreviewed_schema_does_not_get_worker_only_admission(self):
+        (self.source/'deploy/max-protection.json').write_text(json.dumps(self.paired_policy))
+        with patch.object(runtime,'inspect',side_effect=self.inspect), patch.object(runtime,'run',side_effect=self.run_command):
+            with self.assertRaisesRegex(RuntimeError,'same database schema'):
+                runtime.prepare_update(self.root,self.source,SHA,OLD,self.max_image,
+                    runtime.digest(self.source/'deploy/max-protection.json'))
+
+    def test_exact_plan_is_required_and_admits_only_one_reviewed_revision(self):
+        self.prepare_paired()
+        with patch.object(runtime,'inspect',side_effect=self.inspect):
+            self.assertTrue(runtime.allows_schema_update(self.root,self.source,SHA,self.transition['from'],self.transition['to']))
+            self.assertFalse(runtime.allows_schema_update(self.root,self.source,SHA,self.transition['from'],'future_revision'))
+
+    def test_modified_migration_cannot_be_prepared(self):
+        path=self.source/'deploy/max-protection.json'
+        path.write_text(json.dumps(self.paired_policy))
+        (self.source/self.transition['migration']).write_text('unreviewed alteration')
+        with patch.object(runtime,'inspect',side_effect=self.inspect), patch.object(runtime,'run',side_effect=self.run_command):
+            with self.assertRaisesRegex(RuntimeError,'Exact reviewed'):
+                runtime.prepare_update(self.root,self.source,SHA,OLD,self.max_image,runtime.digest(path),self.transition['from'])
+
+    def test_intent_is_durable_before_migration_without_restarting_any_container(self):
+        self.prepare_paired()
+        with patch.object(runtime,'inspect',side_effect=self.inspect),patch.object(runtime,'run',side_effect=self.run_command):
+            runtime.begin_schema_update(self.root,self.source,SHA,NEW,self.backup)
+        plan=json.loads((self.root/runtime.UPDATE).read_text())
+        self.assertEqual(plan['phase'],'migrating')
+        self.assertEqual(plan['new_api_id'],'sha256:new-image')
+        self.assertFalse(any('up' in command or 'downgrade' in command for command in self.calls))
+
+    def test_recovery_after_migration_commit_downgrades_before_readiness(self):
+        self.prepare_paired()
+        with patch.object(runtime,'inspect',side_effect=self.inspect),patch.object(runtime,'run',side_effect=self.run_command):
+            runtime.begin_schema_update(self.root,self.source,SHA,NEW,self.backup)
+        order=[]
+        promoter=Mock()
+        promoter.wait_ready.side_effect=lambda image: order.append('api-ready') or True
+        with patch.object(runtime,'inspect',side_effect=self.inspect), \
+             patch.object(runtime,'restore_schema',side_effect=lambda *args: order.append('schema-restored')), \
+             patch.object(runtime,'wait_worker',side_effect=lambda *args: order.append('worker-ready') or True):
+            runtime.recover_update(self.root,promoter)
+        self.assertEqual(order,['schema-restored','worker-ready','api-ready'])
+        self.assertEqual(json.loads((self.root/runtime.UPDATE).read_text())['phase'],'failed')
+
+    def test_recovery_never_downgrades_an_unrelated_schema(self):
+        plan={'schema_transition':self.transition,'new_api':NEW,'new_api_id':'sha256:new-image'}
+        with patch.object(runtime,'schema_revision',return_value='some_other_task_revision'),patch.object(runtime,'run') as command:
+            with self.assertRaisesRegex(RuntimeError,'Unrelated schema'):
+                runtime.restore_schema(self.root,plan)
+        command.assert_not_called()
+
+    def test_paired_promotion_requires_the_same_verified_migration_image(self):
+        self.prepare_paired()
+        with patch.object(runtime,'inspect',side_effect=self.inspect),patch.object(runtime,'run',side_effect=self.run_command):
+            runtime.begin_schema_update(self.root,self.source,SHA,NEW,self.backup)
+        with patch.object(runtime,'inspect',side_effect=self.inspect),patch.object(runtime,'schema_revision',return_value=self.transition['to']), \
+             patch.object(runtime,'run',return_value='[{"Id":"sha256:reassigned"}]') as command:
+            with self.assertRaisesRegex(RuntimeError,'image identity changed'):
+                runtime.promote(self.root,self.source,SHA,OLD,NEW,self.backup,Mock())
+        self.assertFalse(any('up' in call.args or 'tag' in call.args for call in command.call_args_list))
+
+    def test_paired_success_uses_callback_and_keeps_future_api_releases_independent(self):
+        self.prepare_paired()
+        with patch.object(runtime,'inspect',side_effect=self.inspect),patch.object(runtime,'run',side_effect=self.run_command):
+            runtime.begin_schema_update(self.root,self.source,SHA,NEW,self.backup)
+        promoter=Mock()
+        with patch.object(runtime,'inspect',side_effect=self.inspect),patch.object(runtime,'run',side_effect=self.run_command), \
+             patch.object(runtime,'schema_revision',return_value=self.transition['to']), \
+             patch.object(runtime.subprocess,'run',return_value=Mock(returncode=1)),patch.object(runtime,'wait_worker',return_value=True):
+            self.assertTrue(runtime.promote(self.root,self.source,SHA,OLD,NEW,self.backup,promoter))
+        callback=promoter.deploy_api_with_rollback.call_args.kwargs['before_rollback']
+        with patch.object(runtime,'restore_schema') as restore:
+            callback()
+        restore.assert_called_once()
+        self.assertEqual(json.loads((self.root/runtime.UPDATE).read_text())['phase'],'complete')
+        with patch.object(runtime,'run') as command:
+            self.assertFalse(runtime.promote(self.root,self.source,'c'*40,NEW,'future',self.backup,Mock()))
+        command.assert_not_called()
+
+    def test_rollback_uses_the_verified_image_without_loading_a_database_dump(self):
+        plan={'schema_transition':self.transition,'new_api':NEW,'new_api_id':'sha256:new-image'}
+        with patch.object(runtime,'schema_revision',side_effect=[self.transition['to'],self.transition['from']]), \
+             patch.object(runtime,'run',return_value='[{"Id":"sha256:new-image"}]') as command:
+            runtime.restore_schema(self.root,plan)
+        operations=[call.args for call in command.call_args_list]
+        self.assertTrue(any('alembic' in op and 'downgrade' in op and self.transition['from'] in op for op in operations))
+        self.assertFalse(any('pg_restore' in op for op in operations))
+
+
 if __name__ == '__main__': unittest.main()

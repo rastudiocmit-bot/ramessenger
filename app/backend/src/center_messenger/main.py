@@ -39,6 +39,8 @@ from center_messenger.http_security import SecurityMiddleware, StaticCompression
 from center_messenger.max_client import MaxClient
 from center_messenger.max_connections import MaxConnections
 from center_messenger.messaging import Messaging
+from center_messenger.novofon_api import router as novofon_router
+from center_messenger.novofon_service import Novofon
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +79,7 @@ def create_app(
         )
         app.state.alfa_sync = AlfaSync(app.state.alfa) if app.state.alfa else None
         app.state.ai_voice = AiVoice(app.state.alfa) if app.state.alfa else None
+        app.state.novofon = Novofon(app.state.accounts, app.state.alfa.vault) if app.state.alfa else None
         app.state.tasks = Tasks(app.state.alfa, app.state.ai_voice) if app.state.alfa else None
         if app.state.alfa and config.runtime_role == 'api':
             from center_messenger.max_worker_control import BrowserDisabled
@@ -123,6 +126,7 @@ def create_app(
     app.include_router(chat_router)
     app.include_router(ai_router)
     app.include_router(tasks_router)
+    app.include_router(novofon_router)
     app.include_router(max_hooks)
     web = Path(__file__).with_name("web")
     app.mount("/assets", StaticFiles(directory=web), name="assets")
