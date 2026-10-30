@@ -5,7 +5,7 @@ import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from sqlalchemy import text
 import test_message_sync as messages
@@ -14,7 +14,7 @@ from center_messenger.alfa_history import (advance_history, live_freshness, next
                                           plan_history, ready_history)
 from center_messenger.alfa_max import AlfaMaxWorker
 from center_messenger.alfa_max_browser import AlfaBrowserError
-from center_messenger.alfa_session import CONTROL, control
+from center_messenger.alfa_session import CONTROL, NativeSessions, control
 from center_messenger.native_priority import choose, record_turn
 
 
@@ -82,6 +82,47 @@ class PriorityPolicyTests(unittest.TestCase):
         self.assertEqual((cursor['1:receive'], cursor['catchup:1:receive']), (23, 4))
         self.assertNotIn((1, 'receive', 0), requests)
         self.assertEqual(cursor['due_live:1:receive'], (self.now + timedelta(seconds=15)).isoformat())
+
+    def test_dedicated_max_reads_history_with_directory_worker_disabled(self):
+        service = Mock()
+        service.accounts.settings = SimpleNamespace(runtime_role='max', crm_sync_worker=False, max_worker=True)
+        db = Mock()
+        db.execute.return_value.scalar_one.return_value = None
+        with patch('center_messenger.alfa_session.ready_history', return_value={'live': self.now}):
+            ready = NativeSessions(service)._ready(db, {'workspace_id':'w','connection_id':'c'}, self.now)
+        self.assertEqual(ready, {'live': self.now})
+
+    def test_dedicated_max_can_acquire_real_history_arbitration_without_a_send(self):
+        service = MagicMock()
+        service.accounts.settings = SimpleNamespace(runtime_role='max', crm_sync_worker=False, max_worker=True)
+        row = {'workspace_id':'w', 'connection_id':'c', 'history_cursor':{}}
+        db = service.accounts.transaction.return_value.__enter__.return_value
+        db.execute.return_value.scalar_one.return_value = None
+        sessions = NativeSessions(service)
+        with patch.object(sessions, '_row', return_value=row), \
+             patch('center_messenger.alfa_session.ready_history', return_value={'live':self.now}):
+            lease = sessions.claim('w', 'c', purpose='history')
+        self.assertEqual(lease['kind'], 'live')
+
+    def test_api_role_never_competes_for_native_browser_turns(self):
+        service = Mock()
+        service.accounts.settings = SimpleNamespace(runtime_role='api', crm_sync_worker=True, max_worker=True)
+        db = Mock()
+        db.execute.return_value.scalar_one.return_value = self.now
+        with patch('center_messenger.alfa_session.ready_history', return_value={'live':self.now}) as history:
+            ready = NativeSessions(service)._ready(db, {'workspace_id':'w','connection_id':'c'}, self.now)
+        self.assertEqual(ready, {})
+        history.assert_not_called()
+        db.execute.assert_not_called()
+
+    def test_legacy_combined_disabled_reader_stays_disabled(self):
+        service=Mock()
+        service.accounts.settings=SimpleNamespace(crm_sync_worker=False,max_worker=False)
+        db=Mock()
+        with patch('center_messenger.alfa_session.ready_history') as history:
+            self.assertEqual(NativeSessions(service)._ready(db,{},self.now),{})
+        history.assert_not_called()
+        db.execute.assert_not_called()
 
 
 @unittest.skipUnless(os.environ.get('CM_TEST_DATABASE_URL'), 'isolated PostgreSQL URL required')
@@ -230,6 +271,13 @@ class PrioritySessionTests(unittest.TestCase):
         operation = self.service.sessions.claim(self.workspace, self.channel, purpose='history')
         self.assertEqual(operation['kind'], 'live')
         self.service.sessions.release(operation)
+
+    def test_dedicated_max_flag_set_imports_pages_and_releases_its_queue(self):
+        self.accounts.settings = SimpleNamespace(runtime_role='max', max_worker=True, crm_sync_worker=False)
+        self.schedule()
+        self.assertTrue(self.work())
+        self.assertIsNotNone(self.setting()['last_sync_at'])
+        self.assertEqual(self.setting()['history_cursor']['last_live_cycle']['checked'],4)
 
     def test_release_does_not_bypass_history_network_backoff(self):
         self.schedule()

@@ -211,12 +211,25 @@ def read_sql(runner, db_id, query, database='center_messenger', user='cm_owner')
 AUDIT_SQL = """SELECT json_build_object(
  'checked_at',now(), 'schema',(SELECT version_num FROM alembic_version),
  'connections',(SELECT coalesce(json_agg(json_build_object('workspace_id',workspace_id,
-   'state',state,'last_sync_at',last_sync_at,'error_code',last_error_code)), '[]'::json) FROM alfa_max_settings),
+   'state',state,'last_sync_at',last_sync_at,'error_code',last_error_code,
+   'sync_lag_seconds',CASE WHEN last_sync_at IS NOT NULL THEN greatest(0,extract(epoch FROM now()-last_sync_at)) END,
+   'activity_phase',history_cursor#>>'{activity,phase}',
+   'activity_at',history_cursor#>>'{activity,updated_at}')), '[]'::json) FROM alfa_max_settings),
+ 'history_queue',(SELECT coalesce(json_agg(json_build_object('workspace_id',workspace_id,
+   'due_at',CASE WHEN isfinite(due_at) THEN due_at END,
+   'lease_active',lease_owner IS NOT NULL AND lease_until>now(),
+   'lease_until',CASE WHEN isfinite(lease_until) THEN lease_until END)), '[]'::json) FROM alfa_max_sync_queue),
  'send_states',(SELECT coalesce(json_object_agg(state,n),'{}'::json) FROM (
    SELECT s.state,count(*) n FROM send_commands s JOIN conversations c
    ON c.workspace_id=s.workspace_id AND c.id=s.conversation_id JOIN connections cn
    ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id
    WHERE cn.kind='alfa_max_browser' AND s.created_at>=now()-interval '24 hours' GROUP BY s.state) s),
+ 'failed_send_codes',(SELECT coalesce(json_agg(row_to_json(f)), '[]'::json) FROM (
+   SELECT s.last_error_code,count(*) n,min(s.updated_at) first_at,max(s.updated_at) last_at
+   FROM send_commands s JOIN conversations c ON c.workspace_id=s.workspace_id AND c.id=s.conversation_id
+   JOIN connections cn ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id
+   WHERE cn.kind='alfa_max_browser' AND s.state='failed' AND s.created_at>=now()-interval '24 hours'
+   GROUP BY s.last_error_code) f),
  'waiting_over_5_minutes',(SELECT count(*) FROM send_commands s JOIN conversations c
    ON c.workspace_id=s.workspace_id AND c.id=s.conversation_id JOIN connections cn
    ON cn.workspace_id=c.workspace_id AND cn.id=c.connection_id WHERE cn.kind='alfa_max_browser'
@@ -268,6 +281,8 @@ def audit(runner, root=ROOT, trust=None):
     for connection in database['connections']:
         if connection['state'] != 'active':
             issues.append('Native session is not active: ' + connection['workspace_id'])
+        elif (connection.get('sync_lag_seconds') or 0) > 300:
+            issues.append('Native history has no successful read for over 5 minutes: ' + connection['workspace_id'])
     with urllib.request.urlopen('http://127.0.0.1:8100/health/ready', timeout=5) as response:
         api_ready = response.status == 200 and json.load(response).get('status') == 'ready'
     if not api_ready:

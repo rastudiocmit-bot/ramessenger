@@ -1,5 +1,5 @@
 {
-  "application_baseline": "c72bdbcf8932859b34b342393f1ef75ebd90240a",
+  "application_baseline": "f8d9e0985a11c8f7c549769518be36c09b49d8a3",
   "bundle": [
     "scripts/max_release_guard.py",
     "scripts/local_build_vps.py",
@@ -47,7 +47,7 @@
     "app/backend/src/center_messenger/alfa_max_api.py": "5938ca56190060e76876be4b02db799847e2b193000a02c75dbc9835f570ff31",
     "app/backend/src/center_messenger/alfa_max_browser.py": "1fc550bf82a14b4b3afc302879605b4e43ad5b1929aece7fafaa69acda3f1b1b",
     "app/backend/src/center_messenger/alfa_repair.py": "7fd8a42f1be850fa45241611193a6c11e76c9e0e0da9f59b5367302ce16b4302",
-    "app/backend/src/center_messenger/alfa_session.py": "779351136f9ebfeb371bd357f39ae11542346dffb7c8b40a499c4ac68fd5cdee",
+    "app/backend/src/center_messenger/alfa_session.py": "5f6a918e92e89a6772f8070eed80db57a955b78ad72074a2c754efb861089971",
     "app/backend/src/center_messenger/alfa_shared_parent.py": "83a26d649fa7ee0773812f71d6e69ee61dc2b6001198517aaa476b3676fa1893",
     "app/backend/src/center_messenger/connector_vault.py": "d4f3209565a5334a7f0908326e421ba59bc5823d0ecd1d91399ac02c5db232f1",
     "app/backend/src/center_messenger/history_receipts.py": "b526287f15e34f8eb63548875453f22b347dd2ddc1e83715473298503959b46f",
@@ -70,16 +70,16 @@
     "scripts/github_promote_vps.py": "074d9508c1c463beb868887a98aea04f6ed20c5d0d4397c3caadf4f9cd860bbc",
     "scripts/local_build_vps.py": "d400106b043b40956e5af0ccd84a62d2abf2811a88eacc0e14e24d39886178e8",
     "scripts/max_release_guard.py": "32df2cf0e5fc9f66564c80f76fe79ea7ab7c6935cf58110b2facbdef8c0d0bdc",
-    "scripts/max_runtime_deploy.py": "6df91ac7366f11a813d78137d8d075cb99f0b8b3e506e85f460cc46a6eadc012",
+    "scripts/max_runtime_deploy.py": "8905e4d84362fca7e35e75c16be0ea35e60579175a0cdf1984a8a788e2154f04",
     "tests/run_max_compatibility.py": "0983524504e3c89a9966e10705d9d8272503369ab4f91eedec76ce24396137fb",
     "tests/test_compose_recipient.py": "e32ecd4c6c9613871b8354e02d433a9ad3b075f6541dc13857cb972f76aba4a8",
     "tests/test_github_deploy_rollback.py": "a18de8704c89c1f624bc32c789101193b7e29a3063158a68579f2bc9b409e165",
     "tests/test_history_audit.py": "86d404e24da7df39f2335a958e9e8b166bc805e0b7aaf2cbe42998bc6ee04d5e",
-    "tests/test_max_container.py": "db4ebee76d69832944b997f462818a86f01f59588f3dba1be6c88e54e5b63485",
+    "tests/test_max_container.py": "721e1a5f83a80945d00cf230ccb8a6033b1d877d18dc3c6e755402acd20f47fc",
     "tests/test_max_release_guard.py": "cd3a44a135fc162bdb747321e27c44ff5e0a22637a21baf9ffd7df9b70bb7185",
-    "tests/test_max_runtime_deploy.py": "22a4d0cf89e3d7be1961612249cc4ce5d8c340065500a1fec30de9c55645dc3e",
+    "tests/test_max_runtime_deploy.py": "7c05be87a06818fa7d6890c468e0931b8026025977409a2e03b326f2f56fdbad",
     "tests/test_message_sync.py": "f85cca6eb5eefe1e10229d575298b83d023548fa2cda26bd8e309eda35a46030",
-    "tests/test_native_priority.py": "7b2113efbd67875cbd24fe209572813328566d45189d1977b9d707d18f04495e",
+    "tests/test_native_priority.py": "5bb8e09599a2cf88c73c4ba02612678d672558684dc3175d82c352a407c6ab97",
     "tests/test_native_relink.py": "81c2b34bcb0919d0ee1c689f753fb11630bb8b2af33e4d5eb60ab48f73f58693",
     "tests/test_native_send_runtime.py": "f14c3b7e7f44ff3eebdb93824470360448873dbd81a5f535d18275f55f987050",
     "tests/test_native_session.py": "93a530d8dde1209dc1a4069bfbfc807dcab2bd24bb82d28f1e6c838dbf668d08",
@@ -108,5 +108,6 @@
     "tests/test_native_relink.py",
     "tests/test_max_container.py"
   ],
-  "version": 1
+  "version": 1,
+  "worker_runtime_contract": "native-history-role-v1"
 }

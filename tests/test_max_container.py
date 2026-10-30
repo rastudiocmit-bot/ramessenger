@@ -35,7 +35,7 @@ class RoleTests(unittest.TestCase):
 
     def test_worker_has_only_max_reader_sender_and_no_cards_projection_or_other_channels(self):
         services = self.services()
-        loader = build_loader(services, Settings(runtime_role='max', crm_sync_worker=True, max_worker=True))
+        loader = build_loader(services, Settings(runtime_role='max', crm_sync_worker=False, max_worker=True))
         self.assertEqual(set(loader.steps), {'alfa_max.history', 'alfa_max.outgoing'})
         self.assertFalse(loader.registration_errors)
 

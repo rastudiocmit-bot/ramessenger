@@ -92,8 +92,13 @@ class NativeSessions:
 
     def _ready(self, db, row, now):
         config = getattr(self.service.accounts, 'settings', None)
-        ready = ready_history(row.get('history_cursor') or {}, now) if getattr(config, 'crm_sync_worker', True) else {}
-        if getattr(config, 'max_worker', True):
+        role = getattr(config, 'runtime_role', 'combined')
+        native = role != 'api'
+        # In a dedicated MAX process the directory worker is intentionally off.
+        # Keep arbitration aligned with the registered native history adapter.
+        history = native and (role == 'max' or getattr(config, 'crm_sync_worker', True))
+        ready = ready_history(row.get('history_cursor') or {}, now) if history else {}
+        if native and getattr(config, 'max_worker', True):
             due = db.execute(text("SELECT min(j.due_at) FROM message_jobs j JOIN send_commands s "
                 "ON s.workspace_id=j.workspace_id AND s.id=j.subject_id "
                 "WHERE j.workspace_id=:w AND j.connection_id=:c AND j.kind='send' "
