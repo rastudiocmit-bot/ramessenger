@@ -1,7 +1,10 @@
 """Exact third-container transition and fail-closed pin checks; no real Docker."""
 import json
+import copy
 from pathlib import Path
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock,patch
 
@@ -94,6 +97,133 @@ class TelephonyRuntimeTests(unittest.TestCase):
         self.assertIn(('docker','rm','-f','created-phone'),self.calls)
         self.assertFalse(self.root.joinpath(phone.STATE).exists())
         self.assertEqual(self.backup.read_bytes(),b'x'*2048)
+
+
+class TelephonyUpdateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name)/'live';self.root.mkdir();(self.root/'rollback').mkdir()
+        self.source=Path(self.temp.name)/'source';(self.source/'deploy').mkdir(parents=True)
+        self.sha='a'*40;self.old_sha='b'*40
+        self.old_api='center-messenger:local-'+self.old_sha[:12]
+        self.new_api='center-messenger:local-'+self.sha[:12]
+        self.old_phone='center-messenger:telephony-'+self.old_sha[:12]
+        self.new_phone='center-messenger:telephony-'+self.sha[:12]
+        self.max_image='center-messenger:max-pinned'
+        self.old_env=('CM_MAX_IMAGE='+self.max_image+'\nCM_TELEPHONY_IMAGE='+self.old_phone+'\n').encode()
+        (self.root/'.env').write_bytes(self.old_env)
+        for path in (self.root/'compose.yaml',self.source/'compose.yaml'):path.write_text('unchanged compose')
+        self.policy={'schema_revision':'0031_telephony_calls','telephony_runtime_contract':'new-phone-contract',
+                     'protected':{'compose.yaml':runtime.digest(self.source/'compose.yaml')}}
+        (self.source/'deploy/max-protection.json').write_text(json.dumps(self.policy))
+        self.old_state={'phase':'complete','sha':self.old_sha,'worker_image':self.old_phone,'worker_id':'old-phone-id',
+                        'contract':'old-phone-contract','schema_revision':'0031_telephony_calls'}
+        (self.root/phone.STATE).write_text(json.dumps(self.old_state))
+        def info(tag,identity,role):
+            return {'Id':identity+'-container','Image':identity,'Config':{'Image':tag,'Env':['CM_RUNTIME_ROLE='+role]},
+                    'State':{'Status':'running','Health':{'Status':'healthy'}}}
+        self.processes={'center-messenger-api-1':info(self.old_api,'api-id','api'),
+                        phone.NAME:info(self.old_phone,'old-phone-id','telephony'),
+                        'center-messenger-max-worker-1':info(self.max_image,'fixed-max-id','max')}
+        self.max_before=copy.deepcopy(self.processes['center-messenger-max-worker-1'])
+        self.calls=[];self.revision='0031_telephony_calls'
+        self.phone_present=True
+        self.runtime=SimpleNamespace(write=runtime.write,digest=runtime.digest,run=self.run_command,
+            inspect=lambda name:copy.deepcopy(self.processes[name]),schema_revision=lambda:self.revision)
+        self.backup=self.root/'rollback/database.dump';self.backup.write_bytes(b'd'*2048)
+        def deploy(old,new,backup):self.processes['center-messenger-api-1']['Config']['Image']=new
+        self.promoter=Mock();self.promoter.deploy_api_with_rollback.side_effect=deploy
+        self.promoter.wait_ready.return_value=True
+
+    def run_command(self,*args,**kwargs):
+        self.calls.append(args)
+        if args[:1]==('git',):return self.sha
+        if args[:2]==('docker','ps'):return phone.NAME if self.phone_present else ''
+        if args[:3]==('docker','image','inspect'):return json.dumps([{'Id':'new-phone-id'}])
+        if args[:2]==('docker','compose'):
+            if args[-1]==phone.NAME or args[-1]=='telephony-worker':
+                image=kwargs['env']['CM_TELEPHONY_IMAGE']
+                self.processes[phone.NAME]['Config']['Image']=image
+                self.processes[phone.NAME]['Image']='old-phone-id' if image==self.old_phone else 'new-phone-id'
+                self.phone_present=True
+            elif args[-1]=='api':self.processes['center-messenger-api-1']['Config']['Image']=kwargs['env']['CM_IMAGE']
+        return ''
+
+    def prepare(self):
+        phone.prepare_update(self.root,self.source,self.sha,self.old_api,self.old_phone,self.max_image,
+                             runtime.digest(self.source/'deploy/max-protection.json'),self.runtime)
+
+    def promote(self):
+        with patch.object(phone.subprocess,'run',return_value=Mock(returncode=1)):
+            return phone.promote_update(self.root,self.source,self.sha,self.old_api,self.new_api,self.backup,self.promoter,self.runtime)
+
+    def test_preparation_changes_no_running_processes_environment_or_max_pin(self):
+        self.prepare()
+        self.assertEqual((self.root/'.env').read_bytes(),self.old_env)
+        self.assertEqual(json.loads((self.root/phone.STATE).read_text()),self.old_state)
+        self.assertFalse(any('up' in call or 'stop' in call for call in self.calls))
+        self.assertEqual(phone.prepared(self.root,self.source,self.sha,self.runtime)['phase'],'prepared')
+
+    def test_phone_and_api_promote_with_the_max_container_untouched(self):
+        self.prepare();self.assertTrue(self.promote())
+        self.assertEqual(self.processes['center-messenger-max-worker-1'],self.max_before)
+        self.assertEqual(json.loads((self.root/phone.STATE).read_text())['worker_image'],self.new_phone)
+        self.assertEqual(json.loads((self.root/phone.UPDATE).read_text())['phase'],'complete')
+        self.assertEqual([c[-1] for c in self.calls if c[:2]==('docker','compose')],['telephony-worker'])
+        self.promoter.deploy_api_with_rollback.assert_called_once_with(self.old_api,self.new_api,self.backup)
+        before=len(self.calls)
+        self.assertFalse(phone.promote_update(self.root,self.source,'c'*40,self.new_api,'other-api',self.backup,self.promoter,self.runtime))
+        self.assertEqual(len(self.calls),before)
+        phone.verify(self.root,self.source,self.runtime)
+
+    def test_a_failed_api_promotion_restores_phone_configuration_without_database_or_max_changes(self):
+        self.prepare();self.promoter.deploy_api_with_rollback.side_effect=RuntimeError('synthetic API failure')
+        with self.assertRaisesRegex(RuntimeError,'synthetic API failure'):self.promote()
+        self.assertEqual((self.root/'.env').read_bytes(),self.old_env)
+        self.assertEqual(json.loads((self.root/phone.STATE).read_text()),self.old_state)
+        self.assertEqual(self.processes[phone.NAME]['Config']['Image'],self.old_phone)
+        self.assertEqual(self.processes['center-messenger-max-worker-1'],self.max_before)
+        self.assertEqual(json.loads((self.root/phone.UPDATE).read_text())['phase'],'failed')
+        self.assertFalse(any('psql' in call or 'alembic' in call or 'rm' in call for call in self.calls))
+        self.assertEqual(self.backup.read_bytes(),b'd'*2048)
+
+    def test_worker_readiness_failure_rolls_back_before_api_promotion(self):
+        self.prepare()
+        with patch.object(phone,'wait',side_effect=[False,True]):
+            with self.assertRaisesRegex(RuntimeError,'not ready'):self.promote()
+        self.promoter.deploy_api_with_rollback.assert_not_called()
+        self.assertEqual((self.root/'.env').read_bytes(),self.old_env)
+
+    def test_a_crash_leaves_a_recoverable_exact_plan(self):
+        self.prepare();self.promoter.deploy_api_with_rollback.side_effect=RuntimeError('synthetic crash')
+        with patch.object(phone,'recover_update'):
+            with self.assertRaises(RuntimeError):self.promote()
+        self.assertEqual(json.loads((self.root/phone.UPDATE).read_text())['phase'],'promoting')
+        phone.recover_update(self.root,self.promoter,self.runtime)
+        self.assertEqual((self.root/'.env').read_bytes(),self.old_env)
+        self.assertEqual(json.loads((self.root/phone.UPDATE).read_text())['phase'],'failed')
+
+    def test_a_foreign_max_restart_blocks_without_recreating_it(self):
+        self.prepare();self.processes['center-messenger-max-worker-1']['Id']='someone-else'
+        with self.assertRaisesRegex(RuntimeError,'MAX changed'):self.promote()
+        self.assertFalse(any('up' in call for call in self.calls))
+
+    def test_recovery_recreates_a_phone_container_missing_after_a_crash(self):
+        self.prepare();self.promoter.deploy_api_with_rollback.side_effect=RuntimeError('synthetic crash')
+        with patch.object(phone,'recover_update'):
+            with self.assertRaises(RuntimeError):self.promote()
+        self.phone_present=False
+        phone.recover_update(self.root,self.promoter,self.runtime)
+        self.assertTrue(self.phone_present)
+        self.assertEqual(self.processes[phone.NAME]['Config']['Image'],self.old_phone)
+        self.assertEqual(self.processes['center-messenger-max-worker-1'],self.max_before)
+
+    def test_missing_backup_or_changed_schema_blocks_before_promotion(self):
+        self.prepare();self.backup.unlink()
+        with self.assertRaisesRegex(RuntimeError,'backup required'):self.promote()
+        self.revision='0032_unrelated'
+        with self.assertRaisesRegex(RuntimeError,'schema'):self.promote()
+        self.assertEqual((self.root/'.env').read_bytes(),self.old_env)
 
 
 if __name__=='__main__':unittest.main()

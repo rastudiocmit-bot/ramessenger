@@ -34,7 +34,7 @@ class TelephonyDatabaseTests(unittest.TestCase):
         self.job={'workspace':self.workspace,'token':self.token,'settings':settings,'state':state}
         @contextmanager
         def begin():yield self.db
-        self.importer=TelephonyImport(SimpleNamespace(engine=SimpleNamespace(begin=begin)),Mock(seal=Mock(return_value='encrypted-url')))
+        self.importer=TelephonyImport(SimpleNamespace(engine=SimpleNamespace(begin=begin)),Mock(seal_recording=Mock(return_value='encrypted-url')))
 
     def publish(self,*rows):
         calls=[normalize(row,workspace=self.workspace,account='17',connection=self.connection,zone='Europe/Moscow') for row in rows]

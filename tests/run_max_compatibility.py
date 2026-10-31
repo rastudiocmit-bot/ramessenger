@@ -27,9 +27,11 @@ CASES = (
     'test_novofon_diagnostic.DiagnosticTests',
     'test_novofon_connection.NovofonServiceTests',
     'test_telephony_calls',
+    'test_novofon_quota.QuotaTests',
 )
 
 DATABASE_CASES = (
+    'test_novofon_quota_database.QuotaDatabaseTests',
     'test_novofon_connection.NovofonDatabaseTests',
     'test_telephony_database.TelephonyDatabaseTests',
     'test_native_archive_database.ArchiveDatabaseTests.test_empty_archive_redirect_is_invalidated_by_target_phone_change',

@@ -90,7 +90,7 @@ def create_worker(settings=None,*,engine_factory=make_engine,readiness_check=dat
             context(db,workspace_id=model.workspace,membership_admin='true')
             row=db.execute(text("SELECT c.recording_ciphertext,c.connection_id FROM telephony_calls c JOIN telephony_state s ON s.workspace_id=c.workspace_id AND s.account_id=c.account_id WHERE c.workspace_id=:w AND c.id=:id AND s.connected AND c.recording_ciphertext IS NOT NULL"),{'w':model.workspace,'id':model.call}).mappings().one_or_none()
             if not row:raise AuthError(404,'Запись недоступна.')
-            url=app.state.vault.open(model.workspace,row['connection_id'],row['recording_ciphertext'],purpose='novofon')['url']
+            url=app.state.vault.open_recording(model.workspace,row['connection_id'],model.call,row['recording_ciphertext'])
         body,headers,status=fetch(url,request.headers.get('range'))
         return Response(body,status_code=status,headers=headers)
     return app

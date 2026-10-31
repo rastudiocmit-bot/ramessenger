@@ -46,6 +46,9 @@ UPSERT = """INSERT INTO telephony_calls(workspace_id,id,provider,account_id,sour
 
 class TelephonyImport:
     def __init__(self, accounts, vault, client_factory=Client, clock=lambda:datetime.now(timezone.utc)):
+        if client_factory is Client:
+            from center_messenger.novofon_budget import client_factory as shared_client
+            client_factory = shared_client(accounts.engine)
         self.accounts,self.vault,self.client_factory,self.clock = accounts,vault,client_factory,clock
 
     @staticmethod
@@ -85,10 +88,21 @@ class TelephonyImport:
         workspace,settings,state,now = job['workspace'],job['settings'],job['state'],self.clock()
         key = self.vault.open(workspace,settings['connection_id'],settings['key_ciphertext'],purpose='novofon')['api_key']
         client = self.client_factory(key)
-        accounts,_ = client.read('get.account')
-        if len(accounts)!=1 or not identifier(accounts[0].get('app_id')):
-            raise AuditError('account_schema')
-        account,zone = identifier(accounts[0]['app_id']),accounts[0].get('timezone')
+        checked=state['recent'].get('account_checked_at')
+        try:
+            checked=datetime.fromisoformat(checked) if isinstance(checked,str) else None
+            cached=(checked is not None and checked.tzinfo is not None and timedelta(0)<=now-checked<timedelta(hours=1)
+                    and state['settings_version']==settings['version'] and state['account_id'] and state['timezone'])
+        except (ValueError,TypeError):cached=False
+        if cached:
+            account,zone=state['account_id'],state['timezone']
+            if hasattr(client,'budget'):client.budget.bind_account(account)
+        else:
+            accounts,_ = client.read('get.account')
+            if len(accounts)!=1 or not identifier(accounts[0].get('app_id')):
+                raise AuditError('account_schema')
+            account,zone = identifier(accounts[0]['app_id']),accounts[0].get('timezone')
+            checked=now
         try:
             tz=ZoneInfo(zone)
         except (TypeError,ValueError,ZoneInfoNotFoundError):
@@ -106,6 +120,7 @@ class TelephonyImport:
             archive_done=start>=cutoff
         stream = 'recent' if reset or state['recent_due']<=now else 'archive'
         if stream=='archive' and archive_done:
+            recent['account_checked_at']=checked.isoformat()
             self.commit(job,account,zone,recent,archive,archive_done,[],state['recent_due'],60,False)
             return
         cursor=recent if stream=='recent' else archive
@@ -140,6 +155,7 @@ class TelephonyImport:
                 if not archive_done:
                     archive=window(end,min(end+timedelta(days=1),cutoff)) | {'cutoff':cutoff.isoformat()}
         delay=max(1,(recent_due-now).total_seconds()) if archive_done else 1
+        recent['account_checked_at']=checked.isoformat()
         self.commit(job,account,zone,recent,archive,archive_done,calls,recent_due,delay,stream=='recent' and complete)
 
     def locked(self, db, job):
@@ -163,7 +179,7 @@ class TelephonyImport:
             changed=0
             for call,record in calls:
                 params=call | {'w':job['workspace'],'employees':json.dumps(call['employees']),
-                    'recording':self.vault.seal(job['workspace'],call['connection_id'],{'url':record},purpose='novofon') if record else None,
+                    'recording':self.vault.seal_recording(job['workspace'],call['connection_id'],call['id'],record) if record else None,
                     'record_hash':hashlib.sha256(record.encode()).hexdigest() if record else None}
                 changed+=len(db.execute(text(UPSERT),params).all())
             db.execute(text("UPDATE telephony_state SET connected=true,settings_version=:v,account_id=:a,timezone=:z,recent=CAST(:r AS jsonb),archive=CAST(:b AS jsonb),archive_done=:done,recent_due=:due,last_error_code=NULL,retry_at=NULL,attempts=0,imported=imported+:n,last_sync_at=CASE WHEN :success THEN now() ELSE last_sync_at END,updated_at=now() WHERE workspace_id=:w"),
@@ -176,9 +192,14 @@ class TelephonyImport:
         if mnemonic in {'access_token_invalid','access_token_expired','access_token_blocked','forbidden','permission_denied','ip_not_whitelisted','account_inactive'}:
             delay=3600
         elif code=='quota_exhausted' or mnemonic=='limit_exceeded':
-            delay=max(delay,60)
+            supplied=details.get('retry_after')
+            delay=max(1,supplied) if type(supplied) is int and supplied>0 else 60
+        elif details.get('http_status')==429:
+            supplied=details.get('retry_after')
+            delay=max(60,supplied) if type(supplied) is int else 60
         with self.accounts.engine.begin() as db:
             owned,valid=self.locked(db,job)
             if valid:
-                db.execute(text("UPDATE telephony_state SET last_error_code=:e,attempts=attempts+1,retry_at=now()+(:d*interval '1 second'),updated_at=now() WHERE workspace_id=:w"),{'w':job['workspace'],'e':mnemonic or code,'d':delay})
+                public_code='quota_exhausted' if details.get('http_status')==429 else mnemonic or code
+                db.execute(text("UPDATE telephony_state SET last_error_code=:e,attempts=attempts+1,retry_at=now()+(:d*interval '1 second'),updated_at=now() WHERE workspace_id=:w"),{'w':job['workspace'],'e':public_code,'d':delay})
             if owned:self.release(db,job,delay if valid else 1)

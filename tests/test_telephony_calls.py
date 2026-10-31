@@ -1,5 +1,6 @@
 """Call identity, durable pagination, media bounds and process ownership. Offline."""
 from datetime import datetime,timedelta,timezone
+from contextlib import contextmanager
 from pathlib import Path
 import asyncio
 import json
@@ -97,6 +98,23 @@ class PageTests(unittest.TestCase):
         importer,_=self.importer([source(),source()])
         with self.assertRaisesRegex(AuditError,'duplicate'):importer.process(self.make_job())
         importer.commit.assert_not_called()
+
+    def test_recent_account_cache_avoids_a_second_account_request(self):
+        importer,client=self.importer([source()]);job=self.make_job()
+        job['state'].update(settings_version=1,account_id='17',timezone='Europe/Moscow',
+                            recent={'from':(NOW-timedelta(days=1)).isoformat(),'till':NOW.isoformat(),
+                                    'offset':0,'account_checked_at':(NOW-timedelta(minutes=10)).isoformat()})
+        client.read.side_effect=[([source()],{})]
+        importer.process(job)
+        self.assertEqual([c.args[0] for c in client.read.call_args_list],['get.calls_report'])
+        self.assertIn('account_checked_at',importer.commit.call_args.args[3])
+
+    def test_changed_settings_bypass_the_account_cache(self):
+        importer,client=self.importer([source()]);job=self.make_job()
+        job['state'].update(settings_version=0,account_id='old',timezone='Europe/Moscow',
+                            recent={'account_checked_at':NOW.isoformat()})
+        importer.process(job)
+        self.assertEqual([c.args[0] for c in client.read.call_args_list],['get.account','get.calls_report'])
 
 
 class AudioTests(unittest.TestCase):
@@ -205,6 +223,44 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.request(app,'/recording',key='a'*64)[0],422)
         self.assertEqual(self.request(app,'/recording',key='a'*64,payload=b'{' + b' '*1024 + b'}')[0],413)
         app.state.db_engine.begin.assert_not_called()
+
+    def test_real_vault_round_trip_plays_current_and_already_imported_recordings(self):
+        from center_messenger.connector_vault import ConnectorVault
+        app=self.worker();workspace,connection,call=uuid4(),uuid4(),uuid4()
+        directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
+        key=Path(directory.name)/'master';key.write_text('m'*64)
+        vault=ConnectorVault(key);app.state.vault=vault
+        url='https://app.novofon.ru/system/media/talk/123/synthetic-record/'
+        row={'connection_id':connection}
+        db=Mock();db.execute.return_value.mappings.return_value.one_or_none.return_value=row
+        @contextmanager
+        def begin():yield db
+        app.state.db_engine=SimpleNamespace(begin=begin)
+        body=b'RIFF0000WAVEsynthetic'
+        payload=json.dumps({'workspace':str(workspace),'call':str(call)}).encode()
+        for cipher in (vault.seal(workspace,connection,{'url':url},purpose='novofon'),
+                       vault.seal_recording(workspace,connection,call,url)):
+            row['recording_ciphertext']=cipher
+            with patch('center_messenger.telephony_worker.fetch',return_value=(body,{'Content-Type':'audio/wav'},206)) as fetch:
+                status,result=self.request(app,'/recording',key='a'*64,payload=payload)
+                self.assertEqual((status,result),(206,body))
+                fetch.assert_called_once_with(url,None)
+
+    def test_recording_ciphertext_cannot_be_used_as_an_api_key_or_cross_customer_reference(self):
+        from center_messenger.connector_vault import ConnectorVault
+        directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
+        key=Path(directory.name)/'master';key.write_text('m'*64)
+        vault=ConnectorVault(key);workspace,connection,call=uuid4(),uuid4(),uuid4()
+        url='https://app.novofon.ru/synthetic-record/'
+        cipher=vault.seal_recording(workspace,connection,call,url)
+        with self.assertRaises(AuthError):vault.open(workspace,connection,cipher,purpose='novofon')
+        for w,c,r in ((uuid4(),connection,call),(workspace,uuid4(),call),(workspace,connection,uuid4())):
+            with self.subTest(workspace=w,connection=c,call=r),self.assertRaises(AuthError):
+                vault.open_recording(w,c,r,cipher)
+        credentials=vault.seal(workspace,connection,{'api_key':'synthetic-key'},purpose='novofon')
+        with self.assertRaises(AuthError):vault.open_recording(workspace,connection,call,credentials)
+        legacy=vault.seal(workspace,connection,{'url':url},purpose='novofon')
+        with self.assertRaises(AuthError):vault.open_recording(uuid4(),connection,call,legacy)
 
 
 if __name__=='__main__':unittest.main()

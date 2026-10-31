@@ -11,6 +11,7 @@ from sqlalchemy import text
 from center_messenger.accounts import audit as account_audit
 from center_messenger.auth_security import AuthError
 from center_messenger.novofon_client import Client, audit, ERRORS
+from center_messenger.novofon_quota import public_limits
 
 LOG = logging.getLogger(__name__)
 CHECK_SLOTS = BoundedSemaphore(2)
@@ -58,6 +59,10 @@ def public_report(report):
                    'outgoing_capable', 'account_id', 'timezone', 'container', 'bytes_checked',
                    'full_audio_validated', 'asr_tested', 'browser_playback_tested')
         result[name] = {k: item[k] for k in allowed if k in item}
+        limits = public_limits(item.get('metadata', {}))
+        if limits:result[name]['limits'] = limits
+        if type(item.get('retry_after')) is int and item['retry_after'] > 0:
+            result[name]['retry_after'] = item['retry_after']
         if item.get('status') == 'error':
             mnemonic = item.get('mnemonic')
             if isinstance(mnemonic, str) and mnemonic in ERRORS:
@@ -75,6 +80,9 @@ def public_report(report):
 
 class Novofon:
     def __init__(self, accounts, vault, client_factory=Client):
+        if client_factory is Client:
+            from center_messenger.novofon_budget import client_factory as shared_client
+            client_factory = shared_client(accounts.engine)
         self.accounts, self.vault, self.client_factory = accounts, vault, client_factory
         self.calls = None
 

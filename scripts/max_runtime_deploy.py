@@ -160,6 +160,9 @@ def wait_worker(image, timeout=90):
 
 
 def promote(root, source, sha, old_image, new_image, backup, promoter):
+    import telephony_runtime
+    if telephony_runtime.promote_update(root,source,sha,old_image,new_image,backup,promoter,__import__(__name__)):
+        return True
     plan = plan_for(root, source, sha)
     if plan is None:
         return promote_update(root, source, sha, old_image, new_image, backup, promoter)
@@ -209,6 +212,8 @@ def promote(root, source, sha, old_image, new_image, backup, promoter):
 
 
 def recover(root, promoter):
+    import telephony_runtime
+    telephony_runtime.recover_update(root,promoter,__import__(__name__))
     recover_update(root, promoter)
     path = root / PLAN
     if not path.exists():

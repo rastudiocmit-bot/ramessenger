@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import hmac
 import http.client
@@ -23,6 +24,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from center_messenger.novofon_quota import Budget, QuotaWait
 
 API_URL = "https://dataapi-jsonrpc.novofon.ru/v2.0"
 MEDIA_HOSTS = frozenset({"app.novofon.ru", "media.novofon.ru"})
@@ -72,6 +75,18 @@ def metadata(value):
     if isinstance(limits, dict):
         out["limits"] = {k: limits[k] for k in LIMIT_FIELDS if integer(limits.get(k)) is not None}
     return out
+
+
+def retry_seconds(headers, now=None):
+    value = headers.get('Retry-After', '') if headers else ''
+    try:
+        if isinstance(value, str) and value.strip().isdigit():
+            return min(604800, int(value.strip()))
+        at = parsedate_to_datetime(value)
+        if at.tzinfo is None:return 0
+        return max(0, min(604800, int((at - (now or datetime.now(timezone.utc))).total_seconds()) + 1))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def load_token(filename):
@@ -155,12 +170,13 @@ class HTTP:
                     return response.status, response.headers, body
             except urllib.error.HTTPError as error:
                 status, location = error.code, error.headers.get("Location")
+                retry_after = retry_seconds(error.headers)
                 error.close()
                 if media and status in (301, 302, 303, 307, 308) and location and hop < 3:
                     url = urllib.parse.urljoin(url, location)
                     continue
                 raise AuditError("media_http_error" if media else "api_http_error",
-                                 http_status=status) from None
+                                 http_status=status, **({'retry_after': retry_after} if retry_after else {})) from None
             except AuditError:
                 raise
             except (OSError, ValueError, http.client.HTTPException, urllib.error.URLError):
@@ -169,25 +185,43 @@ class HTTP:
 
 
 class Client:
-    def __init__(self, token, transport=None):
+    def __init__(self, token, transport=None, *, budget=None):
         self.token = token
         self.transport = transport or HTTP()
         self.requests = 0
         self.quota = {}
+        self.budget = budget or Budget(token)
 
     def read(self, method, **params):
         if method not in METHODS or "access_token" in params:
             raise AuditError("method_rejected")
-        limits = self.quota.get("limits", {})
-        if limits.get("minute_remaining") == 0 or limits.get("day_remaining") == 0:
-            raise AuditError("quota_exhausted", metadata=self.quota)
+        try:
+            self.budget.reserve(method)
+        except QuotaWait as error:
+            raise AuditError('quota_exhausted', retry_after=error.retry_after, metadata=self.quota) from None
+        try:
+            rows, meta = self._read(method, **params)
+        except AuditError as error:
+            details = error.details
+            delay = self.budget.observe(method, details.get('metadata', {}),
+                retry_after=details.get('retry_after', 0) or (60 if details.get('http_status') == 429 else 0),
+                limit_type=details.get('limit_type'),
+                exceeded=details.get('mnemonic') == 'limit_exceeded' or details.get('rpc_code') == -32029)
+            if delay:error.details['retry_after'] = delay
+            raise
+        if method == 'get.account' and len(rows) == 1 and identifier(rows[0].get('app_id')):
+            self.budget.bind_account(identifier(rows[0]['app_id']))
+        self.budget.observe(method, meta)
+        return rows, meta
+
+    def _read(self, method, **params):
         request_id = secrets.token_hex(12)
         payload = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method,
                               "params": {**params, "access_token": self.token}}).encode()
         self.requests += 1
         status, headers, raw = self.transport.request(API_URL, data=payload)
         if status != 200:
-            raise AuditError("api_http_error", http_status=status)
+            raise AuditError("api_http_error", http_status=status, retry_after=retry_seconds(headers))
         try:
             doc = json.loads(raw)
         except (ValueError, UnicodeError):
@@ -216,6 +250,9 @@ class Client:
                              rpc_code=code if type(code) is int else None,
                              mnemonic=mnemonic if isinstance(mnemonic, str) and mnemonic in ERRORS else "provider_error",
                              **({"observed_ip": public_ip} if public_ip else {}),
+                             **({'limit_type': detail['params']['limit_type']}
+                                if isinstance(detail.get('params'), dict) and
+                                detail['params'].get('limit_type') in ('day', 'minute') else {}),
                              metadata=self.quota)
         result = doc.get("result")
         if not isinstance(result, dict) or not isinstance(result.get("data"), list):

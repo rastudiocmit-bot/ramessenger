@@ -1,5 +1,5 @@
 {
-  "application_baseline": "6024436e78258bcc178608bc85edace11967261a",
+  "application_baseline": "eb4cabc9adbf843eb63c931bdd197fa31dc7909d",
   "bundle": [
     "scripts/max_release_guard.py",
     "scripts/local_build_vps.py",
@@ -58,7 +58,7 @@
     "app/backend/src/center_messenger/alfa_repair.py": "c7b095a5a937cf5d1611c309f479156666b5d9d77e28a8979322d660a27eea12",
     "app/backend/src/center_messenger/alfa_session.py": "5f6a918e92e89a6772f8070eed80db57a955b78ad72074a2c754efb861089971",
     "app/backend/src/center_messenger/alfa_shared_parent.py": "aca023f4ed365bde6c5cd3e4619850e0280a21996d40b11e56a7d3760c980cd1",
-    "app/backend/src/center_messenger/connector_vault.py": "27cd123c7601eaadeedcaeed6c6f71a143b433bc3471ea903da27ede2d9fd1de",
+    "app/backend/src/center_messenger/connector_vault.py": "a2fd250415a7efb764ca0f5cbe6f17902bf94ca90001c4f5e0c9dd57b06073cb",
     "app/backend/src/center_messenger/database.py": "082a372a29aefc9bd65b1b9835fe80f820d204d970e8995d677601833eb1239f",
     "app/backend/src/center_messenger/history_receipts.py": "b526287f15e34f8eb63548875453f22b347dd2ddc1e83715473298503959b46f",
     "app/backend/src/center_messenger/max_worker.py": "407b0dc34e6ceeacaf4ec7e92cf94b3e678ad7d6c8626319e5e352d4b1177e33",
@@ -69,12 +69,16 @@
     "app/backend/src/center_messenger/native_priority.py": "64759e42ca0f4589c6dcf53d2947a46025a72ad10c0582dea19f7f5e232de441",
     "app/backend/src/center_messenger/native_relink.py": "462b093a218fd3172ed189d90205da3cea8d6595e5261faa374face3eea5c299",
     "app/backend/src/center_messenger/native_send_runtime.py": "b4f99c51dc3bfa91d0d5724f1ee2bc97e81308c26a8afee926c8326968e72105",
+    "app/backend/src/center_messenger/novofon_budget.py": "d70cafdda5cfe433abc709f82ab8bea35da6d13ecf21eb8c84a003e4b90641e1",
+    "app/backend/src/center_messenger/novofon_client.py": "f23dd333cba78292025d3ffe651d08fdec34ce03df0b89dbcf889ad9e1a6ce89",
+    "app/backend/src/center_messenger/novofon_quota.py": "b610e120d7cd147a6821b2e3760355e3a5c3c7c14e3c935e37a0caa4f8716333",
+    "app/backend/src/center_messenger/novofon_service.py": "3986fc7db23c47b6906973bff23756fcf57a00e35ea3c3064f61b2823c09be96",
     "app/backend/src/center_messenger/telephony_api.py": "cb374541e800c2993718b7999d906b3f9f9240bd4514e6f736d985642bc83a80",
     "app/backend/src/center_messenger/telephony_audio.py": "7b9255e2dfafd62e0a9b45e6e1ea96488d1d958e876f1c14dbe7e468219011a9",
-    "app/backend/src/center_messenger/telephony_calls.py": "0fd406bdba66528fa8a331f2d1f36f3885bd8288e2e310a804307820f4f02d3b",
-    "app/backend/src/center_messenger/telephony_import.py": "6f795f4fddf49c7bdf8ed81030306e4c1b8d5506433556198a1080de869d1942",
+    "app/backend/src/center_messenger/telephony_calls.py": "0f05040d63d131de5f15ce55d28f54418c52b088cea4c4e4b22a41bef2450525",
+    "app/backend/src/center_messenger/telephony_import.py": "a8ae307e9a2e6f7d5100b4de5f276fcb4d1b9251fdefe439d5068ab63d3a04aa",
     "app/backend/src/center_messenger/telephony_model.py": "9a199f93a89b53e60c84cb368faac2266441f5602b3505334f45e32bda491338",
-    "app/backend/src/center_messenger/telephony_worker.py": "725a2906260859a259bab9dd427bf072ec737b9a2f71bc91f5561f67be9e72f8",
+    "app/backend/src/center_messenger/telephony_worker.py": "492edbcd96fc4d8431a116f64279ff4484ce5915a2210b3d2112cb4012487c65",
     "compose.yaml": "3310544152f72b5947593b0b35c760e4f51ec7abb8838e1123d3546e5e67c6b8",
     "deploy/systemd/ramessenger-github-deploy.service": "a1f06921ed02cf171ccd37eaa173d5c1577ce7cbc916ce8f7ae51bec23c90444",
     "deploy/systemd/ramessenger-github-deploy.timer": "c612814d4df1b253e43b9c3a2365815ca916fa0d2f1e69dbad1139edf8e271a4",
@@ -87,10 +91,11 @@
     "scripts/github_promote_vps.py": "fb0cba7807bd8503e810c097a82884c57fc3e729ae5b1e7ec61eb0e903a12290",
     "scripts/local_build_vps.py": "9c5676fac2c9a16751e37dec64a3bd6a2ab98e402133ba0ed948151c508aecff",
     "scripts/max_release_guard.py": "32df2cf0e5fc9f66564c80f76fe79ea7ab7c6935cf58110b2facbdef8c0d0bdc",
-    "scripts/max_runtime_deploy.py": "3cb894b44bfdc59b58d589642e8fa92d048690071ca4d9550d8188c09b785792",
+    "scripts/max_runtime_deploy.py": "c868d2a17336013b9b611a9b130b8a35a431cc7511b69d3ea779705cad8ef386",
     "scripts/prepare_telephony_release.py": "ca256ed2bcd84c85ec1c85e7c86aafa843f46467551bb3c14e1ff339f027aab1",
-    "scripts/telephony_runtime.py": "c7b1731da4ec45e462b351058cc7e39df6cc6310629a8ca9b5b4d6c78dbc5f36",
-    "tests/run_max_compatibility.py": "6886950e67305ef0dae34f3c087dda613a7672672121003343be38df09fbf443",
+    "scripts/prepare_telephony_update.py": "28bce3a9f837d5661bb97e2845aa96c5d742b9ebafbc7e75803139f5458aff78",
+    "scripts/telephony_runtime.py": "0673dcee6a41b5a868f2f8d355cdab80fccc1e73cb699ac313ac08723d11554a",
+    "tests/run_max_compatibility.py": "9e654aa598ef76207e7660c51932490f284ab7a8d059933d8b88ca2c53fe0483",
     "tests/test_compose_recipient.py": "e32ecd4c6c9613871b8354e02d433a9ad3b075f6541dc13857cb972f76aba4a8",
     "tests/test_github_deploy_rollback.py": "219e5ea565d5306b11b5c748acfd579bd17d3f3fef2146d70932f3542c84f5f0",
     "tests/test_history_audit.py": "86d404e24da7df39f2335a958e9e8b166bc805e0b7aaf2cbe42998bc6ee04d5e",
@@ -106,10 +111,12 @@
     "tests/test_native_session.py": "93a530d8dde1209dc1a4069bfbfc807dcab2bd24bb82d28f1e6c838dbf668d08",
     "tests/test_novofon_connection.py": "654143a9f0e056bc4ca4b8ed1e79ad437cdc73aa8ae6c333ad3507dd3fb4f55a",
     "tests/test_novofon_diagnostic.py": "ce12dd8302faee1f743b1e4e139ff6f356d459afaf59af18180692749f6004ba",
+    "tests/test_novofon_quota.py": "a4b737cccd8a773d70ea188b17f0dbbe7ceb0ab1ddcab27ba8b71bd77f352d1e",
+    "tests/test_novofon_quota_database.py": "b496940f67c9efe94afd1cfa915d9ea403a90485ead6c244884f77a364fd0061",
     "tests/test_support_access.py": "20635c574d605a7bcab75bc46571af1962b3acabfdfa57cf954fee7fbf3430c7",
-    "tests/test_telephony_calls.py": "9c38086d04fa6358667dff899fecb8fbd307f73f44c2dcd187e2f01bcd4d7b93",
-    "tests/test_telephony_database.py": "3e1c53698c2ed80a5a4cd2b650c1228af725024c95c9fd9f72958db1a3a52a79",
-    "tests/test_telephony_runtime.py": "6569bd55d84271848155e196fa2e327dd387078dfdc7f76c1b55289714f755c2"
+    "tests/test_telephony_calls.py": "d09ae880dbec4d786ac726b49743142a99b2790651f1131f92defbe3bcd1509b",
+    "tests/test_telephony_database.py": "7ad7b2c90713d92bd6e4236d9a97d00b97a514cf4426c3130c79259757201078",
+    "tests/test_telephony_runtime.py": "82d89321098cf62b1cbfbc6673c84d61fb1479c2f78fab9d915d5771e660a42c"
   },
   "protected_patterns": [
     "app/backend/src/center_messenger/alfa_max*.py",
@@ -127,7 +134,7 @@
   "telephony_install": {
     "from_compose": "98ec7a20a2f322e3cd8e9e9625160e6ac7201dbc4e99aa212b4bb084dbc6a5fb"
   },
-  "telephony_runtime_contract": "novofon-journal-v1",
+  "telephony_runtime_contract": "novofon-journal-v2-quota-recording",
   "tests": [
     "tests/run_max_compatibility.py",
     "tests/test_message_sync.py",
@@ -143,7 +150,9 @@
     "tests/test_novofon_connection.py",
     "tests/test_novofon_diagnostic.py",
     "tests/test_telephony_calls.py",
-    "tests/test_telephony_database.py"
+    "tests/test_telephony_database.py",
+    "tests/test_novofon_quota.py",
+    "tests/test_novofon_quota_database.py"
   ],
   "version": 1,
   "worker_runtime_contract": "telephony-calls-schema-v1"

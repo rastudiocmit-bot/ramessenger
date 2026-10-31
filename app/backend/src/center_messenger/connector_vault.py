@@ -76,6 +76,36 @@ class ConnectorVault:
         )
         return "v1." + base64.urlsafe_b64encode(nonce + encrypted).decode()
 
+    def seal_recording(self, workspace: UUID, connection: UUID, call: UUID, url: str) -> str:
+        if not isinstance(url, str) or not 1 <= len(url) <= 4096:
+            raise AuthError(422, 'Некорректная ссылка на аудиозапись.')
+        nonce = secrets.token_bytes(12)
+        aad = self._aad(workspace, connection, 'novofon') + b':recording:' + str(call).encode()
+        data = json.dumps({'url': url}, separators=(',', ':')).encode()
+        encrypted = AESGCM(self._key()).encrypt(nonce, data, aad)
+        return 'r1.' + base64.urlsafe_b64encode(nonce + encrypted).decode()
+
+    def open_recording(self, workspace: UUID, connection: UUID, call: UUID, ciphertext: str) -> str:
+        key = self._key()
+        try:
+            if not isinstance(ciphertext, str) or len(ciphertext) > 12000:
+                raise ValueError
+            aad = self._aad(workspace, connection, 'novofon')
+            if ciphertext.startswith('r1.'):
+                aad += b':recording:' + str(call).encode()
+            elif not ciphertext.startswith('v1.'):
+                raise ValueError
+            # The initial importer wrote v1/{url} under the Novofon AAD.
+            # Read it here without weakening open()'s credential validation.
+            raw = base64.b64decode(ciphertext[3:], altchars=b'-_', validate=True)
+            payload = json.loads(AESGCM(key).decrypt(raw[:12], raw[12:], aad))
+            if (not isinstance(payload, dict) or set(payload) != {'url'}
+                    or not isinstance(payload['url'], str) or not 1 <= len(payload['url']) <= 4096):
+                raise ValueError
+            return payload['url']
+        except (ValueError, TypeError, InvalidTag):
+            raise AuthError(503, 'Не удалось прочитать защищённую ссылку на аудиозапись.') from None
+
     def open_browser_state(self, workspace: UUID, connection: UUID, ciphertext: str) -> dict:
         key = self._key()
         try:

@@ -12,6 +12,7 @@ from center_messenger.crm_directory import phone_number
 from center_messenger import card_preference
 from center_messenger.telephony_audio import WorkerAudio
 from center_messenger.telephony_import import TelephonyImport
+from center_messenger.novofon_budget import account_snapshot
 from center_messenger.telephony_model import call_view
 
 
@@ -30,7 +31,10 @@ class TelephonyCalls:
             row=db.execute(text("SELECT s.*,r.lease_until>now() AS running,r.due_at FROM telephony_state s LEFT JOIN telephony_routes r USING(workspace_id) WHERE s.workspace_id=:w"),{'w':workspace}).mappings().one_or_none()
             if not row:return {'enabled':True,'history_days':7,'poll_seconds':60,'version':0,'running':False,'call_count':0}
             count=db.execute(text('SELECT count(*) FROM telephony_calls WHERE workspace_id=:w AND account_id=:a'),{'w':workspace,'a':row['account_id']}).scalar_one()
-            return {key:row[key] for key in ('enabled','history_days','poll_seconds','version','running','last_sync_at','last_error_code','retry_at','archive_done')} | {'call_count':count,'next_at':row['due_at']}
+            result={key:row[key] for key in ('enabled','history_days','poll_seconds','version','running','last_sync_at','last_error_code','retry_at','archive_done')} | {'call_count':count,'next_at':row['due_at']}
+            account=row['account_id']
+        result['api_limits']=account_snapshot(self.accounts.engine,account)
+        return result
 
     def configure(self,actor,workspace,data):
         with self.accounts.transaction(actor) as db:

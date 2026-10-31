@@ -27,3 +27,14 @@ test('a late loader response cannot overwrite a different organization',async t=
  s.state.workspace.id='two';s.ui.reset();complete({...defaults,history_days:90});await read;
  assert.equal(s.$('#telephony-loader-form').elements.history_days.value,'7');assert.equal(s.$('#telephony-loader-form').elements.enabled.disabled,true);
 });
+test('quota waits show a clear reason, balances and a dated automatic retry',async t=>{
+ const s=setup(t,async()=>({...defaults,archive_done:true,last_error_code:'quota_exhausted',retry_at:'2026-11-01T10:00:00Z',
+  api_limits:{minute_remaining:8,minute_limit:15,day_remaining:0,day_limit:500}}));
+ await s.ui.load();
+ assert.match(s.$('#telephony-loader-status').textContent,/Пауза по лимиту API/);
+ assert.match(s.$('#telephony-loader-progress').textContent,/8 из 15/);
+ assert.match(s.$('#telephony-loader-progress').textContent,/0 из 500/);
+ assert.match(s.$('#telephony-loader-code').textContent,/автоматически/);
+ assert.match(s.$('#telephony-loader-code').textContent,/01\.11\.2026/);
+ assert.equal(s.$('#telephony-loader-form').elements.poll_seconds.disabled,false);
+});
