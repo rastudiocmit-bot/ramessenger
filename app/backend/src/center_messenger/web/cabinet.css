@@ -2050,7 +2050,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 #pane-connections .connection-page-header p{margin:5px 0 0;max-width:85ch;font-size:12px;line-height:1.6;color:var(--muted)}
 #pane-connections .connection-help{margin:0 0 16px}
 #pane-connections .connection-help dd{max-width:90ch}
-#pane-connections .connection-tabs{display:grid;grid-template-columns:minmax(0,1.5fr) repeat(4,minmax(0,1fr));gap:4px;max-width:var(--connections-width);overflow:visible;border-bottom:0;margin-bottom:16px;padding-bottom:0}
+#pane-connections .connection-tabs{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));grid-auto-rows:1fr;gap:4px;max-width:var(--connections-width);overflow:visible;border-bottom:0;margin-bottom:16px;padding-bottom:0}
 #pane-connections .connection-tabs button{justify-content:center;min-width:0;min-height:46px;padding:9px 12px;white-space:normal;line-height:1.4;text-align:center;background:var(--surface-2);border:1px solid transparent;border-radius:10px;box-shadow:none;font-size:12px}
 #pane-connections .connection-tabs button[aria-selected=true]{background:var(--primary-tint);color:var(--primary-ink);border-color:color-mix(in srgb,var(--primary) 22%,var(--line))}
 #pane-connections .connection-tabs svg{flex:none}
@@ -2562,20 +2562,56 @@ body:has(#cabinet[hidden]){overflow:auto}
  #notification-settings-dialog .notification-settings-footer{padding-left:16px;padding-right:16px}
 }
 
-/* Novofon uses the connection page's existing cards and spacing. */
-.novofon-grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,1fr);gap:16px}
-.novofon-grid .card-h{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 18px;flex-wrap:wrap}
-.novofon-grid .card-h h3{margin:0;font-size:15px}.novofon-grid .card-b{padding:18px}
-.novofon-key-row{display:flex;align-items:center;gap:8px}.novofon-key-row input{flex:1;min-width:0}
-.novofon-period{margin:16px 0;max-width:420px}.novofon-checks{list-style:none;padding:0;margin:0}
-.novofon-checks li{display:grid;gap:5px;padding:12px 0;border-bottom:1px solid var(--line)}
-.novofon-checks li:first-child{padding-top:0}.novofon-checks strong{font-size:13px}
-.novofon-checks span,.novofon-next span{font-size:12px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
-.novofon-checks [data-state=error] span{color:var(--danger,#b33a3a)}
-.novofon-next{display:grid;gap:6px;margin:18px 0 0;padding-top:16px;border-top:1px solid var(--line)}
-.novofon-next strong{font-size:13px}#novofon-loading{display:flex;align-items:center;gap:7px}
+/* Novofon follows the synchronization master's width, cards and help pattern. */
+#connections-novofon-view .novofon-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;width:100%;min-width:0;align-items:stretch}
+#connections-novofon-view .novofon-card{display:flex;flex-direction:column;width:100%;min-width:0;margin:0;border:1px solid var(--line);border-radius:var(--connection-radius);background:var(--surface);box-shadow:var(--card-soft)}
+#connections-novofon-view .novofon-card>.card-h{justify-content:space-between;gap:12px;flex-wrap:wrap;padding:16px var(--connection-padding);min-height:66px;border-bottom:1px solid var(--line-soft)}
+.novofon-card-heading{display:flex;align-items:center;gap:10px;min-width:0}
+.novofon-card-heading h3{margin:0;font-size:15px;line-height:1.45;font-weight:650}
+#connections-novofon-view .novofon-card>.card-b{flex:1;min-width:0;display:flex;flex-direction:column;padding:18px var(--connection-padding)}
+#novofon-form{display:grid;gap:16px;min-width:0}
+#novofon-form .fld{margin:0;min-width:0;font-size:12px;line-height:1.55;font-weight:600}
+#novofon-form .fld>small{display:block;font-size:11.5px;line-height:1.6;font-weight:400;color:var(--muted);margin-top:5px;overflow-wrap:anywhere}
+#novofon-form .fld input,#novofon-form .fld select{font-size:13px;font-weight:400}
+#novofon-form .novofon-key-row{position:relative;display:flex;align-items:center;width:100%;min-width:0;margin-top:6px}
+#novofon-form .novofon-key-row input{width:100%;min-width:0;padding-right:85px}
+#novofon-form .novofon-key-row .text-button{position:absolute;right:5px;top:0;bottom:0;min-height:44px;padding:0 10px;font-size:11.5px;box-shadow:none;border:0;background:transparent}
+#novofon-form .novofon-period{max-width:none;width:100%}
+#novofon-form .novofon-period select{display:block;margin-top:6px}
+.novofon-form-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+#connections-novofon-view .integration-actions{margin-top:auto;padding-top:16px;gap:12px;flex-wrap:wrap}
+#connections-novofon-view .integration-actions .text-button{padding:4px 0;min-height:44px;font-size:11.5px}
+#connections-novofon-view .novofon-help{margin:0;padding:0;min-width:0;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);overflow:hidden}
+#connections-novofon-view .novofon-help>summary{display:grid;grid-template-columns:28px minmax(0,1fr) 16px;gap:10px;align-items:center;list-style:none;padding:12px;font-size:12px;line-height:1.5;color:var(--ink);cursor:pointer}
+.novofon-help>summary::-webkit-details-marker{display:none}.novofon-help>summary::marker{content:''}
+.novofon-help>summary:focus-visible{outline:2px solid var(--primary);outline-offset:-3px;border-radius:11px}
+.novofon-help-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:9px;background:var(--primary-tint);color:var(--primary-ink)}
+.novofon-help-icon svg{width:17px;height:17px}.novofon-help-label{display:grid;gap:2px;min-width:0}
+.novofon-help-label strong{font-size:12px;font-weight:600}.novofon-help-label small{font-size:11px;font-weight:400;color:var(--muted)}
+.novofon-help-chevron{width:16px;height:16px;color:var(--muted);transition:transform .18s ease}
+.novofon-help[open]>summary{border-bottom:1px solid var(--line)}.novofon-help[open] .novofon-help-chevron{transform:rotate(180deg)}
+.novofon-help-steps{counter-reset:novofon-help;list-style:none;display:grid;gap:14px;margin:0;padding:14px}
+.novofon-help-steps li{counter-increment:novofon-help;display:grid;grid-template-columns:22px minmax(0,1fr);gap:9px;align-items:start}
+.novofon-help-steps li:before{content:counter(novofon-help);display:grid;place-items:center;width:22px;height:22px;border-radius:7px;background:var(--primary-tint);color:var(--primary-ink);font-size:11px;font-weight:650}
+.novofon-help-steps strong{font-size:12px;line-height:1.6}.novofon-help-steps p{font-size:11.5px;line-height:1.65;font-weight:400;color:var(--muted)}
+#connections-novofon-view .novofon-help-steps p{margin:3px 0 0}
+.novofon-help-links{display:flex;flex-wrap:wrap;gap:8px 18px;padding:12px 14px;border-top:1px solid var(--line);font-size:11.5px;line-height:1.6}
+.novofon-help-links a{color:var(--primary-ink);text-decoration:none}.novofon-help-links a:hover{text-decoration:underline}
+.novofon-checks{list-style:none;padding:0;margin:0}
+.novofon-checks li{display:grid;grid-template-columns:28px minmax(0,1fr);gap:4px 10px;padding:14px 0;border-bottom:1px solid var(--line-soft);align-items:start}
+.novofon-checks li:first-child{padding-top:0}.novofon-checks li:last-child{border-bottom:0;padding-bottom:0}
+.novofon-checks li>strong,.novofon-checks li>span:not(.novofon-check-icon),.novofon-checks li>small{grid-column:2;min-width:0}
+.novofon-checks strong{font-size:12px;line-height:1.5}.novofon-checks span,.novofon-next span{font-size:11.5px;line-height:1.65;color:var(--muted);overflow-wrap:anywhere}
+.novofon-check-icon{grid-column:1;grid-row:1/4;display:grid;place-items:center;width:28px;height:28px;border-radius:9px;background:var(--surface-2);color:var(--muted)}
+.novofon-check-icon svg{width:16px;height:16px}.novofon-checks [data-state=ok] .novofon-check-icon{background:var(--primary-tint);color:var(--primary-ink)}
+.novofon-checks [data-state=error] .novofon-check-icon{color:var(--danger);background:var(--primary-tint)}
+.novofon-checks [data-state=error]>span:not(.novofon-check-icon){color:var(--danger)}
+.novofon-checks small{font-size:11px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
+.novofon-check-footer{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;margin:16px 0;padding-top:16px;border-top:1px solid var(--line-soft)}
+#novofon-checked-at{flex:1 1 220px;margin:0;font-size:11px}.novofon-check-footer .btn{flex:none}
+.novofon-next{display:grid;gap:5px;margin:auto 0 0;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2)}
+.novofon-next strong{font-size:12px;line-height:1.5}#novofon-loading{display:flex;align-items:center;gap:7px}
 #novofon-loading[hidden]{display:none}
-@media(max-width:900px){.novofon-grid{grid-template-columns:1fr}}
-@media(max-width:640px){#pane-connections .connection-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}#connections-wizard-tab{grid-column:1/-1}.novofon-grid .card-b{padding:14px}.novofon-grid .card-h{padding:14px}.novofon-key-row{align-items:stretch;flex-wrap:wrap}.novofon-key-row input{flex-basis:200px}}
-
-.novofon-support{margin-top:16px}.novofon-checks small{font-size:11px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
+@media(max-width:900px){#connections-novofon-view .novofon-grid{grid-template-columns:minmax(0,1fr);gap:12px}}
+@media(max-width:640px){#pane-connections .connection-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}#connections-novofon-view .novofon-card>.card-b,#connections-novofon-view .novofon-card>.card-h{padding:14px}#connections-novofon-view .connection-status{white-space:normal;text-align:left}.novofon-form-actions .btn{flex:1 1 190px}.novofon-check-footer{align-items:stretch;flex-direction:column}.novofon-check-footer .btn{width:100%}#novofon-checked-at{flex:none}}
+@media(prefers-reduced-motion:reduce){.novofon-help-chevron{transition:none}}

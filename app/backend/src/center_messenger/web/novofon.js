@@ -46,6 +46,8 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
     for (const [name, title] of Object.entries(titles)) {
       const check = payload.checks?.[name], row = document.createElement("li"), heading = document.createElement("strong"), detail = document.createElement("span");
       heading.textContent = title;
+      const mark = document.createElement("span"); mark.className = "novofon-check-icon"; mark.setAttribute("aria-hidden", "true");
+      if (window.CenterIcon) mark.append(window.CenterIcon(check?.status === "ok" ? "check" : ["error", "prefix_detected", "no_recording_in_sample"].includes(check?.status) ? "info" : "clock"));
       let text = "Ещё не проверено";
       if (check?.status === "ok") {
         text = name === "account" ? `Аккаунт ${check.account_id} · ${check.timezone}`
@@ -54,7 +56,7 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
       } else if (check?.status === "error") text = check.message || "Не удалось проверить";
       else if (check?.status === "prefix_detected") text = "Фрагмент записи доступен. Полное воспроизведение ещё не проверено.";
       else if (check?.status === "no_recording_in_sample") text = "В проверенной выборке записей нет. Можно увеличить период проверки.";
-      detail.textContent = text; row.dataset.state = check?.status || "waiting"; row.append(heading, detail);
+      detail.textContent = text; row.dataset.state = check?.status || "waiting"; row.append(mark, heading, detail);
       if (check?.status === "error") {
         const codes = [];
         if (Number.isInteger(check.rpc_code)) codes.push(`Код Новофона: ${check.rpc_code}`);
