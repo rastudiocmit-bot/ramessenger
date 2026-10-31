@@ -2,11 +2,11 @@
 window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "chats", subscriber = () => null}) => {
   const cache = new Map(); let generation = 0, timer = null, controller = null;
   const icon = name => window.CenterIcon ? window.CenterIcon(name) : node("span", "", "icon-fallback");
-  const dialogs = new Set(), reads = new Set();
+  const panels = new Set(), reads = new Set();
   let activeReads = 0; const pendingReads = [];
   function pumpReads() { while (activeReads < 2 && pendingReads.length) { const next=pendingReads.shift(); activeReads++; Promise.resolve().then(next.task).then(next.resolve,next.reject).finally(()=>{activeReads--;pumpReads();}); } }
   function scheduledRead(task) { return new Promise((resolve,reject)=>{pendingReads.push({task,resolve,reject});pumpReads();}); }
-  function closeTranscripts() { for (const dialog of dialogs) { if(dialog.open) dialog.close(); dialog.remove(); } dialogs.clear(); }
+  function closeTranscripts() { for (const panel of panels) panel.collapse(); panels.clear(); }
   const stopAudio = () => document.querySelectorAll(".call-recording audio").forEach(audio => audio.pause());
   function reset() { generation++; clearTimeout(timer); controller?.abort(); controller = null; stopAudio(); closeTranscripts(); for(const read of reads)read.abort(); cache.clear(); }
   function entry(id) { if (!cache.has(id)) { if (cache.size >= 60) { const old = [...cache.keys()].find(key => key !== context() && !cache.get(key).busy); if (old) cache.delete(old); } cache.set(id, {calls:new Map(), more:false, oldest:null, loaded:false, busy:false, error:null, readAt:0, scope:null}); } return cache.get(id); }
@@ -58,10 +58,10 @@ window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "c
 
   function transcriptView(bubble,initialCall,conversation) {
     const box=node('div',undefined,'call-ai-transcript'),preview=node('p','','call-summary-preview');
-    const dialog=node('dialog',undefined,'call-transcript-dialog'),heading=node('div',undefined,'call-transcript-heading'),title=node('h2','Текст телефонного разговора'),close=node('button','Закрыть','btn sec');
+    const panel=node('section',undefined,'call-transcript-panel'),heading=node('div',undefined,'call-transcript-heading'),title=node('h3','Полная расшифровка'),close=node('button','Свернуть','call-text-collapse'),footer=node('button','Свернуть текст','call-text-collapse');panel.hidden=true;panel.setAttribute('role','region');
     const info=node('p','','call-transcript-info'),body=node('div',undefined,'call-transcript-body'),more=node('button','Загрузить ещё','btn sec'),error=node('p','','call-audio-error');
-    const label=`call-transcript-${sourcePath}-${initialCall.id}`;title.id=label;dialog.id=`${label}-dialog`;const fullControl=bubble.querySelector('[data-call-action="transcript"]');fullControl.setAttribute('aria-haspopup','dialog');fullControl.setAttribute('aria-controls',dialog.id);dialog.setAttribute('aria-labelledby',label);
-    close.type=more.type='button';heading.append(title,close);dialog.append(heading,info,body,more,error);box.append(preview);
+    const label=`call-transcript-${sourcePath}-${initialCall.id}`;title.id=label;panel.id=`${label}-panel`;const fullControl=bubble.querySelector('[data-call-action="transcript"]');fullControl.setAttribute('aria-expanded','false');fullControl.setAttribute('aria-controls',panel.id);panel.setAttribute('aria-labelledby',label);
+    close.type=footer.type=more.type='button';heading.append(title,close);panel.append(heading,info,body,more,error,footer);box.append(preview);
     let call=initialCall,run=null,scope=entry(conversation).scope,token=0,busy=false,failed=false;
     const data=entry(conversation); data.transcripts??=new Map();data.transcriptReads??=new Map();
     const key=()=>`${call.id}:${run}`;
@@ -78,8 +78,8 @@ window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "c
       const saved=data.transcripts.get(key()),segments=saved?.segments?.filter(s=>s.text)||[];
       const summary=typeof call.ai?.summary==='string'?call.ai.summary.trim():'';
       preview.textContent=summary||status();preview.hidden=Boolean(call.missed&&!summary);preview.classList.toggle('is-status',!summary);
-      const full=bubble.querySelector('[data-call-action="transcript"]');if(full){full.disabled=Boolean(call.missed);full.title=call.missed?'Звонок без разговора':'Показать полный текст звонка';}
-      if(dialog.open){
+      const full=bubble.querySelector('[data-call-action="transcript"]');if(full){full.disabled=Boolean(call.missed);full.title=call.missed?'Звонок без разговора':panel.hidden?'Показать полный текст звонка':'Свернуть полный текст звонка';full.setAttribute('aria-label',full.title);}
+      if(!panel.hidden){
         info.textContent=!run?'Полный текст ещё не подготовлен.':busy?'Читаем сохранённую расшифровку…':saved?.complete?'Реплики по каналам записи · роли говорящих не подтверждены':'Частичная расшифровка · обработка ещё не завершена';
         const top=body.scrollTop;body.replaceChildren(...segments.map(s=>node('p',`[${Math.floor(s.start/60)}:${String(Math.floor(s.start%60)).padStart(2,'0')}] Канал ${s.channel}: ${s.text}`)));body.scrollTop=top;
         more.hidden=!run||Boolean(saved?.done&&saved.complete);more.disabled=busy;more.textContent=failed?'Повторить загрузку':saved?.done?'Обновить расшифровку':'Загрузить ещё';
@@ -113,17 +113,19 @@ window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "c
     box.configure=value=>{
       if(scope!==data.scope){token++;busy=false;failed=false;scope=data.scope;}
       call=value;const next=call.ai?.transcript_run_id||null;
-      if(next!==run){token++;busy=false;failed=false;run=next;box.dataset.transcriptRun=run||'';if(dialog.open)dialog.close();}
+      if(next!==run){token++;busy=false;failed=false;run=next;box.dataset.transcriptRun=run||'';if(!panel.hidden)panel.collapse();}
       const saved=data.transcripts.get(key());
       if(saved&&!saved.complete&&(call.ai?.asr_complete||Date.now()-saved.readAt>25000)){data.transcripts.delete(key());}
-      draw();if(dialog.open&&run&&!data.transcripts.has(key()))void read();
+      draw();if(!panel.hidden&&run&&!data.transcripts.has(key()))void read();
     };
     bubble.querySelector('[data-call-action="transcript"]').addEventListener('click',()=>{
       if(call.missed||context()!==conversation)return;
-      if(!dialog.isConnected)document.body.append(dialog);dialogs.add(dialog);dialog.showModal();draw();void read();
+      if(!panel.hidden){panel.collapse();return;}
+      if(!panel.isConnected)box.append(panel);panels.add(panel);panel.hidden=false;fullControl.setAttribute('aria-expanded','true');draw();void read();
     });
-    box.setManagement=management=>{const previous=dialog.querySelector('.call-ai-management');if(previous)previous.replaceWith(management);else dialog.append(management);};
-    close.addEventListener('click',()=>dialog.close());dialog.addEventListener('close',()=>bubble.querySelector('[data-call-action="transcript"]')?.focus({preventScroll:true}));
+    box.setManagement=management=>{const previous=panel.querySelector('.call-ai-management');if(previous)previous.replaceWith(management);else panel.insertBefore(management,footer);};
+    panel.collapse=()=>{panel.hidden=true;fullControl.setAttribute('aria-expanded','false');draw();};
+    const collapse=()=>{panel.collapse();fullControl.focus({preventScroll:true});};close.addEventListener('click',collapse);footer.addEventListener('click',collapse);
     more.addEventListener('click',()=>{const saved=data.transcripts.get(key());if(saved?.done&&!saved.complete)data.transcripts.delete(key());void read(true);});
     return box;
   }

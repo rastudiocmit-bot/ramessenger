@@ -17,7 +17,7 @@
   --danger:#235f88; --ok:#2574ad;
   /* Operator's messages: a soft light green; the parent's stay white. */
   --bubble-in:#ffffff; --bubble-out:#eaf6e4; --bubble-ink:#163047;
-  --call-bubble:#cce7ff;
+  --call-bubble:#bdddff;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(16,27,35,.16));
   --glass:rgba(255,255,255,.72); --glass-line:rgba(255,255,255,.6);
   /* White glass: 70% transparency. Any hue comes from the wallpaper behind it. */
@@ -54,7 +54,7 @@
   --amber:#4e9ad1; --amber-deep:#4089c0; --amber-ink:#8fc3e8; --amber-tint:#15283a;
   --danger:#8fc3e8; --ok:#66b4e7;
   --bubble-in:#1a2a31; --bubble-out:#24382c; --bubble-ink:#e2f0e5;
-  --call-bubble:#23445f;
+  --call-bubble:#254f70;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(0,0,0,.4));
   --glass:rgba(19,31,36,.74); --glass-line:rgba(255,255,255,.07);
   --sys-bg:rgba(255,255,255,.3); --sys-line:rgba(255,255,255,.1); --sys-ink:#c6d1d9;
@@ -2630,15 +2630,19 @@ body:has(#cabinet[hidden]){overflow:auto}
 .call-event-actions{display:flex;gap:0;flex:none;margin:-4px -5px -4px 0}
 .call-event.out .call-event-actions{margin:-4px 0 -4px -5px}
 .call-icon-button{position:relative;display:inline-grid;place-items:center;width:40px;height:40px;min-width:40px;padding:0;border:0;border-radius:50%;color:var(--primary-ink);background:transparent;cursor:pointer;touch-action:manipulation}
-.call-icon-button::before{content:"";position:absolute;width:28px;height:28px;border-radius:50%;background:color-mix(in srgb,var(--primary) 12%,var(--bubble-in));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--primary) 14%,transparent)}
+.call-icon-button::before{content:"";position:absolute;width:28px;height:28px;border-radius:50%;background:var(--call-bubble);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--primary-ink) 22%,transparent)}
 .call-icon-button svg{position:relative;width:15px;height:15px}
-.call-icon-button:hover::before{background:color-mix(in srgb,var(--primary) 23%,var(--bubble-in))}
+.call-icon-button:hover::before{background:var(--call-bubble);box-shadow:inset 0 0 0 1.5px var(--primary-ink)}
 .call-icon-button:focus-visible{outline:2px solid var(--primary);outline-offset:0}
 .call-icon-button:disabled{opacity:.4;cursor:default}
 .call-event-details{display:flex;align-items:center;gap:0;font-size:11px;line-height:1.6;color:var(--muted);font-variant-numeric:tabular-nums;margin:0 0 0 auto;white-space:pre;flex:none}
 .call-recording-note,.call-audio-error{font-size:12px;line-height:1.5;color:var(--muted);margin:6px 0 0;overflow-wrap:anywhere}
 .call-audio-unmute{border:0;background:transparent;color:var(--primary-ink);font-size:12px;padding:4px 0;min-height:32px;text-decoration:underline;text-underline-offset:3px}
-.call-recording audio{display:block;width:100%;height:40px;margin-top:8px}.call-recording audio[hidden]{display:none}.call-audio-error{color:var(--danger)}
+.call-recording audio{display:block;width:100%;height:40px;margin-top:8px;background:var(--call-bubble);color:var(--ink);accent-color:var(--primary-ink);color-scheme:light}
+:root[data-theme="dark"] .call-recording audio{color-scheme:dark}
+.call-recording audio::-webkit-media-controls-enclosure,.call-recording audio::-webkit-media-controls-panel{background:var(--call-bubble);border:0;border-radius:0}
+.call-recording audio::-webkit-media-controls-play-button,.call-recording audio::-webkit-media-controls-mute-button,.call-recording audio::-webkit-media-controls-volume-slider,.call-recording audio::-webkit-media-controls-timeline{background-color:var(--call-bubble);color:var(--ink)}
+.call-recording audio::-webkit-media-controls-current-time-display,.call-recording audio::-webkit-media-controls-time-remaining-display{color:var(--ink);text-shadow:none}.call-recording audio[hidden]{display:none}.call-audio-error{color:var(--danger)}
 .call-history-controls{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;padding:8px}.call-history-note{font-size:11px;line-height:1.5;color:var(--muted)}.call-missed .call-event-label>svg{color:var(--danger)}
 @media(max-width:640px){.call-event{width:min(92%,480px)}.call-event-main{display:flex;align-items:center;flex:1;flex-wrap:wrap;gap:3px 4px;min-width:0}
 .call-event-label{font-size:12px}.call-event-details{font-size:10px}}
@@ -2653,11 +2657,12 @@ body:has(#cabinet[hidden]){overflow:auto}
 .call-event .call-summary-preview{font-size:15px;line-height:1.38;white-space:pre-wrap;margin:0;overflow-wrap:anywhere}
 .call-event .call-summary-preview.is-status{font-size:13px;line-height:1.5;color:var(--muted)}
 .call-ai-management{font-size:11px;line-height:1.5;color:var(--muted)}.call-ai-management>summary{cursor:pointer;padding:4px 0;width:fit-content}.call-ai-management-body{display:grid;gap:8px;margin:6px 0;min-width:0;border-top:1px solid var(--line);padding-top:8px}
-.call-ai-status,.call-event-staff{font-size:12px;color:var(--muted);margin:0}.call-event .call-ai-summary{font-size:13px;line-height:1.5;white-space:pre-wrap;margin:0;overflow-wrap:anywhere}:is(.call-ai,.call-transcript-dialog) small{font-size:11px;color:var(--muted);line-height:1.5}:is(.call-ai,.call-transcript-dialog) details p{white-space:pre-wrap;overflow-wrap:anywhere}:is(.call-ai,.call-transcript-dialog) textarea{box-sizing:border-box;width:100%;resize:vertical;min-height:100px}:is(.call-ai,.call-transcript-dialog) .btn{min-height:40px;justify-self:start}
-.call-transcript-dialog{box-sizing:border-box;width:min(760px,calc(100% - 32px));max-width:calc(100% - 32px);max-height:calc(100dvh - 32px);padding:20px;border:1px solid var(--line);border-radius:18px;background:var(--surface);color:var(--ink);box-shadow:var(--card-soft);overflow:auto}
-.call-transcript-dialog>.call-ai-management{margin-top:14px;padding-top:8px;border-top:1px solid var(--line)}
-.call-transcript-dialog::backdrop{background:rgba(15,30,45,.4)}.call-transcript-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.call-transcript-heading h2{font-size:18px;line-height:1.3;margin:0}.call-transcript-heading .btn{flex:none}.call-transcript-info{font-size:12px;line-height:1.5;color:var(--muted)}.call-transcript-body{max-height:60dvh;overflow:auto;overscroll-behavior:contain;padding-right:8px}.call-transcript-body p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.6;margin:0 0 16px}
-@media(max-width:640px){.call-transcript-dialog{padding:14px;width:calc(100% - 16px);max-width:calc(100% - 16px)}.call-transcript-heading{align-items:flex-start}.call-transcript-heading h2{font-size:16px}}
+.call-ai-status,.call-event-staff{font-size:12px;color:var(--muted);margin:0}.call-event .call-ai-summary{font-size:13px;line-height:1.5;white-space:pre-wrap;margin:0;overflow-wrap:anywhere}:is(.call-ai,.call-transcript-panel) small{font-size:11px;color:var(--muted);line-height:1.5}:is(.call-ai,.call-transcript-panel) details p{white-space:pre-wrap;overflow-wrap:anywhere}:is(.call-ai,.call-transcript-panel) textarea{box-sizing:border-box;width:100%;resize:vertical;min-height:100px}:is(.call-ai,.call-transcript-panel) .btn{min-height:40px;justify-self:start}
+.call-transcript-panel{box-sizing:border-box;width:100%;min-width:0;margin-top:10px;padding-top:10px;border-top:1px solid color-mix(in srgb,var(--primary-ink) 20%,transparent);color:var(--ink);background:transparent}
+.call-transcript-panel>.call-ai-management{margin-top:14px;padding-top:8px;border-top:1px solid var(--line)}
+.call-transcript-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}.call-transcript-heading h3{font-size:13px;line-height:1.4;margin:0}.call-text-collapse{flex:none;border:0;background:transparent;color:var(--primary-ink);padding:4px 0;min-height:32px;font-size:12px}.call-text-collapse:hover{text-decoration:underline;text-underline-offset:3px}
+.call-transcript-info{font-size:11px;line-height:1.5;color:var(--muted)}.call-transcript-body{min-width:0}.call-transcript-body p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.6;margin:0 0 14px}.call-transcript-panel>.call-text-collapse{margin-top:8px}
+
 
 
 /* Telephone-agent fields and archive controls share the connection card rhythm. */
