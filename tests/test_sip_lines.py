@@ -261,3 +261,24 @@ class SipHttpTests(unittest.TestCase):
         status, body = self.request({'expected_version': 1}, method='DELETE', suffix='/' + line)
         self.assertEqual(status, 200); self.assertEqual(json.loads(body)['lines'], [])
         self.assertEqual(json.loads(body)['version'], 2); self.assertNotIn(PASSWORD, body)
+
+    def test_real_http_malformed_unicode_password_is_rejected_without_a_partial_write(self):
+        malformed = ('synthetic-' + chr(0xD800), chr(0xDFFF) + '-synthetic', 'synthetic-' + chr(0xD800) + '-tail')
+        for invalid in malformed:
+            with self.subTest(position='start' if invalid[0] == chr(0xDFFF) else 'middle-or-end'):
+                status, body = self.request(self.payload(password=invalid))
+                self.assertEqual(status, 422); self.assertEqual(self.db.rows, {})
+                self.assertNotIn('synthetic-', body)
+        status, body = self.request(self.payload()); self.assertEqual(status, 200)
+        line = json.loads(body)['lines'][0]['id']; before = copy.deepcopy(self.db.rows)
+        for invalid in malformed:
+            status, body = self.request(self.payload(expected_version=1, line_id=line, password=invalid))
+            self.assertEqual(status, 422); self.assertEqual(self.db.rows, before)
+            self.assertNotIn('synthetic-', body)
+
+    def test_real_http_valid_unicode_password_round_trips_in_the_vault_only(self):
+        password = 'Синтетический-ключ-🔑-91'
+        status, body = self.request(self.payload(password=password))
+        self.assertEqual(status, 200); self.assertNotIn(password, body)
+        line = self.db.rows[self.workspace]['lines'][0]
+        self.assertEqual(self.service.secrets.open(self.workspace, line['id'], self.user, line['password_ciphertext']), password)

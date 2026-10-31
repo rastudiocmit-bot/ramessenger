@@ -92,6 +92,9 @@ or weaken the connector vault's validation. Settings responses contain only
 password preserves an unchanged profile's secret. Changing assignment, SIP
 number, server or port requires explicit password reentry. No provider request
 or automatic registration occurs during save.
+Malformed Unicode in a submitted password is rejected before encryption with
+a safe validation message. Valid UTF-8 passwords retain their exact value;
+validation never returns the submitted password or partially updates a profile.
 
 `GET /api/workspaces/{workspace}/integrations/novofon/sip-lines` and the PUT /
 DELETE mutations are owner/admin-only. `GET .../sip-lines/mine` checks active

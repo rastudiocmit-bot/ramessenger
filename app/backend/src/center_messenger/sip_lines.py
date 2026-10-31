@@ -131,6 +131,10 @@ class SipLines:
             raise AuthError(422, 'Укажите корректный SIP-порт.')
         if password and (not 1 <= len(password) <= 1024 or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in password)):
             raise AuthError(422, 'Введите SIP-пароль без пробелов и переводов строк.')
+        try:
+            password.encode('utf-8')
+        except UnicodeEncodeError:
+            raise AuthError(422, 'В SIP-пароле есть некорректный символ. Скопируйте пароль заново.') from None
         return sip, extension, server, password
 
     @staticmethod
