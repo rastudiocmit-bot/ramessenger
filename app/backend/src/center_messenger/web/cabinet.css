@@ -2620,7 +2620,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 /* Local telephony facts remain distinct from MAX send/read state. */
 /* Calls share the message bubble rhythm without becoming MAX message targets. */
-.call-event{align-self:flex-start;width:min(80%,480px);max-width:100%;min-width:0;padding:8px 12px 6px;border:0;border-radius:16px 16px 16px 6px;background:var(--call-bubble);color:var(--ink);box-shadow:var(--bub-shadow-box);font-size:15px;line-height:1.38;overflow-wrap:anywhere}
+.call-event{align-self:flex-start;width:min(80%,480px);max-width:100%;min-width:0;padding:8px 12px 6px;border:0;border-radius:16px 16px 16px 6px;background:color-mix(in srgb,var(--call-bubble) 85%,transparent);color:var(--ink);box-shadow:var(--bub-shadow-box);font-size:15px;line-height:1.38;overflow-wrap:anywhere}
 .call-event.out{align-self:flex-end;border-radius:16px 16px 6px 16px}
 .call-event-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
 .call-event.out .call-event-head{flex-direction:row-reverse}
@@ -2630,18 +2630,18 @@ body:has(#cabinet[hidden]){overflow:auto}
 .call-event-actions{display:flex;gap:0;flex:none;margin:-4px -5px -4px 0}
 .call-event.out .call-event-actions{margin:-4px 0 -4px -5px}
 .call-icon-button{position:relative;display:inline-grid;place-items:center;width:40px;height:40px;min-width:40px;padding:0;border:0;border-radius:50%;color:var(--primary-ink);background:transparent;cursor:pointer;touch-action:manipulation}
-.call-icon-button::before{content:"";position:absolute;width:28px;height:28px;border-radius:50%;background:var(--call-bubble);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--primary-ink) 22%,transparent)}
+.call-icon-button::before{content:"";position:absolute;width:28px;height:28px;border-radius:50%;background:transparent;box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--primary-ink) 22%,transparent)}
 .call-icon-button svg{position:relative;width:15px;height:15px}
-.call-icon-button:hover::before{background:var(--call-bubble);box-shadow:inset 0 0 0 1.5px var(--primary-ink)}
+.call-icon-button:hover::before{background:transparent;box-shadow:inset 0 0 0 1.5px var(--primary-ink)}
 .call-icon-button:focus-visible{outline:2px solid var(--primary);outline-offset:0}
 .call-icon-button:disabled{opacity:.4;cursor:default}
 .call-event-details{display:flex;align-items:center;gap:0;font-size:11px;line-height:1.6;color:var(--muted);font-variant-numeric:tabular-nums;margin:0 0 0 auto;white-space:pre;flex:none}
 .call-recording-note,.call-audio-error{font-size:12px;line-height:1.5;color:var(--muted);margin:6px 0 0;overflow-wrap:anywhere}
 .call-audio-unmute{border:0;background:transparent;color:var(--primary-ink);font-size:12px;padding:4px 0;min-height:32px;text-decoration:underline;text-underline-offset:3px}
-.call-recording audio{display:block;width:100%;height:40px;margin-top:8px;background:var(--call-bubble);color:var(--ink);accent-color:var(--primary-ink);color-scheme:light}
+.call-recording audio{display:block;width:100%;height:40px;margin-top:8px;background:transparent;color:var(--ink);accent-color:var(--primary-ink);color-scheme:light}
 :root[data-theme="dark"] .call-recording audio{color-scheme:dark}
-.call-recording audio::-webkit-media-controls-enclosure,.call-recording audio::-webkit-media-controls-panel{background:var(--call-bubble);border:0;border-radius:0}
-.call-recording audio::-webkit-media-controls-play-button,.call-recording audio::-webkit-media-controls-mute-button,.call-recording audio::-webkit-media-controls-volume-slider,.call-recording audio::-webkit-media-controls-timeline{background-color:var(--call-bubble);color:var(--ink)}
+.call-recording audio::-webkit-media-controls-enclosure,.call-recording audio::-webkit-media-controls-panel{background:transparent;border:0;border-radius:0}
+.call-recording audio::-webkit-media-controls-play-button,.call-recording audio::-webkit-media-controls-mute-button,.call-recording audio::-webkit-media-controls-volume-slider,.call-recording audio::-webkit-media-controls-timeline{background-color:transparent;color:var(--ink)}
 .call-recording audio::-webkit-media-controls-current-time-display,.call-recording audio::-webkit-media-controls-time-remaining-display{color:var(--ink);text-shadow:none}.call-recording audio[hidden]{display:none}.call-audio-error{color:var(--danger)}
 .call-history-controls{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap;padding:8px}.call-history-note{font-size:11px;line-height:1.5;color:var(--muted)}.call-missed .call-event-label>svg{color:var(--danger)}
 @media(max-width:640px){.call-event{width:min(92%,480px)}.call-event-main{display:flex;align-items:center;flex:1;flex-wrap:wrap;gap:3px 4px;min-width:0}
