@@ -2,7 +2,9 @@
 // Connections → service settings: Yandex Cloud and DeepSeek keys and the workspace's AI agents.
 // Owners and administrators only; the server enforces the same rule.
 window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
-  const phoneAgent = window.CenterTelephonyAgent?.({ $, state, api, notice, confirm });
+  const workspace=window.CenterAgentsWorkspace?.({$,state,confirm});
+  const phoneAgent = window.CenterTelephonyAgent?.({ $, state, api, notice, confirm,
+    onChange:value=>workspace?.phone(value),onProcessing:value=>workspace?.processing(value) });
   const form = $("#ai-settings-form"), agentForm = $("#ai-agent-form"), list = $("#ai-agent-list");
   const dsForm = $("#ai-deepseek-form"), routesForm = $("#ai-routes-form"), voiceForm = $("#ai-voice-options-form");
   const verifying = new Map();
@@ -13,6 +15,19 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   const money = value => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(Number(value || 0));
   const statusText = { active: "Работает", error: "Ошибка", not_configured: "Не проверено" };
   let settings = null, agents = [], editing = null, seq = 0;
+  let selectedTask="voice_input",baseline=null,genericBusy=false,subject="";
+  const who=()=>`${state.user?.id||""}:${state.workspace?.id||""}:${state.workspace?.role||""}`;
+  const dirty=()=>!agentForm.hidden&&baseline!==null&&JSON.stringify(values())!==baseline;
+  function editorControls(){
+    const changed=dirty(),isNew=!editing&&!agentForm.hidden;
+    $("#ai-agent-new").disabled=!settings||genericBusy||!admin();
+    for(const element of agentForm.querySelectorAll('input,select,textarea,button'))element.disabled=genericBusy||!settings||!admin()||agentForm.hidden;
+    agentForm.querySelector('[type=submit]').disabled=genericBusy||!settings||!admin()||agentForm.hidden||(!changed&&!isNew);
+    $("#ai-agent-cancel").disabled=genericBusy||(!changed&&!isNew);
+    $("#ai-agent-draft-status").textContent=genericBusy?"Выполняем запрос…":changed?"Есть несохранённые изменения":isNew?"Новый агент · ещё не сохранён":editing?`Сохранена версия ${editing.version}`:"Выберите агента";
+    $("#ai-agent-result-empty").hidden=!$("#ai-agent-result").hidden;
+    workspace?.generic({settings,agents,editing,dirty:changed,busy:genericBusy,editorOpen:!agentForm.hidden});
+  }
   const admin = () => ["owner", "admin"].includes(state.workspace?.role);
   const base = () => `/workspaces/${state.workspace.id}/ai`;
 
@@ -46,7 +61,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       select.replaceChildren(...items.map(item => new Option(item.title, item.id)));
       if (items.some(item => item.id === chosen)) select.value = chosen;
     };
-    fill(agentForm.elements.task, settings.tasks);
+    if(!dirty())fill(agentForm.elements.task, settings.tasks);
     if (!agentForm.dataset.taskPrompt) {
       agentForm.dataset.taskPrompt = "1";
       // A new agent for tasks starts from the studio's ready rules instead of the dictation prompt.
@@ -58,7 +73,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         }
       });
     }
-    renderModels(agentForm.elements.model.value || editing?.model || settings.default_model);
+    if(!dirty())renderModels(agentForm.elements.model.value || editing?.model || settings.default_model);
     for (const [selector, configured] of [["#ai-cloud-card", settings.configured], ["#ai-deepseek-card", ds.configured]]) {
       const details = $(selector).querySelector(".gateway-credentials"); if (details) details.open = !configured;
     }
@@ -107,32 +122,38 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   function renderAgents() {
     renderPipeline();
     list.replaceChildren();
-    if (!agents.length) {
-      list.append(node("p", "Агентов пока нет. Без агента в поле вставляется распознанный текст как есть.", "muted small"));
-      return;
-    }
-    for (const agent of agents) {
+    const visible=workspace?agents.filter(a=>a.task===selectedTask):agents;
+    if (!visible.length) list.append(node("p",selectedTask==="voice_input"?"Агент не добавлен. Распознанный текст вставляется без дополнительной обработки.":"Для этого назначения пока нет агента. Нажмите «Добавить агента».", "muted small"));
+    for (const agent of visible) {
       const row = node("button", undefined, `ai-agent${agent.enabled ? "" : " off"}${editing?.id === agent.id ? " selected" : ""}`); row.type = "button";
       const main = node("span", undefined, "ai-agent-main");
       main.append(node("strong", agent.name), node("small", `${agent.task_title} · ${agent.model_title} · версия ${agent.version}`));
       row.append(main);
-      if (agent.is_default) row.append(node("span", "Основной", "connection-status ai-default"));
+      if (agent.is_default) row.append(node("span", "Используется", "connection-status ai-default"));
       if (!agent.enabled) row.append(node("span", "Выключен", "connection-status"));
-      row.addEventListener("click", () => edit(agent));
+      row.addEventListener("click", () => void changeEditor(agent));
       list.append(row);
     }
+    editorControls();
   }
 
   async function load() {
+    if(subject!==who()){
+      subject=who();settings=null;agents=[];editing=null;baseline=null;genericBusy=false;selectedTask="voice_input";
+      show(agentForm,false);agentForm.reset();list.replaceChildren();workspace?.reset();phoneAgent?.reset();editorControls();
+    }
     void phoneAgent?.load();
     if (!admin() || !state.workspace) return;
-    const mine = ++seq; verifying.clear();
+    const mine = ++seq,owner=who(); verifying.clear();
     try {
       const [loaded, listed] = await Promise.all([api(`${base()}/settings`), api(`${base()}/agents`)]);
-      if (mine !== seq) return;
-      settings = loaded; agents = listed.agents; renderSettings(); renderAgents();
+      if (mine !== seq||owner!==who()) return;
+      const preserve=dirty()||genericBusy||(!agentForm.hidden&&!editing),previousSection=workspace?.currentSection();
+      settings = loaded; agents = listed.agents; renderSettings();
+      notice("",$("#ai-agents-error"));
+      if(workspace&&!preserve){const current=editing&&agents.find(a=>a.id===editing.id);if(current)edit(current);else selectTask(selectedTask);workspace.section(previousSection);}else renderAgents();
     } catch (error) {
-      if (mine === seq && error.name !== "AbortError") notice(error.message, $("#ai-error"));
+      if (mine === seq&&owner===who()&&error.name !== "AbortError") {notice(error.message, $("#ai-error"));notice(error.message,$("#ai-agents-error"));}
     }
   }
 
@@ -141,19 +162,27 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     editing = agent || null;
     const f = agentForm.elements;
     $("#ai-agent-form-title").textContent = agent ? `Агент «${agent.name}»` : "Новый агент";
-    f.name.value = agent?.name || "Чистовик голосового ответа";
-    f.task.value = agent?.task || "voice_input";
+    const task=agent?.task||selectedTask;
+    f.name.value = agent?.name || (task==="tasks"?"Задачи из сообщений":task==="text_processing"?"Обработка текста":"Чистовик голосового ответа");
+    f.task.value = task;
     renderModels(agent?.model || settings?.default_model || "yandexgpt-5.1");
-    f.prompt.value = agent?.prompt || settings?.default_prompt || "";
+    f.prompt.value = agent?.prompt || settings?.task_prompts?.[task] || settings?.default_prompt || "";
     f.temperature.value = agent?.temperature ?? 0.2; temperature(f.temperature.value);
     f.enabled.checked = agent ? agent.enabled : true;
-    f.is_default.checked = agent ? agent.is_default : !agents.some(item => item.is_default);
+    f.is_default.checked = agent ? agent.is_default : !agents.some(item => item.is_default&&item.task===task);
     show($("#ai-agent-delete"), Boolean(agent)); show($("#ai-agent-result"), false);
     show($("#ai-agent-versions"), Boolean(agent)); $("#ai-agent-versions").open = false; $("#ai-agent-version-list").replaceChildren();
-    notice("", $("#ai-agents-error")); show(agentForm); renderAgents();
-    agentForm.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    notice("", $("#ai-agents-error"));show(agentForm);baseline=JSON.stringify(values());$("#ai-agent-sample").value="";
+    workspace?.section("settings");renderAgents();
+    if(!workspace)agentForm.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
-  function close() { editing = null; show(agentForm, false); renderAgents(); }
+  function close() { editing = null;baseline=null;show(agentForm, false);workspace?.section("settings");renderAgents(); }
+  function selectTask(task){selectedTask=task;if(!settings){close();return;}const choices=agents.filter(a=>a.task===task);const chosen=choices.find(a=>a.enabled&&a.is_default)||choices[0];if(chosen)edit(chosen);else close();}
+  async function changeEditor(agent){
+    if(genericBusy||!settings)return;const owner=who();
+    if(dirty()&&!await confirm("Есть несохранённые изменения","Открыть другого агента и отменить текущие правки?","Перейти без сохранения"))return;
+    if(owner===who())edit(agent);
+  }
   function values() {
     const f = agentForm.elements;
     return { name: f.name.value.trim(), task: f.task.value, model: f.model.value, prompt: f.prompt.value.trim(),
@@ -161,10 +190,12 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   }
 
   async function guarded(button, action, errorTarget) {
-    if (button.disabled) return;
+    const agentAction=Boolean(button.closest('#ai-agent-form'));
+    if (button.disabled||agentAction&&genericBusy) return;
+    const owner=who();if(agentAction){genericBusy=true;editorControls();}
     button.disabled = true; notice("", errorTarget);
-    try { await action(); } catch (error) { if (error.name !== "AbortError") notice(error.message, errorTarget); }
-    finally { button.disabled = false; }
+    try { await action(); } catch (error) { if (owner===who()&&error.name !== "AbortError") notice(error.message, errorTarget); }
+    finally {if(owner===who()){button.disabled = false;if(agentAction){genericBusy=false;editorControls();}}}
   }
 
   form.addEventListener("submit", event => {
@@ -374,34 +405,45 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   }, $("#ai-synthesis-error")));
 
 
-  $("#ai-agent-new").addEventListener("click", () => edit(null));
+  $("#ai-agent-new").addEventListener("click", () => void changeEditor(null));
   for (const radio of agentForm.querySelectorAll('[name="provider"]')) radio.addEventListener("change", () => {
     renderModels(settings.models.find(item => item.provider === agentForm.elements.provider.value)?.id);
   });
   agentForm.elements.model.addEventListener("change", () => renderModels(agentForm.elements.model.value));
-  $("#ai-agent-cancel").addEventListener("click", close);
+  $("#ai-agent-cancel").addEventListener("click",()=>{if(!genericBusy){if(editing)edit(editing);else close();}});
   agentForm.elements.temperature.addEventListener("input", event => temperature(event.target.value));
+  agentForm.addEventListener('input',event=>{if(event.target.id!=="ai-agent-sample")show($("#ai-agent-result"),false);editorControls();});
+  agentForm.addEventListener('change',editorControls);
+  agentForm.noValidate=true;
   agentForm.addEventListener("submit", event => {
     event.preventDefault();
-    guarded($("button[type=submit]", agentForm), async () => {
-      const saved = editing
-        ? await api(`${base()}/agents/${editing.id}`, { method: "PUT", data: values() })
-        : await api(`${base()}/agents`, { method: "POST", data: values() });
-      agents = (await api(`${base()}/agents`)).agents;
-      toast(editing ? "Агент сохранён." : "Агент создан.");
-      editing = agents.find(agent => agent.id === saved.id) || null; close();
+    if(!agentForm.checkValidity()){workspace?.section("settings");agentForm.reportValidity();return;}
+    guarded(agentForm.querySelector('[type=submit]'), async () => {
+      const owner=who(),endpoint=base(),old=editing;
+      const saved = old
+        ? await api(`${endpoint}/agents/${old.id}`, { method: "PUT", data: values() })
+        : await api(`${endpoint}/agents`, { method: "POST", data: values() });
+      if(owner!==who())return;
+      const listed=await api(`${endpoint}/agents`);if(owner!==who())return;agents=listed.agents;
+      toast(old ? "Агент сохранён." : "Агент создан.");
+      selectedTask=saved.task;workspace?.savedTask(selectedTask);
+      if(workspace)edit(agents.find(agent=>agent.id===saved.id)||saved);else close();
     }, $("#ai-agents-error"));
   });
   $("#ai-agent-delete").addEventListener("click", () => guarded($("#ai-agent-delete"), async () => {
-    if (!editing || !(await confirm(`Удалить агента «${editing.name}»?`, "История версий сохранится в базе.", "Удалить"))) return;
-    await api(`${base()}/agents/${editing.id}`, { method: "DELETE" });
-    agents = (await api(`${base()}/agents`)).agents; close(); toast("Агент удалён.");
+    const owner=who(),endpoint=base(),old=editing;
+    if (!old || !(await confirm(`Удалить агента «${old.name}»?`, "История версий сохранится в базе. Если есть другой активный вариант, система выберет его для этой задачи.", "Удалить"))||owner!==who()) return;
+    await api(`${endpoint}/agents/${old.id}`, { method: "DELETE" });if(owner!==who())return;
+    const listed=await api(`${endpoint}/agents`);if(owner!==who())return;agents=listed.agents;
+    if(workspace)selectTask(selectedTask);else close();toast("Агент удалён.");
   }, $("#ai-agents-error")));
   $("#ai-agent-test").addEventListener("click", () => guarded($("#ai-agent-test"), async () => {
+    const owner=who(),endpoint=base();
     const sample = $("#ai-agent-sample").value.trim(), result = $("#ai-agent-result");
     if (!sample) { notice("Введите фразу для проверки.", $("#ai-agents-error")); return; }
     const { name, enabled, is_default, ...rest } = values();
-    const answer = await api(`${base()}/agents/test`, { method: "POST", timeoutMs: 30000, data: { text: sample, ...rest } });
+    const answer = await api(`${endpoint}/agents/test`, { method: "POST", timeoutMs: 30000, data: { text: sample, ...rest } });
+    if(owner!==who())return;
     result.replaceChildren(node("strong", answer.fallback ? "Модель не справилась, текст без изменений:" : "Результат:"), node("span", answer.text),
       node("small", answer.billing === "subscription" ? "Использована квота Token Plan" : `Оценка стоимости: ${money(answer.cost_rub)} ₽`));
     show(result);
@@ -409,22 +451,31 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   $("#ai-agent-versions").addEventListener("toggle", async () => {
     const details = $("#ai-agent-versions"), target = $("#ai-agent-version-list");
     if (!details.open || !editing) return;
+    const owner=who(),id=editing.id;
     try {
-      const { versions } = await api(`${base()}/agents/${editing.id}/versions`);
+      const { versions } = await api(`${base()}/agents/${id}/versions`);
+      if(owner!==who()||editing?.id!==id||!details.open)return;
       target.replaceChildren(...versions.map(version => {
         const item = node("li"), when = new Date(version.created_at);
         item.append(node("strong", `Версия ${version.version}`),
           node("small", `${Number.isNaN(when.getTime()) ? "" : when.toLocaleString("ru-RU")}${version.author ? ` · ${version.author}` : ""}`),
           node("span", version.prompt));
         const restore = node("button", "Вернуть в форму", "text-button"); restore.type = "button";
-        restore.addEventListener("click", () => {
+        restore.addEventListener("click", async () => {
+          if(genericBusy||owner!==who()||editing?.id!==id)return;
+          if(dirty()&&!await confirm("Заменить текущие правки?","Сохранённая версия будет перенесена в форму. Применение потребует отдельного сохранения.","Перенести версию"))return;
+          if(owner!==who()||editing?.id!==id)return;
           const f = agentForm.elements; f.name.value = version.name; f.task.value = version.task || "voice_input"; renderModels(version.model); f.prompt.value = version.prompt;
           f.temperature.value = version.temperature; temperature(version.temperature);
+          show($("#ai-agent-result"),false);editorControls();
           toast("Версия перенесена в форму. Нажмите «Сохранить агента», чтобы применить.");
         });
         item.append(restore); return item;
       }));
-    } catch (error) { notice(error.message, $("#ai-agents-error")); }
+    } catch (error) {if(owner===who()&&editing?.id===id)notice(error.message, $("#ai-agents-error"));}
   });
+  workspace?.bind({dirty,discard:close,selectTask});
+  $("#agents-reload").addEventListener('click',()=>void load());
+  editorControls();
   return { load };
 };

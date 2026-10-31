@@ -1,7 +1,7 @@
 "use strict";
 // Dedicated telephone agent. Opening/saving this form makes no AI request.
-window.CenterTelephonyAgent = ({ $, state, api, notice, confirm }) => {
-  const processing=window.CenterTelephonyProcessing?.({$,state,api,notice,confirm});
+window.CenterTelephonyAgent = ({ $, state, api, notice, confirm, onChange=()=>{}, onProcessing=()=>{} }) => {
+  const processing=window.CenterTelephonyProcessing?.({$,state,api,notice,confirm,onChange:onProcessing});
   const form = $("#telephony-agent-form"), sample = $("#telephony-agent-sample");
   let saved = null, busy = false, generation = 0, subject = "";
   const who = () => `${state.user?.id || ""}:${state.workspace?.id || ""}:${state.workspace?.role || ""}`;
@@ -18,7 +18,13 @@ window.CenterTelephonyAgent = ({ $, state, api, notice, confirm }) => {
     $("#telephony-agent-test").disabled = busy || !saved?.version || dirty() || !sample.value.trim() || !admin();
     sample.disabled = busy || !saved || !admin();
     $("#telephony-agent-refresh").disabled = busy || !admin();
+    $("#telephony-agent-cancel").disabled = busy || !saved || !dirty() || !admin();
+    form.querySelector('[type=submit]').disabled=busy||!saved||!admin()||Boolean(saved.version&&!dirty());
+    $("#telephony-agent-draft-status").textContent=!saved?"Получаем настройки…":dirty()?"Есть несохранённые изменения":saved.version?`Сохранена версия ${saved.version}`:"Новый агент · ещё не сохранён";
+    $("#telephony-agent-test-version").textContent=dirty()?"Сначала сохраните изменения во вкладке «Настройки». Проверяется только сохранённая версия.":saved?.version?`Проверяется сохранённая версия ${saved.version}. Отправка текста может оплачиваться по тарифу шлюза; звонки не изменяются.`:"Сначала сохраните агента во вкладке «Настройки».";
+    $("#telephony-agent-result-empty").hidden=Boolean($("#telephony-agent-result").textContent.trim());
     $("#telephony-agent-card").setAttribute("aria-busy", String(busy));
+    onChange({value:saved,dirty:Boolean(dirty()),busy});
   }
   function options(select, values, selected) {
     select.replaceChildren(...values.map(item => {
@@ -56,8 +62,8 @@ window.CenterTelephonyAgent = ({ $, state, api, notice, confirm }) => {
     finally { if (current(c)) { busy = false; controls(); } }
   }
   async function load(force = false) {
-    void processing?.load();
     if (subject !== who()) reset();
+    void processing?.load();
     if (!force && dirty()) return;
     return run(async c => { const value = await api(endpoint(c)); if (current(c)) render(value); });
   }
@@ -86,7 +92,8 @@ window.CenterTelephonyAgent = ({ $, state, api, notice, confirm }) => {
     if (dirty() && !await confirm("Обновить телефонного агента?", "Несохранённые настройки будут заменены сохранённой версией.", "Обновить")) return;
     if (current(c)) await load(true);
   });
+  $("#telephony-agent-cancel").addEventListener("click",()=>{if(!busy&&saved){render(saved);notice("",$("#telephony-agent-error"));$("#telephony-agent-message").textContent="Несохранённые изменения отменены.";}});
   form.addEventListener("input", () => { $("#telephony-agent-result").textContent=""; controls(); });
   form.addEventListener("change", controls); sample.addEventListener("input", controls);
-  reset(); return {load,reset};
+  reset(); return {load,reset,dirty:()=>Boolean(dirty())};
 };

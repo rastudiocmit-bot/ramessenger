@@ -38,3 +38,12 @@ test('late responses cannot fill another organization monitor or enable its star
  let complete;const s=setup(t,()=>new Promise(r=>complete=r));const pending=s.ui.load();s.state.workspace.id='two';s.ui.reset();complete(defaults);await pending;
  assert.equal(s.$('#telephony-archive-start').disabled,true);assert.equal(s.$('#telephony-archive-progress').textContent,'');
 });
+test('monitor polling refreshes archive counters while retaining the unsaved new-call flag and original version',async t=>{
+ let reads=0;const s=setup(t,(_url,opt)=>opt.method==='PUT'?{...defaults,version:3,auto_new:opt.data.auto_new}:++reads===1?defaults:
+  {...defaults,version:2,counts:{complete:9},archive:{...defaults.archive,version:4,imported:17}});
+ await s.ui.load();const flag=s.$('#telephony-processing-form').elements.auto_new;flag.checked=true;flag.dispatchEvent(new s.w.Event('input',{bubbles:true}));
+ await s.ui.load('monitor');assert.equal(flag.checked,true);assert.match(s.$('#telephony-archive-progress').textContent,/17/);
+ assert.match(s.$('#telephony-processing-metrics').textContent,/Готово9/);
+ s.$('#telephony-processing-form').dispatchEvent(new s.w.Event('submit',{bubbles:true,cancelable:true}));await flush();
+ assert.equal(s.calls.at(-1).data.expected_version,0);assert.equal(s.calls.at(-1).data.auto_new,true);
+});
