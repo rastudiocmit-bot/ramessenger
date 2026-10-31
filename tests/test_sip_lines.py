@@ -64,7 +64,7 @@ class SipLineTests(unittest.TestCase):
         self.key = Path(self.temp.name) / 'key'; self.key.write_text(secrets.token_urlsafe(48))
         self.vault = ConnectorVault(self.key); self.workspace, self.user, self.other = uuid4(), uuid4(), uuid4()
         self.actor = SimpleNamespace(user_id=self.user)
-        self.db = MemoryDB(); self.db.members[self.workspace] = {str(u): {'user_id': u, 'display_name': 'Тёзка', 'role': 'operator', 'sections': ['messages']} for u in (self.user, self.other)}
+        self.db = MemoryDB(); self.db.members[self.workspace] = {str(u): {'user_id': u, 'display_name': 'Тёзка', 'email': f'staff-{i}@example.test', 'role': 'operator', 'sections': ['messages']} for i, u in enumerate((self.user, self.other))}
         self.accounts = Accounts(self.db, self.workspace); self.service = SipLines(self.accounts, self.vault)
 
     def data(self, **values):
@@ -97,6 +97,7 @@ class SipLineTests(unittest.TestCase):
         self.accounts.role = 'operator'; mine = self.service.mine(self.actor, self.workspace)
         self.assertEqual(len(mine['lines']), 1); self.assertNotIn('0005678', str(mine)); self.assertNotIn('members', mine)
         self.assertNotIn('password_ciphertext', str(mine)); self.assertTrue(mine['may_call'])
+        self.assertNotIn('@example.test', str(mine))
         for action in (lambda: self.service.settings(self.actor, self.workspace), lambda: self.save(expected_version=2), lambda: self.service.delete(self.actor, self.workspace, uuid4(), 2)):
             with self.assertRaises(AuthError) as error: action()
             self.assertEqual(error.exception.status, 403)
@@ -149,6 +150,36 @@ class SipLineTests(unittest.TestCase):
         self.db.members[self.workspace].pop(str(self.user))
         result = self.service.settings(self.actor, self.workspace)
         self.assertTrue(all(not x['member_active'] for x in result['lines']))
+
+    def test_admin_can_distinguish_same_name_members_by_email(self):
+        members = self.service.settings(self.actor, self.workspace)['members']
+        self.assertEqual([m['name'] for m in members], ['Тёзка', 'Тёзка'])
+        self.assertEqual({m['email'] for m in members}, {'staff-0@example.test', 'staff-1@example.test'})
+        self.assertEqual({m['id'] for m in members}, {str(self.user), str(self.other)})
+
+    def test_member_query_excludes_disabled_users_and_inactive_memberships(self):
+        from sqlalchemy import create_engine, text
+        engine = create_engine('sqlite://'); self.addCleanup(engine.dispose)
+        with engine.begin() as db:
+            db.execute(text('CREATE TABLE auth_users(id text, display_name text, email text, active boolean)'))
+            db.execute(text('CREATE TABLE workspace_memberships(user_id text, workspace_id text, role text, sections text, active boolean)'))
+            for i, (user_active, member_active) in enumerate(((True, True), (False, True), (True, False))):
+                db.execute(text('INSERT INTO auth_users VALUES(:id,:name,:email,:active)'), {'id': str(i), 'name': 'Тёзка', 'email': f'{i}@example.test', 'active': user_active})
+                db.execute(text('INSERT INTO workspace_memberships VALUES(:id,:w,\'operator\',\'messages\',:active)'), {'id': str(i), 'w': 'test-workspace', 'active': member_active})
+            self.assertEqual(set(self.service._members(db, 'test-workspace')), {'0'})
+
+    def test_malformed_stored_ids_fail_safely_without_leaking_credentials(self):
+        self.save(); original = copy.deepcopy(self.db.rows[self.workspace])
+        for key in ('id', 'member_id'):
+            for invalid in (123, None, [], {}, 'not-a-uuid'):
+                with self.subTest(key=key, invalid=invalid):
+                    value = copy.deepcopy(original); value['lines'][0][key] = invalid
+                    self.db.rows[self.workspace] = value
+                    with self.assertRaises(AuthError) as error:
+                        self.service.settings(self.actor, self.workspace)
+                    self.assertEqual(error.exception.status, 503)
+                    self.assertNotIn(PASSWORD, error.exception.detail)
+                    self.assertNotIn(original['lines'][0]['password_ciphertext'], error.exception.detail)
 
 
 class SipHttpTests(unittest.TestCase):

@@ -28,7 +28,7 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
   function edit(line = null) {
     clearForm(); editing = line?.id || null;
     fields.password.required = !line;
-    fields.member_id.replaceChildren(...saved.members.map(member => new Option(member.name, member.id)));
+    fields.member_id.replaceChildren(...saved.members.map(member => new Option([member.name, member.email].filter(Boolean).join(" · "), member.id)));
     if (line) {
       if (![...fields.member_id.options].some(o => o.value === line.member_id)) fields.member_id.append(new Option("Сотрудник отключён — выберите действующего", line.member_id));
       for (const key of ["member_id", "sip_number", "extension", "server", "port"]) fields[key].value = line[key] ?? "";
@@ -50,7 +50,9 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
     if (!current(ctx) || busy) return;
     await run(async active => {
       const value = await api(`${endpoint(active)}/${line.id}`, { method: "DELETE", timeoutMs: 10000, data: { expected_version: version } });
-      if (!current(active)) return; clearForm(); render(value); notice("SIP-линия удалена из мессенджера.", message);
+      if (!current(active)) return;
+      if (editing === line.id) clearForm();
+      render(value); notice("SIP-линия удалена из мессенджера.", message);
     });
   }
   function render(value) {
@@ -79,7 +81,7 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
   async function load() {
     return run(async ctx => {
       const value = await api(endpoint(ctx), { timeoutMs: 10000 }); if (!current(ctx)) return;
-      if (dirty && saved && value.version !== saved.version) { notice("SIP-линии изменились. Ваши правки сохранены в форме. Обновите список перед сохранением.", error); return; }
+      if (!form.hidden && saved && value.version !== saved.version) { notice("SIP-линии изменились. Данные формы сохранены. Обновите список перед сохранением.", error); return; }
       render(value);
     });
   }

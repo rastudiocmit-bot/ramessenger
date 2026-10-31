@@ -63,6 +63,10 @@ Connections → Novofon → “SIP-линии сотрудников” now lets
 edit and remove profiles assigned to actual active messenger member UUIDs.
 Names/emails and the provider's employee IDs are not used to guess identity.
 Members must first be added through the existing team/invitation workflow.
+The admin selector includes each member's email to distinguish identical names,
+while assignment still uses the member UUID. Globally disabled users are excluded
+along with inactive memberships. The employee-only response has no directory or
+other employees' emails.
 
 Each profile has a SIP number (text, with leading zeros), optional internal
 extension (separate text), server, port, password, enabled flag and primary
@@ -99,6 +103,11 @@ profile enablement and profile version before issuing any media credentials.
 
 UI checks include stale save replies, workspace changes, blank-secret edits,
 leading zeros, duplicate submissions, escaping and optimistic-version conflicts.
+Deleting another line preserves an open draft and its entered password; deleting
+the edited line clears that form. Background refreshes never advance the version
+behind an open form, including before its first edit, so old fields cannot
+silently overwrite another administrator's newer settings. Malformed stored
+profile IDs return a safe settings error without exposing stored credentials.
 Server checks use the real encryption and actual ASGI authentication/CSRF/input
 validation chain with synthetic accounts and storage. Chromium checks exercise
 add/edit on desktop and mobile. No production password, registration or call

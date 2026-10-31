@@ -68,8 +68,8 @@ class SipLines:
         for line in value['lines']:
             try:
                 if not isinstance(line, dict): raise ValueError
+                if not all(isinstance(line[k], str) for k in ('id', 'member_id', 'sip_number', 'extension', 'server', 'password_ciphertext')): raise ValueError
                 UUID(line['id']); UUID(line['member_id'])
-                if not all(isinstance(line[k], str) for k in ('sip_number', 'extension', 'server', 'password_ciphertext')): raise ValueError
                 if type(line['enabled']) is not bool or type(line['primary']) is not bool or type(line['port']) is not int: raise ValueError
             except (KeyError, TypeError, ValueError):
                 raise AuthError(503, 'Настройки SIP-линий требуют проверки администратора.') from None
@@ -77,8 +77,8 @@ class SipLines:
 
     @staticmethod
     def _members(db, workspace, lock=False):
-        rows = db.execute(text('SELECT m.user_id,u.display_name,m.role,m.sections FROM workspace_memberships m '
-                               'JOIN auth_users u ON u.id=m.user_id WHERE m.workspace_id=:w AND m.active '
+        rows = db.execute(text('SELECT m.user_id,u.display_name,u.email,m.role,m.sections FROM workspace_memberships m '
+                               'JOIN auth_users u ON u.id=m.user_id WHERE m.workspace_id=:w AND m.active AND u.active '
                                'ORDER BY u.display_name,m.user_id' + (' FOR SHARE OF m' if lock else '')),
                           {'w': workspace}).mappings().all()
         return {str(row['user_id']): dict(row) for row in rows}
@@ -97,7 +97,7 @@ class SipLines:
             lines.append(row)
         result = {'version': stored['version'], 'lines': lines, 'vault_ready': self.vault.ready, 'browser_call_ready': False}
         if own is None:
-            result['members'] = [{'id': key, 'name': value['display_name']} for key, value in members.items()]
+            result['members'] = [{'id': key, 'name': value['display_name'], 'email': value['email']} for key, value in members.items()]
         return result
 
     def settings(self, actor, workspace):

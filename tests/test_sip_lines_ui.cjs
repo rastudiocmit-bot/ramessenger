@@ -46,3 +46,30 @@ test('duplicate saves are fenced and failed saves remove entered plaintext',asyn
  let done;const u=setup(t,(_url,opt)=>opt.method==='PUT'?new Promise((_r,reject)=>done=reject):base());await u.ui.load();u.$('#sip-lines-add').click();u.fields.sip_number.value='0001';u.fields.password.value='synthetic-secret';
  for(let i=0;i<2;i++)u.$('#sip-lines-form').dispatchEvent(new u.w.Event('submit',{bubbles:true,cancelable:true}));await flush();assert.equal(u.calls.filter(c=>c.method==='PUT').length,1);done(Error('Сохранение не удалось'));await flush();await flush();assert.equal(u.fields.password.value,'');assert.match(u.$('#sip-lines-error').textContent,/не удалось/);
 });
+test('same-name employees are identified by email while assignment still uses UUID',async t=>{
+ const value={...base(),members:[{id:member,name:'Тёзка',email:'one@example.test'},{id:other,name:'Тёзка',email:'two@example.test'}]};
+ const u=setup(t,()=>value);await u.ui.load();u.$('#sip-lines-add').click();
+ assert.deepEqual([...u.fields.member_id.options].map(o=>[o.textContent,o.value]),[['Тёзка · one@example.test',member],['Тёзка · two@example.test',other]]);
+});
+test('deleting a different line preserves both a new draft and edits to an existing line',async t=>{
+ const second={...row(),id:'00000000-0000-4000-8000-000000000011',sip_number:'0005678'};
+ for(const existing of [false,true]){
+  const u=setup(t,(_url,opt)=>opt.method==='DELETE'?{...base(),version:2,lines:[second]}:{...base(),version:1,lines:[row(),second]});await u.ui.load();
+  if(existing)u.$('.sip-line-row:last-child button').click();else u.$('#sip-lines-add').click();
+  u.fields.sip_number.value='0005678';u.fields.extension.value='009';u.fields.password.value='synthetic-draft';u.fields.password.dispatchEvent(new u.w.Event('input',{bubbles:true}));
+  u.$('.sip-line-row:first-child button:last-child').click();await flush();
+  assert.equal(u.$('#sip-lines-form').hidden,false);assert.equal(u.fields.extension.value,'009');assert.equal(u.fields.password.value,'synthetic-draft');
+  u.$('#sip-lines-form').dispatchEvent(new u.w.Event('submit',{bubbles:true,cancelable:true}));await flush();
+  const save=u.calls.find(c=>c.method==='PUT');assert.equal(save.data.expected_version,2);assert.equal(save.data.line_id,existing?second.id:null);assert.equal(save.data.extension,'009');
+ }
+});
+test('deleting the edited line clears its form and entered password',async t=>{
+ const u=setup(t,(_url,opt)=>opt.method==='DELETE'?{...base(),version:2}:{...base(),version:1,lines:[row()]});await u.ui.load();u.$('.sip-line-actions button').click();u.fields.password.value='synthetic-draft';
+ u.$('.sip-line-actions button:last-child').click();await flush();assert.equal(u.$('#sip-lines-form').hidden,true);assert.equal(u.fields.password.value,'');
+});
+test('a background refresh cannot advance the save version of an untouched open form',async t=>{
+ let version=1;const u=setup(t,(_url,opt)=>opt.method==='PUT'?{...base(),version:3,lines:[row()]}:{...base(),version,lines:[{...row(),extension:version===1?'001':'008'}]});
+ await u.ui.load();u.$('.sip-line-actions button').click();version=2;await u.ui.load();
+ assert.equal(u.fields.extension.value,'001');assert.match(u.$('#sip-lines-error').textContent,/изменились/);
+ u.fields.extension.value='009';u.$('#sip-lines-form').dispatchEvent(new u.w.Event('submit',{bubbles:true,cancelable:true}));await flush();assert.equal(u.calls.find(c=>c.method==='PUT').data.expected_version,1);
+});
