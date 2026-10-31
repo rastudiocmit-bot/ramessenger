@@ -2620,7 +2620,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 /* Local telephony facts remain distinct from MAX send/read state. */
 /* Calls share the message bubble rhythm without becoming MAX message targets. */
-.call-event{align-self:flex-start;width:min(80%,480px);max-width:100%;min-width:0;padding:8px 12px 6px;border:0;border-radius:16px 16px 16px 6px;background:color-mix(in srgb,var(--call-bubble) 85%,transparent);color:var(--ink);box-shadow:var(--bub-shadow-box);font-size:15px;line-height:1.38;overflow-wrap:anywhere}
+.call-event{align-self:flex-start;width:min(80%,480px);max-width:100%;min-width:0;padding:8px 12px 6px;border:0;border-radius:16px 16px 16px 6px;background:color-mix(in srgb,var(--call-bubble) 75%,transparent);color:var(--ink);box-shadow:var(--bub-shadow-box);font-size:15px;line-height:1.38;overflow-wrap:anywhere}
 .call-event.out{align-self:flex-end;border-radius:16px 16px 6px 16px}
 .call-event-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
 .call-event.out .call-event-head{flex-direction:row-reverse}
