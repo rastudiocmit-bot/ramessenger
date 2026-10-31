@@ -146,7 +146,7 @@ window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "c
     if(!transcript) transcript=transcriptView(bubble,call,conversation);
     box.append(transcript);transcript.configure(call);
     const management=node('details',undefined,'call-ai-management');management.append(node('summary','Подробнее о звонке'));
-    const content=node('div',undefined,'call-ai-management-body');management.append(content);if(call.employees?.length)content.append(node('p',`Сотрудники в журнале: ${call.employees.join(', ')}`,'call-event-staff'));
+    const content=node('div',undefined,'call-ai-management-body');management.append(content);if(bubble.audioDiagnostic)content.append(bubble.audioDiagnostic);if(call.employees?.length)content.append(node('p',`Сотрудники в журнале: ${call.employees.join(', ')}`,'call-event-staff'));
     // Operational details and paid commands stay behind an explicit disclosure.
     for(const child of [...box.children])if(child!==transcript)content.append(child);
     box.append(management);
@@ -205,10 +205,60 @@ window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "c
     const length=node('span',duration);length.title='Продолжительность разговора';details.append(time,node('span','·'),length);bubble.append(details);
     const recording=node('div',undefined,'call-recording'),error=node('p','','call-audio-error');error.hidden=true;
     if(call.recording_available){
-      const audio=document.createElement('audio');audio.controls=true;audio.preload='none';audio.hidden=true;audio.setAttribute('aria-label','Аудиозапись звонка');
-      play.addEventListener('click',()=>{error.hidden=true;stopAudio();if(!audio.src)audio.src=`/api/workspaces/${state.workspace.id}/${sourcePath}/${conversation}/calls/${call.id}/recording`;audio.hidden=false;play.setAttribute('aria-expanded','true');const promise=audio.play();promise?.catch(()=>{if(audio.error)failed();});});
-      const failed=()=>{audio.hidden=true;audio.removeAttribute('src');play.title='Повторить загрузку аудио';play.setAttribute('aria-label',play.title);play.setAttribute('aria-expanded','false');error.textContent='Запись пока недоступна. Нажмите прослушивание ещё раз.';error.hidden=false;};
-      audio.addEventListener('error',failed);audio.addEventListener('play',()=>document.querySelectorAll('.call-recording audio').forEach(other=>{if(other!==audio)other.pause();}));recording.append(audio,error);
+      const audio=document.createElement('audio'),unmute=node('button','Включить звук','call-audio-unmute');
+      audio.controls=true;audio.preload='none';audio.hidden=true;audio.playsInline=true;audio.defaultMuted=false;audio.muted=false;audio.volume=1;
+      audio.setAttribute('aria-label','Аудиозапись звонка');unmute.type='button';unmute.hidden=true;error.setAttribute('role','status');
+      let attempt=0,failedMessage=false;
+      const diagnostic=node('details',undefined,'call-audio-diagnostic'),report=node('p');diagnostic.append(node('summary','Состояние плеера'),report);bubble.audioDiagnostic=diagnostic;
+      function reportState(){if(!diagnostic.open)return;const at=Number.isFinite(audio.currentTime)?Math.floor(audio.currentTime):0;const reason={1:'воспроизведение прервано',2:'ошибка загрузки',3:'ошибка декодирования',4:'формат недоступен'}[audio.error?.code]||'нет';report.textContent=`По данным браузера\nВоспроизведение: ${audio.paused?'пауза':'идёт'}\nЗвук плеера: ${audio.muted?'выключен':'включён'}\nГромкость: ${Math.round(audio.volume*100)}%\nПозиция: ${Math.floor(at/60)}:${String(at%60).padStart(2,'0')}\nОшибка аудио: ${reason}`;}
+      diagnostic.addEventListener('toggle',reportState);for(const event of ['timeupdate','volumechange','playing','pause','error'])audio.addEventListener(event,reportState);
+      const epoch=state.epoch,gen=generation,callData=entry(conversation);
+      const alive=()=>current(conversation,epoch,gen)&&cache.get(conversation)===callData&&bubble.isConnected;
+      function playbackIcon(){
+        const playing=!audio.paused&&!audio.ended;
+        play.replaceChildren(icon(playing?'pause':'play'));play.title=bubble.dataset.audioState==='error'?'Повторить загрузку аудио':playing?'Приостановить звонок':'Прослушать звонок';play.setAttribute('aria-label',play.title);play.setAttribute('aria-expanded',String(!audio.hidden));
+      }
+      function volumeNotice(){
+        const silent=audio.muted||audio.volume===0;
+        unmute.hidden=!silent||audio.hidden;
+        if(silent&&!audio.hidden){error.textContent='Звук плеера выключен.';error.hidden=false;}
+        else if(!failedMessage){error.textContent='';error.hidden=true;}
+        bubble.dataset.audioMuted=String(audio.muted);bubble.dataset.audioVolume=String(audio.volume);
+      }
+      function enableSound(){audio.muted=false;if(audio.volume===0)audio.volume=1;volumeNotice();}
+      const failed=()=>{
+        attempt++;failedMessage=true;audio.hidden=true;audio.removeAttribute('src');unmute.hidden=true;
+        play.replaceChildren(icon('play'));play.title='Повторить загрузку аудио';play.setAttribute('aria-label',play.title);play.setAttribute('aria-expanded','false');
+        error.textContent='Запись не удалось воспроизвести. Нажмите прослушивание ещё раз.';error.hidden=false;bubble.dataset.audioState='error';
+      };
+      play.addEventListener('click',()=>{
+        if(!alive())return;
+        if(!audio.paused&&!audio.ended&&!audio.muted&&audio.volume>0){audio.pause();return;}
+        const request=++attempt;failedMessage=false;error.hidden=true;
+        // This explicit user gesture enables this player only. Site and OS
+        // mute settings cannot be inspected or overridden by the page.
+        enableSound();document.querySelectorAll('.call-recording audio').forEach(other=>{if(other!==audio)other.pause();});
+        if(!audio.src)audio.src=`/api/workspaces/${state.workspace.id}/${sourcePath}/${conversation}/calls/${call.id}/recording`;
+        audio.hidden=false;play.setAttribute('aria-expanded','true');bubble.dataset.audioState='loading';
+        const rejected=e=>{
+          if(request!==attempt||!alive())return;
+          if(audio.error){failed();return;}
+          failedMessage=true;error.hidden=false;bubble.dataset.audioState='blocked';
+          error.textContent=e?.name==='NotAllowedError'?'Браузер не разрешил запуск. Нажмите ▶ в самом плеере.':e?.name==='AbortError'?'Воспроизведение прервано. Нажмите ▶ ещё раз.':'Не удалось запустить плеер. Попробуйте кнопку ▶ в самом плеере.';
+          playbackIcon();
+        };
+        try{audio.play()?.catch(rejected);}catch(e){rejected(e);}
+      });
+      unmute.addEventListener('click',()=>{if(alive()){failedMessage=false;enableSound();if(audio.paused)play.click();}});
+      audio.addEventListener('error',()=>{if(alive())failed();});
+      audio.addEventListener('volumechange',volumeNotice);
+      audio.addEventListener('play',()=>{
+        document.querySelectorAll('.call-recording audio').forEach(other=>{if(other!==audio)other.pause();});playbackIcon();volumeNotice();
+      });
+      audio.addEventListener('playing',()=>{failedMessage=false;bubble.dataset.audioState='playing';playbackIcon();volumeNotice();});
+      audio.addEventListener('pause',()=>{attempt++;if(bubble.dataset.audioState!=='error')bubble.dataset.audioState='paused';playbackIcon();});
+      audio.addEventListener('ended',()=>{bubble.dataset.audioState='ended';playbackIcon();});
+      recording.append(audio,error,unmute);
     }else{play.disabled=true;play.title=call.missed?'Записи разговора нет':'Запись ещё не получена';recording.append(node('p',play.title,'call-recording-note'));}
     bubble.append(recording);updateAi(bubble,entry(conversation).calls.get(call.id)||call,conversation);return bubble;
   }

@@ -38,8 +38,8 @@ test('changed CRM phone scope clears old audio and rows',async t=>{
 });
 test('provider text stays plain and failed playback has an inline retry',async t=>{
  const s=setup(t,async()=>({calls:[],scope:'one'}));const bubble=s.ui.render({...call,employees:['<img src=x onerror=alert(1)>']},'chat-one');
- assert.equal(bubble.querySelector('img'),null);bubble.querySelector('audio').dispatchEvent(new s.w.Event('error'));
- assert.equal(bubble.querySelector('[data-call-action=play]').getAttribute('aria-label'),'Повторить загрузку аудио');assert.equal(bubble.querySelector('.call-audio-error').hidden,false);
+ s.w.document.querySelector('#history').append(bubble);assert.equal(bubble.querySelector('img'),null);bubble.querySelector('audio').dispatchEvent(new s.w.Event('error'));
+ assert.equal(bubble.querySelector('[data-call-action=play]').getAttribute('aria-label'),'Повторить загрузку аудио');assert.equal(bubble.querySelector('.call-audio-error').hidden,false);bubble.querySelector('audio').dispatchEvent(new s.w.Event('pause'));assert.equal(bubble.querySelector('[data-call-action=play]').title,'Повторить загрузку аудио');
 });
 
 test('AI updates preserve the recording element and stable message identity',async t=>{
@@ -117,4 +117,36 @@ test('paid repeat stays in call details and requires explicit cost acknowledgeme
  const posts=[];const s=setup(t,async(url,options)=>{if(options?.method==='POST'){posts.push(options.data);return ai({phase:'queued',version:2});}if(url.includes('/transcript?'))return page();return {calls:[{...call,ai:ai()}],scope:'same'};});s.state.workspace.role='owner';
  const bubble=s.ui.render({...call,ai:ai()},'chat-one');s.w.document.querySelector('#history').append(bubble);await tick();const details=bubble.querySelector('.call-ai-management'),repeat=[...details.querySelectorAll('button')].find(e=>e.textContent==='Повторно обработать');
  assert.equal(details.open,false);assert.equal(repeat.disabled,true);assert.equal(posts.length,0);details.open=true;details.querySelector('input[type=checkbox]').click();repeat.click();await tick();assert.equal(posts.length,1);assert.equal(posts[0].acknowledge_cost,true);assert.equal(posts[0].reprocess,true);
+});
+
+test('explicit playback unmutes this recording and restores zero volume while retaining a chosen nonzero level',async t=>{
+ const s=setup(t,async()=>({})),bubble=s.ui.render(call,'chat-one');s.w.document.querySelector('#history').append(bubble);const audio=bubble.querySelector('audio'),play=bubble.querySelector('[data-call-action=play]');
+ audio.muted=true;audio.volume=0;play.click();assert.equal(audio.muted,false);assert.equal(audio.volume,1);assert.equal(audio.playedByTest,true);
+ audio.volume=.35;play.click();assert.equal(audio.volume,.35);
+});
+test('mute and zero volume are visible and the inline recovery enables sound',async t=>{
+ const s=setup(t,async()=>({})),bubble=s.ui.render(call,'chat-one');s.w.document.querySelector('#history').append(bubble);const audio=bubble.querySelector('audio'),play=bubble.querySelector('[data-call-action=play]'),restore=bubble.querySelector('.call-audio-unmute');
+ play.click();audio.muted=true;audio.dispatchEvent(new s.w.Event('volumechange'));assert.equal(restore.hidden,false);assert.match(bubble.querySelector('.call-audio-error').textContent,/Звук плеера выключен/);
+ restore.click();assert.equal(audio.muted,false);assert.equal(restore.hidden,true);assert.equal(bubble.querySelector('.call-audio-error').hidden,true);
+ audio.volume=0;audio.dispatchEvent(new s.w.Event('volumechange'));assert.equal(restore.hidden,false);
+});
+test('browser playback rejection is shown even when the media element has no error',async t=>{
+ const s=setup(t,async()=>({})),bubble=s.ui.render(call,'chat-one');s.w.document.querySelector('#history').append(bubble);const audio=bubble.querySelector('audio');
+ audio.play=()=>Promise.reject(new s.w.DOMException('blocked','NotAllowedError'));bubble.querySelector('[data-call-action=play]').click();await tick();
+ assert.equal(audio.error??null,null);assert.equal(bubble.dataset.audioState,'blocked');assert.match(bubble.querySelector('.call-audio-error').textContent,/Браузер не разрешил запуск/);assert.equal(audio.hidden,false);
+});
+test('a late playback rejection from a closed conversation does not alter the next view',async t=>{
+ const s=setup(t,async()=>({})),bubble=s.ui.render(call,'chat-one');s.w.document.querySelector('#history').append(bubble);let reject;
+ bubble.querySelector('audio').play=()=>new Promise((_,r)=>reject=r);bubble.querySelector('[data-call-action=play]').click();s.setSelected('other');s.w.document.dispatchEvent(new s.w.Event('cm:chat-selected'));reject(new Error('old request'));await tick();assert.equal(bubble.querySelector('.call-audio-error').hidden,true);
+});
+test('native pause/play updates the compact icon and restarting never pauses the same recording first',async t=>{
+ const s=setup(t,async()=>({})),bubble=s.ui.render(call,'chat-one');s.w.document.querySelector('#history').append(bubble);const audio=bubble.querySelector('audio'),button=bubble.querySelector('[data-call-action=play]');
+ Object.defineProperty(audio,'paused',{configurable:true,get:()=>false});audio.dispatchEvent(new s.w.Event('playing'));assert.equal(button.getAttribute('aria-label'),'Приостановить звонок');button.click();assert.equal(audio.pausedByTest,true);
+ Object.defineProperty(audio,'paused',{configurable:true,get:()=>true});audio.dispatchEvent(new s.w.Event('pause'));audio.pausedByTest=false;button.click();assert.equal(audio.pausedByTest,false);assert.equal(audio.playedByTest,true);
+});
+
+test('call details expose current player state without URLs, new requests or audio replacement',async t=>{
+ let currentCall={...call,ai:null};const s=setup(t,async()=>({calls:[currentCall],scope:'same'}));await s.ui.refresh('chat-one');const bubble=s.ui.render(s.ui.messages('chat-one')[0].call,'chat-one');s.w.document.querySelector('#history').append(bubble);const audio=bubble.querySelector('audio'),report=bubble.querySelector('.call-audio-diagnostic');
+ report.open=true;report.dispatchEvent(new s.w.Event('toggle'));audio.muted=true;audio.volume=0;audio.dispatchEvent(new s.w.Event('volumechange'));assert.match(report.textContent,/Звук плеера: выключен/);assert.match(report.textContent,/Громкость: 0%/);assert.ok(!report.textContent.includes('/recording'));
+ currentCall={...call,ai:ai({transcript_run_id:null})};await s.ui.refresh('chat-one',false,true);assert.equal(bubble.querySelector('audio'),audio);assert.equal(bubble.querySelector('.call-audio-diagnostic'),report);assert.equal(report.open,true);
 });

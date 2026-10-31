@@ -36,6 +36,7 @@ const I = {
   copy:'<rect x="8.5" y="8.5" width="11.5" height="11.5" rx="2.5"/><path d="M15.5 5.5h-9A2 2 0 0 0 4.5 7.5v9"/>',
   out:'<path d="M14 4.5h5.5V10"/><path d="M19.5 4.5 11 13"/><path d="M18 14.5v4a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 4 18.5v-11A1.5 1.5 0 0 1 5.5 6h4"/>',
   more:'<circle cx="5.5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor"/>',
+  pause:'<path d="M9 5v14M15 5v14"/>',
   play:'<path d="m9 5 10 7-10 7z"/>',
   phone:'<path d="M8.6 3.5H5.8A1.8 1.8 0 0 0 4 5.4 15.6 15.6 0 0 0 18.6 20a1.8 1.8 0 0 0 1.9-1.8v-2.8l-3.9-1.6-2 2a11 11 0 0 1-4.4-4.4l2-2z"/>',
   mail:'<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="m4.5 7 7.5 6 7.5-6"/>',
