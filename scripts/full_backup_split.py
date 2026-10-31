@@ -6,7 +6,7 @@ Each database dump and its table counts use the same exported snapshot. Every
 dump is restored in a labelled, network-isolated PostgreSQL copy before success.
 """
 import argparse
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import glob
@@ -399,10 +399,14 @@ def minimal_paths(paths):
     return result
 
 
-def verify_integrity(directory):
+def read_manifest(directory):
+    """Validate the inventory; callers must still verify every payload hash."""
     if directory.is_symlink():
         raise BackupError('Backup path must not be a symlink')
-    manifest = json.loads((directory / 'manifest.json').read_text())
+    manifest_path = directory / 'manifest.json'
+    if manifest_path.is_symlink():
+        raise BackupError('Backup manifest must not be a symlink')
+    manifest = json.loads(manifest_path.read_text())
     if manifest.get('format') != 2 or manifest.get('state') != 'complete' or manifest.get('mode') != 'plain':
         raise BackupError('Not a completed split-runtime backup')
     required = {'deployment-files.tar.gz', 'container-images.tar.gz', 'postgres-globals.sql',
@@ -418,10 +422,42 @@ def verify_integrity(directory):
         name = part['name']
         if not isinstance(name, str) or Path(name).name != name or name in {'.', '..'}:
             raise BackupError('Unsafe part name')
-        path = directory / name
-        if path.is_symlink() or not path.is_file() or path.stat().st_size != part['bytes'] or checksum(path) != part['sha256']:
-            raise BackupError('Backup checksum mismatch: ' + name)
+        if (type(part.get('bytes')) is not int or part['bytes'] < 0
+                or not isinstance(part.get('sha256'), str)
+                or not re.fullmatch('[a-f0-9]{64}', part['sha256'])):
+            raise BackupError('Invalid backup part size/checksum: ' + name)
     return manifest
+
+
+def verify_part(directory, part):
+    path = directory / part['name']
+    if path.is_symlink() or not path.is_file() or path.stat().st_size != part['bytes'] or checksum(path) != part['sha256']:
+        raise BackupError('Backup checksum mismatch: ' + part['name'])
+
+
+def verify_integrity(directory):
+    manifest = read_manifest(directory)
+    for part in manifest['parts']:
+        verify_part(directory, part)
+    return manifest
+
+
+def snapshot_sqlite(source_path, destination):
+    """Copy a live WAL database to a closed, self-contained rollback-mode file."""
+    # sqlite3.Connection's context manager does not close the connection.
+    # Leaving the destination open would seal temporary WAL/SHM files that
+    # disappear only when the backup process exits.
+    descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+    with closing(sqlite3.connect(source_path.absolute().as_uri() + '?mode=ro', uri=True)) as source:
+        with closing(sqlite3.connect(destination)) as target:
+            source.backup(target)
+            if target.execute('PRAGMA journal_mode=DELETE').fetchone() != ('delete',):
+                raise BackupError('Support queue snapshot is not standalone')
+            if target.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+                raise BackupError('Support queue snapshot is invalid')
+    if any(Path(str(destination) + suffix).exists() for suffix in ('-wal', '-shm', '-journal')):
+        raise BackupError('Support queue snapshot still has temporary files')
 
 
 class FullBackup:
@@ -577,11 +613,7 @@ class FullBackup:
         excludes = []
         if queue.exists():
             copy = self.directory / 'support-queue.sqlite'
-            with sqlite3.connect('file:' + str(queue) + '?mode=ro', uri=True) as source, sqlite3.connect(copy) as target:
-                source.backup(target)
-                if target.execute('PRAGMA integrity_check').fetchone() != ('ok',):
-                    raise BackupError('Support queue snapshot is invalid')
-            copy.chmod(0o600)
+            snapshot_sqlite(queue, copy)
             self.metadata['sqlite_restore_path'] = str(queue)
             excludes = [queue, Path(str(queue) + '-wal'), Path(str(queue) + '-shm')]
         # Deployment lock excludes application/config promotions. Live file logs
@@ -688,6 +720,9 @@ class FullBackup:
     def finish(self):
         if not self.metadata['databases'] or not all(x.get('restore_verified') for x in self.metadata['databases']):
             raise BackupError('Restore verification did not finish')
+        if any((self.directory / ('support-queue.sqlite' + suffix)).exists()
+               for suffix in ('-wal', '-shm', '-journal')):
+            raise BackupError('Support queue snapshot still has temporary files')
         self.phase('final_verification')
         self.metadata.update(finished_at=now(), state='complete')
         recovery = {'containers': json.loads((self.work / 'containers.json').read_text()),

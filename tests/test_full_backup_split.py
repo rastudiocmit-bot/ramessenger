@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -343,6 +344,47 @@ class BackupTests(unittest.TestCase):
         (self.directory/'container-images.tar.gz').write_bytes(b'damaged')
         with self.assertRaisesRegex(backup.BackupError,'checksum mismatch'):
             backup.verify_integrity(self.directory)
+
+    def test_live_wal_queue_becomes_closed_standalone_snapshot(self):
+        live = self.root / 'live.sqlite'
+        source = sqlite3.connect(live)
+        self.addCleanup(source.close)
+        source.execute('PRAGMA journal_mode=WAL')
+        source.execute('CREATE TABLE requests (id INTEGER PRIMARY KEY, state TEXT)')
+        source.execute("INSERT INTO requests VALUES (1, 'queued')")
+        source.commit()
+        target = self.directory / 'support-queue.sqlite'
+        previous_umask = os.umask(0)
+        try:
+            backup.snapshot_sqlite(live, target)
+        finally:
+            os.umask(previous_umask)
+        digest = backup.checksum(target)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(any(Path(str(target) + s).exists() for s in ('-wal', '-shm', '-journal')))
+        with sqlite3.connect(target) as snapshot:
+            self.assertEqual(snapshot.execute('PRAGMA journal_mode').fetchone(), ('delete',))
+            self.assertEqual(snapshot.execute('SELECT * FROM requests').fetchall(), [(1, 'queued')])
+        snapshot.close()
+        source.execute("UPDATE requests SET state='done'")
+        source.commit()
+        source.close()
+        self.assertEqual(backup.checksum(target), digest)
+        self.assertFalse(any(Path(str(target) + s).exists() for s in ('-wal', '-shm', '-journal')))
+
+    def test_sqlite_snapshot_refuses_to_overwrite_existing_payload(self):
+        destination = self.directory / 'support-queue.sqlite'
+        destination.write_bytes(b'keep original')
+        with self.assertRaises(FileExistsError):
+            backup.snapshot_sqlite(self.root / 'live.sqlite', destination)
+        self.assertEqual(destination.read_bytes(), b'keep original')
+
+    def test_final_seal_refuses_sqlite_sidecars_instead_of_hashing_them(self):
+        self.service.metadata['databases'] = [{'restore_verified': True}]
+        (self.directory / 'support-queue.sqlite-shm').write_bytes(b'index')
+        with self.assertRaisesRegex(backup.BackupError, 'temporary files'):
+            self.service.finish()
+        self.assertFalse((self.directory / 'manifest.json').exists())
 
     def test_verify_rejects_path_escape_symlink_missing_part_and_unverified_restore(self):
         for mode in ['escape','symlink','missing','not-verified']:
