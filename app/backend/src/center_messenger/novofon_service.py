@@ -1,5 +1,6 @@
 """Novofon setup: tenant permissions, encrypted key and fenced diagnostics."""
 import json
+import ipaddress
 import logging
 from datetime import datetime, timedelta, timezone
 from threading import BoundedSemaphore
@@ -9,7 +10,7 @@ from sqlalchemy import text
 
 from center_messenger.accounts import audit as account_audit
 from center_messenger.auth_security import AuthError
-from center_messenger.novofon_client import Client, audit
+from center_messenger.novofon_client import Client, audit, ERRORS
 
 LOG = logging.getLogger(__name__)
 CHECK_SLOTS = BoundedSemaphore(2)
@@ -23,6 +24,25 @@ ERROR_TEXT = {
     'media_http_error': 'Запись пока недоступна или требует дополнительных прав.',
     'media_network_error': 'Не удалось получить фрагмент записи. Попробуйте позже.',
     'media_url_rejected': 'Адрес записи не относится к поддерживаемым адресам Новофона.',
+}
+PROVIDER_TEXT = {
+    'ip_not_whitelisted': 'Новофон запретил IP сервера мессенджера. Добавьте его в Новофоне: Настройки → Правила и настройки безопасности → API.',
+    'forbidden': 'У сотрудника Новофона недостаточно прав для этой операции. Проверьте разрешения Data API и права сотрудника на этот раздел.',
+    'permission_denied': 'Новофон запретил операцию этому сотруднику. Проверьте его права доступа.',
+    'access_denied': 'Новофон запретил доступ. Проверьте права сотрудника и разрешённые адреса API.',
+    'access_token_invalid': 'Новофон не распознал ключ API сотрудника. Проверьте сохранённое значение и его владельца.',
+    'access_token_expired': 'Срок действия ключа API сотрудника истёк. Продлите его или замените ключ.',
+    'access_token_blocked': 'Ключ API сотрудника заблокирован в Новофоне. Проверьте переключатель активности ключа.',
+    'account_inactive': 'Новофон сообщил, что аккаунт заблокирован. Обратитесь в его поддержку.',
+    'limit_exceeded': 'Новофон сообщил о превышении лимита API. Повторите проверку после восстановления лимита.',
+    'method_component_disabled': 'В аккаунте Новофона не подключён компонент, необходимый для этой проверки.',
+    'parameter_component_disabled': 'В аккаунте Новофона не подключён компонент для запрашиваемых данных.',
+}
+RPC_TEXT = {
+    -32003: 'Новофон запретил доступ: IP сервера не разрешён либо у сотрудника недостаточно прав. Нажмите «Проверить API», чтобы получить уточняющий код.',
+    -32001: 'Новофон отклонил авторизацию. Проверьте ключ API сотрудника и срок его действия.',
+    -32008: 'Для этой операции не подключён необходимый компонент Новофона.',
+    -32029: 'Новофон сообщил о превышении лимита API. Повторите проверку позже.',
 }
 
 
@@ -39,7 +59,17 @@ def public_report(report):
                    'full_audio_validated', 'asr_tested', 'browser_playback_tested')
         result[name] = {k: item[k] for k in allowed if k in item}
         if item.get('status') == 'error':
-            result[name]['message'] = ERROR_TEXT.get(item.get('code'), 'Проверка не завершена. Повторите её позже.')
+            mnemonic = item.get('mnemonic')
+            if isinstance(mnemonic, str) and mnemonic in ERRORS:
+                result[name]['mnemonic'] = mnemonic
+            result[name]['message'] = (PROVIDER_TEXT.get(mnemonic) if isinstance(mnemonic, str) else None) or RPC_TEXT.get(item.get('rpc_code')) or ERROR_TEXT.get(item.get('code'), 'Проверка не завершена. Повторите её позже.')
+            if mnemonic == 'ip_not_whitelisted':
+                try:
+                    address = ipaddress.ip_address(item.get('observed_ip'))
+                    if address.is_global:
+                        result[name]['observed_ip'] = str(address)
+                except (ValueError, TypeError):
+                    pass
     return result
 
 
@@ -52,26 +82,35 @@ class Novofon:
         return db.execute(text('SELECT * FROM novofon_settings WHERE workspace_id=:w' +
                                (' FOR UPDATE' if lock else '')), {'w': workspace}).mappings().one_or_none()
 
-    def _public(self, row):
+    def _public(self, row, workspace):
         now = datetime.now(timezone.utc)
         configured = bool(row and row['key_ciphertext'])
+        support_configured = False if not configured else None
+        if configured and self.vault.ready:
+            try:
+                support_configured = bool(self.vault.open(workspace,
+                    row['connection_id'], row['key_ciphertext'], purpose='novofon').get('support_secret'))
+            except AuthError:
+                pass
         checking = bool(row and row['check_until'] and row['check_until'] > now)
         status = row['status'] if row and configured else 'not_configured'
         if status == 'checking' and not checking:
             status = 'saved'
         return {'configured': configured, 'vault_ready': self.vault.ready,
                 'version': row['version'] if row else 0,
+                'support_secret_configured': support_configured,
+                'support_secret_usage': 'not_verified',
                 'sample_hours': row['sample_hours'] if row else 24,
                 'status': status, 'checking': checking,
                 'checked_at': row['checked_at'] if row else None,
-                'checks': dict(row['report'] or {}) if row else {},
+                'checks': public_report({'checks': dict(row['report'] or {})}) if row else {},
                 'browser_call_ready': False,
                 'browser_call_note': 'Разговор через микрофон будет подключён отдельным этапом.'}
 
     def settings(self, actor, workspace):
         with self.accounts.transaction(actor, snapshot=True) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
-            return self._public(self._row(db, workspace))
+            return self._public(self._row(db, workspace), workspace)
 
     def save(self, actor, workspace, data):
         with self.accounts.transaction(actor) as db:
@@ -80,14 +119,24 @@ class Novofon:
             if (row['version'] if row else 0) != data['expected_version']:
                 raise AuthError(409, 'Настройки изменились. Обновите страницу перед сохранением.')
             key = (data.get('api_key') or '').strip()
+            support_secret = (data.get('support_secret') or '').strip()
             if key and (not 16 <= len(key) <= 4096 or any(c.isspace() or ord(c) < 32 for c in key)):
-                raise AuthError(422, 'Вставьте полный Secret API Новофона без кавычек и пробелов.')
+                raise AuthError(422, 'Вставьте полный ключ API сотрудника Новофона без кавычек и пробелов.')
+            if support_secret and (len(support_secret) > 4096 or any(c.isspace() or ord(c) < 32 for c in support_secret)):
+                raise AuthError(422, 'Вставьте секрет из поддержки Новофона без кавычек и пробелов.')
             connection = row['connection_id'] if row else uuid4()
             cipher = row['key_ciphertext'] if row else None
-            if key:
-                cipher = self.vault.seal(workspace, connection, {'api_key': key}, purpose='novofon')
+            if key or support_secret:
+                payload = self.vault.open(workspace, connection, cipher, purpose='novofon') if cipher else {}
+                if key:
+                    payload['api_key'] = key
+                if support_secret:
+                    payload['support_secret'] = support_secret
+                if not payload.get('api_key'):
+                    raise AuthError(422, 'Введите ключ API сотрудника Новофона.')
+                cipher = self.vault.seal(workspace, connection, payload, purpose='novofon')
             if not cipher:
-                raise AuthError(422, 'Введите Secret API Новофона.')
+                raise AuthError(422, 'Введите ключ API сотрудника Новофона.')
             if row:
                 db.execute(text("UPDATE novofon_settings SET key_ciphertext=:c,sample_hours=:h,version=version+1,"
                                 "status='saved',checked_at=NULL,check_token=NULL,check_until=NULL,report='{}'::jsonb,"
@@ -100,7 +149,7 @@ class Novofon:
                 if inserted is None:
                     raise AuthError(409, 'Подключение уже настроил другой администратор. Обновите настройки.')
             account_audit(db, 'novofon_settings_saved', user_id=actor.user_id, workspace_id=workspace)
-            return self._public(self._row(db, workspace))
+            return self._public(self._row(db, workspace), workspace)
 
     def disconnect(self, actor, workspace, expected_version):
         with self.accounts.transaction(actor) as db:
@@ -114,13 +163,18 @@ class Novofon:
                                 "updated_at=now(),updated_by=:u WHERE workspace_id=:w"),
                            {'w': workspace, 'u': actor.user_id})
                 account_audit(db, 'novofon_disconnected', user_id=actor.user_id, workspace_id=workspace)
-            return self._public(self._row(db, workspace))
+            return self._public(self._row(db, workspace), workspace)
 
     def verify(self, actor, workspace, expected_version, probe_recording=False):
         # Check permission before consuming the actor's diagnostic budget.
         with self.accounts.transaction(actor, snapshot=True) as db:
             self.accounts._workspace(db, actor, workspace, manage=True)
-        self.accounts.throttle('novofon-check:' + str(workspace), limit=4, minutes=1)
+        try:
+            self.accounts.throttle('novofon-check:' + str(workspace), limit=4, minutes=1)
+        except AuthError as error:
+            if error.status != 429:
+                raise
+            raise AuthError(429, 'Доступно до четырёх проверок в минуту. Подождите минуту и нажмите «Проверить API». Ключ сохранён.', retry_after=error.retry_after) from None
         if not CHECK_SLOTS.acquire(blocking=False):
             raise AuthError(429, 'Проверки подключений заняты. Повторите немного позже.', retry_after=10)
         token = uuid4()
@@ -156,6 +210,6 @@ class Novofon:
                                 "check_token=NULL,check_until=NULL WHERE workspace_id=:w"),
                            {'w': workspace, 's': 'api_verified' if verified else 'error', 'r': json.dumps(report)})
                 account_audit(db, 'novofon_checked', user_id=actor.user_id, workspace_id=workspace)
-                return self._public(self._row(db, workspace))
+                return self._public(self._row(db, workspace), workspace)
         finally:
             CHECK_SLOTS.release()

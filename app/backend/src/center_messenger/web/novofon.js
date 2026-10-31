@@ -1,7 +1,7 @@
 /* Workspace-scoped setup; plaintext keys exist only in the unsaved input. */
 "use strict";
 window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
-  const form = $("#novofon-form"), key = form.elements.api_key, hours = form.elements.sample_hours;
+  const form = $("#novofon-form"), key = form.elements.api_key, support = form.elements.support_secret, hours = form.elements.sample_hours;
   let saved = null, busy = false, generation = 0;
   const current = context => context.generation === generation && context.workspace === state.workspace?.id && context.user === state.user?.id;
   const snapshot = () => ({ generation, workspace: state.workspace?.id, user: state.user?.id });
@@ -11,7 +11,7 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
     const canSave = Boolean(saved?.vault_ready), configured = Boolean(saved?.configured);
     form.querySelectorAll("input,select,button").forEach(control => { control.disabled = busy || !canSave; });
     $("#novofon-reload").disabled = busy;
-    const dirty = Boolean(key.value) || Number(hours.value) !== saved?.sample_hours;
+    const dirty = Boolean(key.value || support.value) || Number(hours.value) !== saved?.sample_hours;
     $("#novofon-check").disabled = busy || !configured || dirty;
     $("#novofon-audio-check").disabled = busy || !configured || dirty;
     $("#novofon-disconnect").disabled = busy || !configured;
@@ -30,7 +30,11 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
       }
       hours.value = String(payload.sample_hours);
     }
-    key.placeholder = payload.configured ? "Ключ сохранён — введите новый только для замены" : "Вставьте Secret API Новофона";
+    key.placeholder = payload.configured ? "Ключ сотрудника сохранён — введите новый для замены" : "Ключ из настроек сотрудника Новофона";
+    support.placeholder = payload.support_secret_configured ? "Секрет из поддержки сохранён — введите новый для замены" : "Реквизит, выданный поддержкой Новофона";
+    $("#novofon-support-note").textContent = payload.support_secret_configured
+      ? "Секрет из поддержки сохранён отдельно. Его использование в авторизации ещё не подтверждено; проверка ниже использует ключ сотрудника."
+      : "Реквизит из поддержки отличается от ключа сотрудника. Он будет сохранён зашифрованно; его использование в авторизации ещё не подтверждено.";
     $("#novofon-key-note").textContent = payload.configured
       ? "Сохранённый ключ скрыт. Пустое поле оставляет его без изменений."
       : "Ключ шифруется на сервере и доступен только этому центру.";
@@ -50,7 +54,16 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
       } else if (check?.status === "error") text = check.message || "Не удалось проверить";
       else if (check?.status === "prefix_detected") text = "Фрагмент записи доступен. Полное воспроизведение ещё не проверено.";
       else if (check?.status === "no_recording_in_sample") text = "В проверенной выборке записей нет. Можно увеличить период проверки.";
-      detail.textContent = text; row.dataset.state = check?.status || "waiting"; row.append(heading, detail); list.append(row);
+      detail.textContent = text; row.dataset.state = check?.status || "waiting"; row.append(heading, detail);
+      if (check?.status === "error") {
+        const codes = [];
+        if (Number.isInteger(check.rpc_code)) codes.push(`Код Новофона: ${check.rpc_code}`);
+        if (check.mnemonic) codes.push(check.mnemonic);
+        if (check.observed_ip) codes.push(`IP запроса: ${check.observed_ip}`);
+        if (Number.isInteger(check.http_status)) codes.push(`HTTP ${check.http_status}`);
+        if (codes.length) { const code = document.createElement("small"); code.textContent = codes.join(" · "); row.append(code); }
+      }
+      list.append(row);
     }
     $("#novofon-checked-at").textContent = payload.checked_at ? `Последняя проверка: ${new Date(payload.checked_at).toLocaleString("ru-RU")}` : "Подключение ещё не проверялось.";
     if (!payload.vault_ready) notice("Хранилище ключей недоступно. Обратитесь к администратору сервера.", $("#novofon-error"));
@@ -58,10 +71,14 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
   }
   function reset() {
     generation++; saved = null; busy = false; form.reset(); key.type = "password";
+    support.value = ""; support.type = "password";
     hours.querySelectorAll('[data-custom]').forEach(option => option.remove()); hours.value = "24";
-    key.placeholder = "Вставьте Secret API Новофона";
+    key.placeholder = "Ключ из настроек сотрудника Новофона";
+    support.placeholder = "Реквизит, выданный поддержкой Новофона";
+    $("#novofon-support-note").textContent = "Реквизит из поддержки отличается от ключа сотрудника. Он сохраняется зашифрованно; его использование в авторизации ещё не подтверждено.";
     $("#novofon-key-note").textContent = "Ключ шифруется на сервере и доступен только этому центру.";
     $("#novofon-show-key").textContent = "Показать"; $("#novofon-show-key").setAttribute("aria-pressed", "false");
+    $("#novofon-show-support").textContent = "Показать"; $("#novofon-show-support").setAttribute("aria-pressed", "false");
     $("#novofon-checks").replaceChildren(); $("#novofon-checked-at").textContent = "";
     $("#novofon-status").textContent = "Не подключено";
     $("#novofon-status").dataset.state = "waiting";
@@ -87,9 +104,12 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
     if (!saved || !form.reportValidity()) return;
     void run(async ctx => {
       const value = await api(endpoint(ctx), { method: "PUT", timeoutMs: 10000,
-        data: { expected_version: saved.version, sample_hours: Number(hours.value), api_key: key.value.trim() || null } });
+        data: { expected_version: saved.version, sample_hours: Number(hours.value), api_key: key.value.trim() || null,
+          support_secret: support.value.trim() || null } });
       if (!current(ctx)) return;
       key.value = ""; key.type = "password"; $("#novofon-show-key").textContent = "Показать";
+      support.value = ""; support.type = "password"; $("#novofon-show-support").textContent = "Показать";
+      $("#novofon-show-support").setAttribute("aria-pressed", "false");
       $("#novofon-show-key").setAttribute("aria-pressed", "false"); render(value);
       notice("Ключ сохранён. Проверяем доступ к Новофону…", $("#novofon-message"));
       await verify(ctx, false);
@@ -100,23 +120,28 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
   $("#novofon-audio-check").addEventListener("click", () => { void run(ctx => verify(ctx, true)); });
   $("#novofon-reload").addEventListener("click", async () => {
     const ctx = snapshot();
-    if (key.value && !await confirm("Обновить настройки?", "Введённый новый ключ будет очищен без сохранения.", "Обновить")) return;
+    if ((key.value || support.value) && !await confirm("Обновить настройки?", "Введённые новые реквизиты будут очищены без сохранения.", "Обновить")) return;
     if (!current(ctx) || busy) return;
-    key.value = ""; await load();
+    key.value = ""; support.value = ""; await load();
   });
   $("#novofon-disconnect").addEventListener("click", async () => {
     const ctx = snapshot();
-    if (!saved?.configured || busy || !await confirm("Отключить Новофон?", "Сохранённый API-ключ будет удалён. Другие подключения продолжат работать.", "Отключить")) return;
+    if (!saved?.configured || busy || !await confirm("Отключить Новофон?", "Сохранённый ключ сотрудника и секрет из поддержки будут удалены. Другие подключения продолжат работать.", "Отключить")) return;
     if (!current(ctx) || busy) return;
     void run(async ctx => {
       const value = await api(endpoint(ctx), { method: "DELETE", data: { expected_version: saved.version }, timeoutMs: 10000 });
-      if (current(ctx)) { key.value = ""; render(value); }
+      if (current(ctx)) { key.value = ""; support.value = ""; render(value); }
     });
   });
   $("#novofon-show-key").addEventListener("click", () => {
     const reveal = key.type === "password"; key.type = reveal ? "text" : "password";
     $("#novofon-show-key").textContent = reveal ? "Скрыть" : "Показать";
     $("#novofon-show-key").setAttribute("aria-pressed", String(reveal));
+  });
+  $("#novofon-show-support").addEventListener("click", () => {
+    const reveal = support.type === "password"; support.type = reveal ? "text" : "password";
+    $("#novofon-show-support").textContent = reveal ? "Скрыть" : "Показать";
+    $("#novofon-show-support").setAttribute("aria-pressed", String(reveal));
   });
   form.addEventListener("input", controls);
   reset(); return { load, reset };

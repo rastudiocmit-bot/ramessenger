@@ -15,6 +15,7 @@ class VersionInput(InputModel):
 
 class SettingsInput(VersionInput):
     api_key: SecretStr | None = Field(default=None, max_length=4096)
+    support_secret: SecretStr | None = Field(default=None, max_length=4096)
     sample_hours: int = Field(default=24, ge=1, le=168, strict=True)
 
 
@@ -36,8 +37,9 @@ def settings(workspace_id: UUID, request: Request):
 
 @router.put('')
 def save(workspace_id: UUID, model: SettingsInput, request: Request):
-    data = model.model_dump(exclude={'api_key'})
+    data = model.model_dump(exclude={'api_key', 'support_secret'})
     data['api_key'] = model.api_key.get_secret_value() if model.api_key is not None else None
+    data['support_secret'] = model.support_secret.get_secret_value() if model.support_secret is not None else None
     return service(request).save(identity(request, mutation=True), workspace_id, data)
 
 

@@ -69,3 +69,28 @@ test("a confirmation from the old workspace cannot disconnect the new workspace"
  u.state.workspace={id:"org-two",role:"owner"};u.ui.reset();await u.ui.load();
  confirmAction(true);await flush();assert.equal(u.calls.filter(call=>call.method==="DELETE").length,0);
 });
+
+test("both entered credentials are saved separately and cleared before checking",async t=>{
+ const u=setup(t,(_url,opt)=>({...blank,configured:true,support_secret_configured:true,version:opt.method==="PUT"?2:1}));
+ await u.ui.load();u.$('#novofon-form [name="api_key"]').value="synthetic-api-key";
+ u.$('#novofon-form [name="support_secret"]').value="synthetic-support-secret";
+ u.$("#novofon-form").dispatchEvent(new u.w.Event("submit",{bubbles:true,cancelable:true}));await flush();
+ const save=u.calls.find(call=>call.method==="PUT");
+ assert.equal(save.data.api_key,"synthetic-api-key");assert.equal(save.data.support_secret,"synthetic-support-secret");
+ assert.equal(u.$('#novofon-form [name="api_key"]').value,"");assert.equal(u.$('#novofon-form [name="support_secret"]').value,"");
+ assert.match(u.$("#novofon-support-note").textContent,/ещё не подтверждено/);
+});
+
+test("support secret has its own reveal and is cleared on workspace reset",async t=>{
+ const u=setup(t);await u.ui.load();const support=u.$('#novofon-form [name="support_secret"]');
+ support.value="synthetic-support-secret";u.$("#novofon-show-support").click();
+ assert.equal(support.type,"text");assert.equal(u.$('#novofon-form [name="api_key"]').type,"password");
+ u.ui.reset();assert.equal(support.value,"");assert.equal(support.type,"password");
+});
+
+test("provider mnemonic and observed IP appear as plain diagnostic text",async t=>{
+ const u=setup(t,()=>({...blank,configured:true,checks:{account:{status:"error",rpc_code:-32003,
+  mnemonic:"ip_not_whitelisted",observed_ip:"83.222.25.109",message:"Разрешите IP"}}}));
+ await u.ui.load();const text=u.$("#novofon-checks").textContent;
+ assert.match(text,/-32003/);assert.match(text,/ip_not_whitelisted/);assert.match(text,/83\.222\.25\.109/);
+});

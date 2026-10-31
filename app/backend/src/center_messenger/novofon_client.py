@@ -34,7 +34,9 @@ LIMIT_FIELDS = ("day_limit", "day_remaining", "day_reset", "minute_limit",
 ERRORS = frozenset({"access_token_invalid", "access_token_expired", "access_denied",
                     "auth_error", "not_authenticated", "ip_not_whitelisted",
                     "limit_exceeded", "component_disabled", "invalid_parameters",
-                    "unexpected_parameters", "sort_prohibited", "permission_denied"})
+                    "unexpected_parameters", "sort_prohibited", "permission_denied",
+                    "forbidden", "access_token_blocked", "account_inactive",
+                    "method_component_disabled", "parameter_component_disabled"})
 
 
 class AuditError(Exception):
@@ -190,8 +192,8 @@ class Client:
             doc = json.loads(raw)
         except (ValueError, UnicodeError):
             raise AuditError("api_response_not_json") from None
-        if (not isinstance(doc, dict) or doc.get("jsonrpc") != "2.0"
-                or doc.get("id") != request_id):
+        if (not isinstance(doc, dict) or doc.get("jsonrpc") != "2.0" or "id" not in doc
+                or (doc["id"] != request_id and not (doc["id"] is None and "error" in doc))):
             raise AuditError("api_response_mismatch")
         if "error" in doc:
             error = doc["error"]
@@ -201,9 +203,19 @@ class Client:
             self.quota = metadata(detail.get("metadata", doc.get("metadata")))
             code = error.get("code")
             mnemonic = detail.get("mnemonic")
+            public_ip = None
+            # Never expose the raw provider message/params: they may echo a key.
+            if mnemonic == "ip_not_whitelisted" and isinstance(detail.get("params"), dict):
+                try:
+                    address = ipaddress.ip_address(detail["params"].get("ip"))
+                    if address.is_global:
+                        public_ip = str(address)
+                except (ValueError, TypeError):
+                    pass
             raise AuditError("api_rejected",
                              rpc_code=code if type(code) is int else None,
                              mnemonic=mnemonic if isinstance(mnemonic, str) and mnemonic in ERRORS else "provider_error",
+                             **({"observed_ip": public_ip} if public_ip else {}),
                              metadata=self.quota)
         result = doc.get("result")
         if not isinstance(result, dict) or not isinstance(result.get("data"), list):

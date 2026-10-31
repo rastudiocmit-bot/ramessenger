@@ -2577,3 +2577,5 @@ body:has(#cabinet[hidden]){overflow:auto}
 #novofon-loading[hidden]{display:none}
 @media(max-width:900px){.novofon-grid{grid-template-columns:1fr}}
 @media(max-width:640px){#pane-connections .connection-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}#connections-wizard-tab{grid-column:1/-1}.novofon-grid .card-b{padding:14px}.novofon-grid .card-h{padding:14px}.novofon-key-row{align-items:stretch;flex-wrap:wrap}.novofon-key-row input{flex-basis:200px}}
+
+.novofon-support{margin-top:16px}.novofon-checks small{font-size:11px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
