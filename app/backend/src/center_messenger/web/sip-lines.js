@@ -14,6 +14,8 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
     $("#sip-lines-add").disabled = busy || !writable;
     $("#sip-lines-refresh").disabled = busy;
     form.querySelectorAll("input,select,button").forEach(e => { e.disabled = busy || !writable; });
+    $("#sip-lines-cancel").disabled = busy;
+    $("#sip-password-show").disabled = busy;
     fields.primary.disabled ||= !fields.enabled.checked;
     list.querySelectorAll("button").forEach(e => { e.disabled = busy; });
     $("#sip-lines-save").textContent = busy ? "Подождите…" : "Сохранить линию";
@@ -52,6 +54,14 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
       const value = await api(`${endpoint(active)}/${line.id}`, { method: "DELETE", timeoutMs: 10000, data: { expected_version: version } });
       if (!current(active)) return;
       if (editing === line.id) clearForm();
+      else if (editing && !form.hidden) {
+        const before = saved.lines.find(item => item.id === editing), after = value.lines.find(item => item.id === editing);
+        // Deleting a primary profile may promote the edited line. Keep an
+        // untouched flag in sync without replacing this draft's other fields.
+        if (before && after && fields.member_id.value === before.member_id && fields.primary.checked === before.primary) {
+          fields.primary.checked = after.primary && fields.enabled.checked;
+        }
+      }
       render(value); notice("SIP-линия удалена из мессенджера.", message);
     });
   }

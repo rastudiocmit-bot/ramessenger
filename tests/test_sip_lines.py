@@ -138,6 +138,23 @@ class SipLineTests(unittest.TestCase):
         self.assertFalse(any(x['primary'] for x in result['lines']))
         self.assertEqual(result['version'], 4)
 
+    def test_reassigning_a_primary_line_rebinds_its_password_and_each_members_default(self):
+        moved = self.save()['lines'][0]['id']
+        source_fallback = self.save(expected_version=1, sip_number='0005678', primary=False)['lines'][-1]['id']
+        self.save(expected_version=2, member_id=self.other, sip_number='0009999')
+        before = copy.deepcopy(self.db.rows)
+        with self.assertRaises(AuthError):
+            self.save(expected_version=3, line_id=moved, member_id=self.other, password=None)
+        self.assertEqual(self.db.rows, before)
+        result = self.save(expected_version=3, line_id=moved, member_id=self.other, password='synthetic-reassigned-password')
+        self.assertEqual([x['id'] for x in result['lines'] if x['member_id'] == str(self.user) and x['primary']], [source_fallback])
+        self.assertEqual([x['id'] for x in result['lines'] if x['member_id'] == str(self.other) and x['primary']], [moved])
+        stored = next(x for x in self.db.rows[self.workspace]['lines'] if x['id'] == moved)
+        self.assertEqual(self.service.secrets.open(self.workspace, moved, self.other, stored['password_ciphertext']), 'synthetic-reassigned-password')
+        with self.assertRaises(AuthError):
+            self.service.secrets.open(self.workspace, moved, self.user, stored['password_ciphertext'])
+        self.assertNotIn(moved, str(self.service.mine(self.actor, self.workspace)))
+
     def test_initial_or_changed_line_requires_password_and_validation_does_not_echo_it(self):
         for changed in ({'password': None}, {'password': PASSWORD + '\n'}, {'server': 'private.example'}, {'sip_number': 'sip:user@example'}, {'port': True}):
             with self.assertRaises(AuthError) as error: self.save(**changed)

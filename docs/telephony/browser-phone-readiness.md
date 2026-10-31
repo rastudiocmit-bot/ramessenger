@@ -104,7 +104,10 @@ profile enablement and profile version before issuing any media credentials.
 UI checks include stale save replies, workspace changes, blank-secret edits,
 leading zeros, duplicate submissions, escaping and optimistic-version conflicts.
 Deleting another line preserves an open draft and its entered password; deleting
-the edited line clears that form. Background refreshes never advance the version
+the edited line clears that form. An automatic primary-line promotion after a
+deletion updates the draft's untouched primary flag, preserving explicit edits
+and assignment changes. A vault outage blocks writes while retaining working
+cancel and password visibility controls. Background refreshes never advance the version
 behind an open form, including before its first edit, so old fields cannot
 silently overwrite another administrator's newer settings. Malformed stored
 profile IDs return a safe settings error without exposing stored credentials.

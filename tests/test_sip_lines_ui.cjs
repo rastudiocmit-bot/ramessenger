@@ -73,3 +73,30 @@ test('a background refresh cannot advance the save version of an untouched open 
  assert.equal(u.fields.extension.value,'001');assert.match(u.$('#sip-lines-error').textContent,/изменились/);
  u.fields.extension.value='009';u.$('#sip-lines-form').dispatchEvent(new u.w.Event('submit',{bubbles:true,cancelable:true}));await flush();assert.equal(u.calls.find(c=>c.method==='PUT').data.expected_version,1);
 });
+test('deleting the primary line updates an untouched primary flag in another open draft',async t=>{
+ const promoted={...row(),id:'00000000-0000-4000-8000-000000000011',sip_number:'0005678',primary:false};
+ const third={...row(),id:'00000000-0000-4000-8000-000000000012',sip_number:'0009999',primary:false};
+ const u=setup(t,(_url,opt)=>opt.method==='DELETE'?{...base(),version:2,lines:[{...promoted,primary:true},third]}:{...base(),version:1,lines:[row(),promoted,third]});
+ await u.ui.load();u.$('.sip-line-row:nth-child(2) button').click();u.fields.extension.value='009';u.fields.extension.dispatchEvent(new u.w.Event('input',{bubbles:true}));
+ assert.equal(u.fields.primary.checked,false);u.$('.sip-line-row:first-child button:last-child').click();await flush();
+ assert.equal(u.fields.extension.value,'009');assert.equal(u.fields.primary.checked,true);
+ u.$('#sip-lines-form').dispatchEvent(new u.w.Event('submit',{bubbles:true,cancelable:true}));await flush();
+ assert.equal(u.calls.find(c=>c.method==='PUT').data.primary,true);
+});
+test('deleting another line preserves an explicit primary choice or a changed employee',async t=>{
+ const second={...row(),id:'00000000-0000-4000-8000-000000000011',sip_number:'0005678',primary:false};
+ for(const changedMember of [false,true]){
+  const u=setup(t,(_url,opt)=>opt.method==='DELETE'?{...base(),version:2,lines:[{...second,primary:true}]}:{...base(),version:1,lines:[row(),second]});
+  await u.ui.load();u.$('.sip-line-row:nth-child(2) button').click();
+  if(changedMember){u.fields.member_id.value=other;}else{u.fields.primary.checked=true;}
+  u.fields.member_id.dispatchEvent(new u.w.Event('input',{bubbles:true}));
+  u.$('.sip-line-row:first-child button:last-child').click();await flush();
+  assert.equal(u.fields.primary.checked,!changedMember);
+ }
+});
+test('unavailable vault does not lock cancel or the password visibility control',async t=>{
+ let vault_ready=true;const u=setup(t,()=>({...base(),vault_ready}));await u.ui.load();u.$('#sip-lines-add').click();u.fields.password.value='synthetic-draft';u.fields.password.dispatchEvent(new u.w.Event('input',{bubbles:true}));u.$('#sip-password-show').click();
+ vault_ready=false;await u.ui.load();assert.equal(u.$('#sip-lines-save').disabled,true);
+ assert.equal(u.$('#sip-password-show').disabled,false);u.$('#sip-password-show').click();assert.equal(u.fields.password.type,'password');
+ assert.equal(u.$('#sip-lines-cancel').disabled,false);u.$('#sip-lines-cancel').click();assert.equal(u.$('#sip-lines-form').hidden,true);assert.equal(u.fields.password.value,'');
+});
