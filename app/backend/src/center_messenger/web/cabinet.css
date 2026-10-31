@@ -17,7 +17,7 @@
   --danger:#235f88; --ok:#2574ad;
   /* Operator's messages: a soft light green; the parent's stay white. */
   --bubble-in:#ffffff; --bubble-out:#eaf6e4; --bubble-ink:#163047;
-  --call-bubble:#bdddff;
+  --call-bubble:#c8e4ff;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(16,27,35,.16));
   --glass:rgba(255,255,255,.72); --glass-line:rgba(255,255,255,.6);
   /* White glass: 70% transparency. Any hue comes from the wallpaper behind it. */
@@ -54,7 +54,7 @@
   --amber:#4e9ad1; --amber-deep:#4089c0; --amber-ink:#8fc3e8; --amber-tint:#15283a;
   --danger:#8fc3e8; --ok:#66b4e7;
   --bubble-in:#1a2a31; --bubble-out:#24382c; --bubble-ink:#e2f0e5;
-  --call-bubble:#254f70;
+  --call-bubble:#294c69;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(0,0,0,.4));
   --glass:rgba(19,31,36,.74); --glass-line:rgba(255,255,255,.07);
   --sys-bg:rgba(255,255,255,.3); --sys-line:rgba(255,255,255,.1); --sys-ink:#c6d1d9;
