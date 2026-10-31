@@ -17,6 +17,7 @@
   --danger:#235f88; --ok:#2574ad;
   /* Operator's messages: a soft light green; the parent's stay white. */
   --bubble-in:#ffffff; --bubble-out:#eaf6e4; --bubble-ink:#163047;
+  --call-bubble:#e3f1ff;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(16,27,35,.16));
   --glass:rgba(255,255,255,.72); --glass-line:rgba(255,255,255,.6);
   /* White glass: 70% transparency. Any hue comes from the wallpaper behind it. */
@@ -53,6 +54,7 @@
   --amber:#4e9ad1; --amber-deep:#4089c0; --amber-ink:#8fc3e8; --amber-tint:#15283a;
   --danger:#8fc3e8; --ok:#66b4e7;
   --bubble-in:#1a2a31; --bubble-out:#24382c; --bubble-ink:#e2f0e5;
+  --call-bubble:#20384b;
   --bub-shadow:drop-shadow(0 1px 1.5px rgba(0,0,0,.4));
   --glass:rgba(19,31,36,.74); --glass-line:rgba(255,255,255,.07);
   --sys-bg:rgba(255,255,255,.3); --sys-line:rgba(255,255,255,.1); --sys-ink:#c6d1d9;
@@ -2618,7 +2620,7 @@ body:has(#cabinet[hidden]){overflow:auto}
 
 /* Local telephony facts remain distinct from MAX send/read state. */
 /* Calls share the message bubble rhythm without becoming MAX message targets. */
-.call-event{align-self:flex-start;width:min(80%,480px);max-width:100%;min-width:0;padding:8px 12px 6px;border:0;border-radius:16px 16px 16px 6px;background:color-mix(in srgb,var(--primary) 10%,var(--bubble-in));color:var(--ink);box-shadow:var(--bub-shadow-box);font-size:15px;line-height:1.38;overflow-wrap:anywhere}
+.call-event{align-self:flex-start;width:min(80%,480px);max-width:100%;min-width:0;padding:8px 12px 6px;border:0;border-radius:16px 16px 16px 6px;background:var(--call-bubble);color:var(--ink);box-shadow:var(--bub-shadow-box);font-size:15px;line-height:1.38;overflow-wrap:anywhere}
 .call-event.out{align-self:flex-end;border-radius:16px 16px 6px 16px}
 .call-event-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
 .call-event.out .call-event-head{flex-direction:row-reverse}
