@@ -1,6 +1,7 @@
 """Call identity, durable pagination, media bounds and process ownership. Offline."""
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
+import asyncio
 import json
 import sys
 import tempfile
@@ -140,6 +141,38 @@ class AudioTests(unittest.TestCase):
 
 
 class WorkerTests(unittest.TestCase):
+    def worker(self):
+        from center_messenger.config import Settings
+        from center_messenger.telephony_worker import create_worker
+        directory=tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        key=Path(directory.name)/'key';key.write_text('a'*64)
+        return create_worker(Settings(runtime_role='telephony',telephony_worker_key_file=key))
+
+    def request(self,app,path,method='POST',key=None,payload=b'{}'):
+        # Exercise the actual ASGI application and middleware, as the MAX
+        # worker gate already does. Production deliberately has no httpx2
+        # test dependency; do not import TestClient in the pinned image gate.
+        async def request():
+            headers=[(b'content-type',b'application/json'),(b'content-length',str(len(payload)).encode())]
+            if key is not None:headers.append((b'x-cm-telephony-key',key.encode()))
+            scope={'type':'http','asgi':{'version':'3.0','spec_version':'2.4'},'http_version':'1.1',
+                   'method':method,'scheme':'http','path':path,'raw_path':path.encode(),'query_string':b'',
+                   'headers':headers,'client':('internal',1),'server':('telephony-worker',8002)}
+            messages=[];delivered=False
+            async def receive():
+                nonlocal delivered
+                if delivered:await asyncio.Event().wait()
+                delivered=True
+                return {'type':'http.request','body':payload,'more_body':False}
+            async def send(message):messages.append(message)
+            await asyncio.wait_for(app(scope,receive,send),timeout=5)
+            starts=[m for m in messages if m['type']=='http.response.start']
+            self.assertEqual(len(starts),1)
+            self.assertTrue(any(m['type']=='http.response.body' and not m.get('more_body',False) for m in messages))
+            return starts[0]['status'],b''.join(m.get('body',b'') for m in messages if m['type']=='http.response.body')
+        return asyncio.run(request())
+
     def test_worker_scheduler_registers_only_telephony_not_max_or_crm(self):
         from center_messenger.telephony_worker import build_worker_loader
         loader=build_worker_loader(Mock())
@@ -147,18 +180,31 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(loader.limits,{'messages':1,'maintenance':1,'media':1})
 
     def test_worker_rejects_other_runtime_roles_and_untrusted_requests(self):
-        from fastapi.testclient import TestClient
         from center_messenger.config import Settings
         from center_messenger.telephony_worker import create_worker
-        with self.assertRaises(ValueError):create_worker(Settings(runtime_role='api'))
-        with tempfile.TemporaryDirectory() as temp:
-            key=Path(temp)/'key';key.write_text('a'*64)
-            app=create_worker(Settings(runtime_role='telephony',telephony_worker_key_file=key))
-            client=TestClient(app)
-            for path in ('/recording','/api/workspaces/unknown/chats','/assets/chat.js'):
-                self.assertEqual(client.post(path,json={}).status_code,403)
-            self.assertEqual(client.get('/health/live').json()['role'],'telephony')
-            self.assertEqual(client.get('/health/ready').status_code,503)
+        for role in ('api','max','combined'):
+            with self.subTest(role=role),self.assertRaises(ValueError):create_worker(Settings(runtime_role=role))
+        app=self.worker();app.state.db_engine=Mock()
+        for key in (None,'wrong-key','b'*64):
+            for path,method in (('/recording','POST'),('/api/workspaces/unknown/chats','POST'),('/assets/chat.js','GET')):
+                with self.subTest(path=path,key=key):
+                    self.assertEqual(self.request(app,path,method,key)[0],403)
+        app.state.db_engine.begin.assert_not_called()
+        status,body=self.request(app,'/health/live','GET')
+        self.assertEqual(status,200);self.assertEqual(json.loads(body)['role'],'telephony')
+        self.assertEqual(self.request(app,'/health/ready','GET')[0],503)
+
+    def test_authenticated_worker_has_no_public_chat_ai_or_static_routes(self):
+        app=self.worker();app.state.db_engine=Mock()
+        for path in ('/api/workspaces/unknown/chats','/api/ai/agents','/assets/chat.js','/docs','/openapi.json'):
+            with self.subTest(path=path):self.assertEqual(self.request(app,path,'GET','a'*64)[0],404)
+        app.state.db_engine.begin.assert_not_called()
+
+    def test_authenticated_recording_request_keeps_schema_and_body_limits(self):
+        app=self.worker();app.state.db_engine=Mock()
+        self.assertEqual(self.request(app,'/recording',key='a'*64)[0],422)
+        self.assertEqual(self.request(app,'/recording',key='a'*64,payload=b'{' + b' '*1024 + b'}')[0],413)
+        app.state.db_engine.begin.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

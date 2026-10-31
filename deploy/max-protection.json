@@ -107,7 +107,7 @@
     "tests/test_novofon_connection.py": "654143a9f0e056bc4ca4b8ed1e79ad437cdc73aa8ae6c333ad3507dd3fb4f55a",
     "tests/test_novofon_diagnostic.py": "ce12dd8302faee1f743b1e4e139ff6f356d459afaf59af18180692749f6004ba",
     "tests/test_support_access.py": "20635c574d605a7bcab75bc46571af1962b3acabfdfa57cf954fee7fbf3430c7",
-    "tests/test_telephony_calls.py": "1df6a05079164ed3b128d49062622137cf01336de15fb192a7f13fc6f8533ec8",
+    "tests/test_telephony_calls.py": "9c38086d04fa6358667dff899fecb8fbd307f73f44c2dcd187e2f01bcd4d7b93",
     "tests/test_telephony_database.py": "3e1c53698c2ed80a5a4cd2b650c1228af725024c95c9fd9f72958db1a3a52a79",
     "tests/test_telephony_runtime.py": "6569bd55d84271848155e196fa2e327dd387078dfdc7f76c1b55289714f755c2"
   },
