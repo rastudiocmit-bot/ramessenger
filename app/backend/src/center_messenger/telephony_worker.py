@@ -1,4 +1,4 @@
-"""Pinned Novofon process: import pages and audio only, no MAX/browser/UI routes."""
+"""Pinned Novofon process: call facts, audio and telephone AI, no MAX/browser routes."""
 import asyncio
 import hmac
 import os
@@ -20,6 +20,7 @@ from center_messenger.loader.registry import Registry
 from center_messenger.loader.scheduler import Scheduler
 from center_messenger.telephony_audio import control_key,fetch
 from center_messenger.telephony_import import TelephonyImport
+from center_messenger.telephony_ai_worker import TelephoneWorker
 
 
 class AudioInput(InputModel):
@@ -27,10 +28,14 @@ class AudioInput(InputModel):
     call:UUID
 
 
-def build_worker_loader(importer):
+def build_worker_loader(importer,processor=None):
     registry=Registry()
-    registry.register(Manifest('novofon',frozenset({Capability.CALLS})),lambda:[
-        Step('calls',Capability.CALLS,lambda op:importer.run_next(),lane='maintenance',active_delay=1,idle_delay=2,budget=45)])
+    steps=[Step('calls',Capability.CALLS,lambda op:importer.run_next(),lane='maintenance',active_delay=1,idle_delay=2,budget=45)]
+    capabilities={Capability.CALLS}
+    if processor is not None:
+        capabilities.add(Capability.TRANSCRIBE)
+        steps.append(Step('ai',Capability.TRANSCRIBE,lambda op:processor.run_next(),lane='media',active_delay=1,idle_delay=3,budget=180))
+    registry.register(Manifest('novofon',frozenset(capabilities)),lambda:steps)
     return Scheduler(registry,limits={'messages':1,'maintenance':1,'media':1})
 
 
@@ -45,12 +50,14 @@ def create_worker(settings=None,*,engine_factory=make_engine,readiness_check=dat
         accounts=Accounts(engine,config)
         vault=ConnectorVault(config.connection_master_key_file)
         importer=TelephonyImport(accounts,vault)
-        loader=build_worker_loader(importer)
+        processor=TelephoneWorker(accounts,vault)
+        loader=build_worker_loader(importer,processor)
         app.state.db_engine,app.state.vault,app.state.loader=engine,vault,loader
         loader.start()
         try:yield
         finally:
             await asyncio.to_thread(loader.stop,timeout=30)
+            processor.cache.close()
             engine.dispose()
 
     app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
@@ -79,7 +86,7 @@ def create_worker(settings=None,*,engine_factory=make_engine,readiness_check=dat
         try:
             loader=app.state.loader
             ok=(readiness_check(app.state.db_engine,config.expected_db_role) and
-                set(loader.steps)=={'novofon.calls'} and not loader.registration_errors and
+                set(loader.steps)=={'novofon.calls','novofon.ai'} and not loader.registration_errors and
                 not loader.stopping.is_set() and bool(loader._threads) and all(t.is_alive() for t in loader._threads))
         except Exception:ok=False
         return JSONResponse({'status':'ready' if ok else 'not_ready','role':'telephony'},status_code=200 if ok else 503)

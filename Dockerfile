@@ -27,7 +27,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     sed -i 's|http://deb.debian.org|http://mirror.yandex.ru|g' /etc/apt/sources.list.d/debian.sources \
     && printf 'Acquire::ForceIPv4 "true";\nAcquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' \
         > /etc/apt/apt.conf.d/99-network \
-    && /opt/venv/bin/playwright install-deps chromium
+    && /opt/venv/bin/playwright install-deps chromium \
+    && apt-get install -y --no-install-recommends ffmpeg
 
 RUN /opt/venv/bin/playwright install chromium
 

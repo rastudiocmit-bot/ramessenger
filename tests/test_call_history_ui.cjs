@@ -41,3 +41,24 @@ test('provider text stays plain and failed playback has an inline retry',async t
  assert.equal(bubble.querySelector('img'),null);bubble.querySelector('audio').dispatchEvent(new s.w.Event('error'));
  assert.match(bubble.textContent,/Повторить загрузку аудио/);assert.equal(bubble.querySelector('.call-audio-error').hidden,false);
 });
+
+test('AI updates preserve the recording element and stable message identity',async t=>{
+ let currentCall={...call,ai:null};const s=setup(t,async()=>({calls:[currentCall],scope:'same'}));s.state.workspace.role='owner';
+ await s.ui.refresh('chat-one');const before=JSON.stringify(s.ui.messages('chat-one')[0]);
+ const bubble=s.ui.render(s.ui.messages('chat-one')[0].call,'chat-one');s.w.document.querySelector('#history').append(bubble);const audio=bubble.querySelector('audio');
+ currentCall={...call,ai:{run_id:'one',phase:'recognizing',version:1,summary:null,processing:true}};
+ await s.ui.refresh('chat-one',false,true);
+ assert.equal(bubble.querySelector('audio'),audio);assert.notEqual(audio.pausedByTest,true);assert.equal(JSON.stringify(s.ui.messages('chat-one')[0]),before);
+ assert.match(bubble.textContent,/Распознаём/);
+});
+test('saved AI summaries are plain text and never become a MAX message target',async t=>{
+ const s=setup(t,async()=>({calls:[],scope:'same'}));
+ const bubble=s.ui.render({...call,ai:{run_id:'one',phase:'complete',version:1,summary:'<img src=x onerror=alert(1)>',summary_source:'current'}},'chat-one');
+ assert.equal(bubble.querySelector('img'),null);assert.match(bubble.textContent,/<img/);assert.equal(bubble.classList.contains('msg'),false);
+});
+test('transcript is read lazily through the same authorized call scope',async t=>{
+ const requests=[];const s=setup(t,async url=>{requests.push(url);return {run_id:'one',complete:true,next:null,segments:[{start:0,channel:1,text:'<script>bad()</script>'}]};});
+ const bubble=s.ui.render({...call,ai:{run_id:'one',phase:'complete',version:1,summary:'Описание',transcript_run_id:'one'}},'chat-one');s.w.document.querySelector('#history').append(bubble);
+ assert.equal(requests.length,0);const details=bubble.querySelector('[data-transcript-run]');details.open=true;details.dispatchEvent(new s.w.Event('toggle'));await new Promise(r=>setTimeout(r,5));
+ assert.ok(requests[0].includes('/chats/chat-one/calls/'));assert.ok(requests[0].includes('/transcript?run=one'));assert.equal(details.querySelector('script'),null);
+});

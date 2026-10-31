@@ -1,6 +1,7 @@
 "use strict";
 // Dedicated telephone agent. Opening/saving this form makes no AI request.
 window.CenterTelephonyAgent = ({ $, state, api, notice, confirm }) => {
+  const processing=window.CenterTelephonyProcessing?.({$,state,api,notice,confirm});
   const form = $("#telephony-agent-form"), sample = $("#telephony-agent-sample");
   let saved = null, busy = false, generation = 0, subject = "";
   const who = () => `${state.user?.id || ""}:${state.workspace?.id || ""}:${state.workspace?.role || ""}`;
@@ -41,6 +42,7 @@ window.CenterTelephonyAgent = ({ $, state, api, notice, confirm }) => {
     controls();
   }
   function reset() {
+    processing?.reset();
     generation++; subject = who(); saved = null; busy = false; form.reset(); sample.value = "";
     for (const id of ["telephony-agent-result","telephony-agent-message","telephony-agent-history"]) $("#"+id).replaceChildren();
     notice("", $("#telephony-agent-error")); $("#telephony-agent-version").textContent = "Состояние ещё не получено"; controls();
@@ -54,6 +56,7 @@ window.CenterTelephonyAgent = ({ $, state, api, notice, confirm }) => {
     finally { if (current(c)) { busy = false; controls(); } }
   }
   async function load(force = false) {
+    void processing?.load();
     if (subject !== who()) reset();
     if (!force && dirty()) return;
     return run(async c => { const value = await api(endpoint(c)); if (current(c)) render(value); });
@@ -63,7 +66,7 @@ window.CenterTelephonyAgent = ({ $, state, api, notice, confirm }) => {
     void run(async c => {
       const value = await api(endpoint(c), {method:"PUT",data:{expected_version:saved.version,...fields()}});
       if (current(c)) { render(value); $("#telephony-agent-result").textContent = "";
-        $("#telephony-agent-message").textContent = "Телефонный агент сохранён отдельно. Автоматическая обработка записей ещё не запущена."; }
+        $("#telephony-agent-message").textContent = "Телефонный агент сохранён. Настройки применятся к новым заданиям; готовые звонки не перерабатываются."; }
     });
   });
   $("#telephony-agent-test").addEventListener("click", () => {

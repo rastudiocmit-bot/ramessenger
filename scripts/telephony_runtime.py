@@ -14,6 +14,56 @@ STATE='telephony-runtime.json'
 UPDATE='telephony-runtime-update.json'
 
 
+def prepare_schema(root,source,expected_image,runtime):
+    """Explicit third-process admission, called only under the project lock."""
+    state,worker=_pin(root,runtime)
+    pending=root/UPDATE
+    if pending.exists() and json.loads(pending.read_text()).get('phase') not in ('complete','failed'):
+        raise RuntimeError('A pending telephony update must be recovered or completed first')
+    if (worker['Config']['Image']!=expected_image or worker['State']['Status']!='running'
+            or 'CM_RUNTIME_ROLE=telephony' not in worker['Config'].get('Env',[])
+            or state['schema_revision']!=runtime.schema_revision()
+            or runtime.digest(root/'compose.yaml')!=runtime.digest(source/'compose.yaml')):
+        raise RuntimeError('Exact unchanged three-process layout required')
+    return {'telephony_schema_update':True,'old_phone':expected_image,
+            'old_phone_id':worker['Image'],'old_phone_container':worker['Id'],
+            'old_phone_state':runtime.digest(root/STATE)}
+
+
+def verify_schema_preparation(root,plan,runtime):
+    state,worker=_pin(root,runtime)
+    if (runtime.digest(root/STATE)!=plan['old_phone_state'] or
+            worker['Id']!=plan['old_phone_container'] or worker['Image']!=plan['old_phone_id']
+            or state['worker_image']!=plan['old_phone']):
+        raise RuntimeError('Telephony changed after schema update preparation')
+
+
+def schema_promote_data(root,source,plan,archive,image_id,sha,body,runtime):
+    verify_schema_preparation(root,plan,runtime)
+    policy=json.loads((source/'deploy/max-protection.json').read_text())
+    image=tag(runtime,image_id,sha)
+    runtime.write(archive/'phone-runtime.json',(root/STATE).read_bytes())
+    state={'phase':'complete','sha':sha,'worker_image':image,'worker_id':image_id,
+           'contract':policy['telephony_runtime_contract'],'schema_revision':policy['schema_revision']}
+    value=(json.dumps(state,indent=2)+'\n').encode()
+    plan.update(telephony_image=image,new_phone_state=hashlib.sha256(value).hexdigest(),phone_state_body=value.decode())
+    return environment(body,image)
+
+
+def schema_recovery_check(root,plan,archive,runtime):
+    if (runtime.digest(archive/'phone-runtime.json')!=plan['old_phone_state'] or
+            runtime.digest(root/STATE) not in (plan['old_phone_state'],plan['new_phone_state'])):
+        raise RuntimeError('Telephony schema recovery metadata changed')
+    names=runtime.run('docker','ps','-a','--filter','name=^/'+NAME+'$','--format','{{.Names}}').splitlines()
+    if names not in ([],[NAME]):raise RuntimeError('Unexpected telephony schema recovery container')
+    if names:
+        worker=runtime.inspect(NAME)
+        if (worker['Image'] not in (plan['old_phone_id'],plan['worker_id']) or
+                worker['Config']['Image'] not in (plan['old_phone'],plan['telephony_image']) or
+                (worker['Config'].get('Labels') or {}).get('com.docker.compose.project')!='center-messenger'):
+            raise RuntimeError('Unrelated telephony process; refusing schema rollback')
+
+
 def _save(root,plan,runtime):
     runtime.write(root/UPDATE,(json.dumps(plan,indent=2)+'\n').encode())
 
@@ -219,6 +269,9 @@ def verify(root,source,runtime,pending=None):
     policy=json.loads((source/'deploy/max-protection.json').read_text())
     if not policy.get('telephony_runtime_contract'):return
     if pending and pending.get('telephony_install'):return
+    if pending and pending.get('telephony_schema_update'):
+        verify_schema_preparation(root,pending,runtime)
+        return
     path=root/STATE
     if not path.exists():raise RuntimeError('Reviewed telephony installation must be explicitly prepared')
     update=None

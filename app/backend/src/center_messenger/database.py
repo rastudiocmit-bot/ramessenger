@@ -6,7 +6,7 @@ from sqlalchemy import Connection, Engine, create_engine, text
 
 from center_messenger.config import Settings
 
-SCHEMA_REVISION = "0031_telephony_calls"
+SCHEMA_REVISION = "0032_telephony_ai"
 
 
 def log_database_error(logger, error, *, operation):
@@ -111,6 +111,12 @@ TENANT_TABLES = (
     "novofon_settings",
     "telephony_calls",
     "telephony_state",
+    "telephony_ai_settings",
+    "telephony_ai_runs",
+    "telephony_ai_links",
+    "telephony_ai_operations",
+    "telephony_archive_control",
+    "telephony_archive_seen",
 )
 
 IDENTITY_RLS_TABLES = (

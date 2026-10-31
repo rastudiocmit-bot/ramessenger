@@ -116,6 +116,21 @@ class PageTests(unittest.TestCase):
         importer.process(job)
         self.assertEqual([c.args[0] for c in client.read.call_args_list],['get.account','get.calls_report'])
 
+    def test_a_legacy_ninety_day_setting_cannot_bypass_the_explicit_night_archive(self):
+        importer,client=self.importer([]);job=self.make_job();job['state']['history_days']=90
+        job['state'].update(settings_version=1,account_id='17',timezone='Europe/Moscow',recent_due=NOW+timedelta(minutes=1),
+            recent={'from':(NOW-timedelta(days=1)).isoformat(),'till':NOW.isoformat(),'offset':0,'account_checked_at':NOW.isoformat()},
+            archive={'from':(NOW-timedelta(days=90)).isoformat(),'till':(NOW-timedelta(days=89)).isoformat(),'offset':0})
+        client.read.side_effect=[([],{})];importer.process(job)
+        self.assertEqual(client.read.call_args.kwargs['date_from'],'2026-10-24 03:00:00')
+
+    def test_a_week_old_recent_cursor_is_replaced_after_a_long_outage(self):
+        importer,client=self.importer([]);job=self.make_job()
+        job['state'].update(settings_version=1,account_id='17',timezone='Europe/Moscow',
+            recent={'from':(NOW-timedelta(days=10)).isoformat(),'till':(NOW-timedelta(days=9)).isoformat(),'offset':0,'account_checked_at':NOW.isoformat()})
+        client.read.side_effect=[([],{})];importer.process(job)
+        self.assertEqual(client.read.call_args.kwargs['date_from'],'2026-10-30 03:00:00')
+
 
 class AudioTests(unittest.TestCase):
     def test_range_is_bounded_and_multi_ranges_are_rejected(self):

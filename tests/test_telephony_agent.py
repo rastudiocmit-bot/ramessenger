@@ -77,7 +77,7 @@ class TelephonyAgentTests(unittest.TestCase):
         self.db.rows[self.workspace] |= {'key_ciphertext':'synthetic-cipher','deepseek_key_ciphertext':None}
     def test_opening_configuration_does_not_create_an_agent_or_start_paid_work(self):
         value=self.service.settings(self.actor,self.workspace)
-        self.assertEqual(value['version'],0); self.assertFalse(value['processing_available'])
+        self.assertEqual(value['version'],0); self.assertTrue(value['processing_available'])
         self.assertEqual(self.db.rows,{}); self.client.complete.assert_not_called()
     def test_separate_identity_and_task_never_use_generic_agents(self):
         value=self.save(); self.assertEqual(value['task'],'telephone_conversations')
@@ -150,12 +150,13 @@ class TelephonyAgentTests(unittest.TestCase):
         for extra in ({'api_key':'synthetic-key'},{'enabled':True}):
             with self.assertRaises(ValidationError): PhoneAgentInput.model_validate(data | {'expected_version':0} | extra)
 
-    def request(self,method,path,data=None,csrf=False):
+    def request(self,method,path,data=None,csrf=False,query=''):
         from fastapi import FastAPI
         from fastapi.responses import JSONResponse
         from unittest.mock import patch
         from center_messenger import telephony_api
         app=FastAPI();app.include_router(telephony_api.router)
+        app.state.telephony=self.service
         self.actor.raw_session='synthetic-session'
         app.state.accounts=SimpleNamespace(settings=SimpleNamespace(cookie_name='session'),authenticate=lambda _:self.actor)
         @app.exception_handler(AuthError)
@@ -164,7 +165,7 @@ class TelephonyAgentTests(unittest.TestCase):
             body=json.dumps(data or {}).encode();headers=[(b'content-type',b'application/json'),(b'cookie',b'session=synthetic-session')]
             if csrf:headers.append((b'x-csrf-token',csrf_token(self.actor.raw_session).encode()))
             scope={'type':'http','asgi':{'version':'3.0','spec_version':'2.4'},'http_version':'1.1',
-                   'method':method,'scheme':'https','path':path,'raw_path':path.encode(),'query_string':b'',
+                   'method':method,'scheme':'https','path':path,'raw_path':path.encode(),'query_string':query.encode(),
                    'headers':headers,'client':('test',1),'server':('test',443)}
             messages=[]
             async def receive():return {'type':'http.request','body':body,'more_body':False}
@@ -190,6 +191,30 @@ class TelephonyAgentTests(unittest.TestCase):
         self.assertEqual(status,404);self.client.complete.assert_not_called()
         status,value=self.request('POST',path,data,csrf=True)
         self.assertEqual(status,200);self.assertFalse(value['saved_to_call'])
+
+    def test_night_archive_control_is_a_csrf_protected_explicit_action(self):
+        from unittest.mock import patch
+        controller=Mock();controller.configure_archive.return_value={'archive':{'enabled':True}}
+        path=f'/api/workspaces/{self.workspace}/integrations/novofon/archive'
+        with patch('center_messenger.telephony_api.Processing',return_value=controller):
+            status,_=self.request('PUT',path,{'expected_version':0,'enabled':True})
+            self.assertEqual(status,403);controller.configure_archive.assert_not_called()
+            status,_=self.request('PUT',path,{'expected_version':0,'enabled':True},csrf=True)
+            self.assertEqual(status,200)
+        self.assertEqual(controller.configure_archive.call_args.args[2],{'expected_version':0,'enabled':True})
+        self.client.recognize.assert_not_called();self.client.complete.assert_not_called()
+
+    def test_call_ai_request_retains_a_stable_request_id_and_transcript_cursor_is_bounded(self):
+        from unittest.mock import patch
+        controller=Mock();controller.request.return_value={'run_id':str(uuid4()),'phase':'queued'}
+        call,subject,request=uuid4(),uuid4(),uuid4()
+        path=f'/api/workspaces/{self.workspace}/chats/{subject}/calls/{call}'
+        with patch('center_messenger.telephony_api.Processing',return_value=controller):
+            status,_=self.request('POST',path+'/ai',{'request_id':str(request)},csrf=True)
+            self.assertEqual(status,200);self.assertEqual(controller.request.call_args.args[4]['request_id'],request)
+            status,_=self.request('GET',path+'/transcript',query='after=..%2F..%2Fbad')
+            self.assertEqual(status,422);controller.transcript.assert_not_called()
+        self.client.recognize.assert_not_called()
 
 
 if __name__=='__main__': unittest.main()

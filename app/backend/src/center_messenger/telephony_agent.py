@@ -2,7 +2,8 @@
 
 Configuration lives in its own workspace gateway_config namespace. It is never
 selected by voice input, task generation or the generic text-agent fallback.
-This stage prepares/tests the agent; it does not enqueue or transcribe calls.
+Explicit telephone processing controls snapshot this profile for each new run.
+Saving the profile alone never enqueues or transcribes calls.
 """
 from datetime import datetime, timezone
 import json
@@ -82,7 +83,7 @@ class TelephonyAgent:
     def public(row, workspace):
         value = profile(row, workspace)
         return value | {
-            'task': 'telephone_conversations', 'processing_available': False,
+            'task': 'telephone_conversations', 'processing_available': True,
             'models': [{'id': key, 'title': item['title'], 'provider': item['provider'],
                         'provider_title': PROVIDERS[item['provider']]} for key, item in CATALOG.items()],
             'recognizers': [{'id': p, 'title': PROVIDERS[p],

@@ -17,10 +17,16 @@ test('loader defaults are prefilled and editable only after a known server versi
 test('saving uses the loaded version and blocks duplicate submissions',async t=>{
  const calls=[];let save;
  const s=setup(t,async(url,opt={})=>{calls.push(opt);return opt.method==='PUT'?new Promise(r=>save=r):defaults;});
- await s.ui.load();const form=s.$('#telephony-loader-form');form.elements.history_days.value='14';
+ await s.ui.load();const form=s.$('#telephony-loader-form');form.elements.history_days.value='3';
  for(let i=0;i<2;i++)form.dispatchEvent(new s.w.Event('submit',{bubbles:true,cancelable:true}));
- await flush();assert.equal(calls.filter(c=>c.method==='PUT').length,1);assert.equal(calls.at(-1).data.expected_version,1);assert.equal(calls.at(-1).data.history_days,14);
- save({...defaults,version:2,history_days:14});await flush();assert.equal(form.elements.history_days.disabled,false);
+ await flush();assert.equal(calls.filter(c=>c.method==='PUT').length,1);assert.equal(calls.at(-1).data.expected_version,1);assert.equal(calls.at(-1).data.history_days,3);
+ save({...defaults,version:2,history_days:3});await flush();assert.equal(form.elements.history_days.disabled,false);
+});
+test('older-than-week history cannot be requested through the daytime loader form',async t=>{
+ const calls=[],s=setup(t,async(_url,opt={})=>{calls.push(opt);return defaults;});await s.ui.load();
+ const form=s.$('#telephony-loader-form');form.elements.history_days.value='14';
+ form.dispatchEvent(new s.w.Event('submit',{bubbles:true,cancelable:true}));await flush();
+ assert.equal(calls.filter(c=>c.method==='PUT').length,0);assert.match(form.textContent,/ночной архив/);
 });
 test('a late loader response cannot overwrite a different organization',async t=>{
  let complete;const s=setup(t,()=>new Promise(r=>complete=r)),read=s.ui.load();

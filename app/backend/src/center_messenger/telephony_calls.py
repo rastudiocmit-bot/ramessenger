@@ -14,6 +14,7 @@ from center_messenger.telephony_audio import WorkerAudio
 from center_messenger.telephony_import import TelephonyImport
 from center_messenger.novofon_budget import account_snapshot
 from center_messenger.telephony_model import call_view
+from center_messenger.telephony_processing import views as ai_views
 
 
 class TelephonyCalls:
@@ -32,6 +33,7 @@ class TelephonyCalls:
             if not row:return {'enabled':True,'history_days':7,'poll_seconds':60,'version':0,'running':False,'call_count':0}
             count=db.execute(text('SELECT count(*) FROM telephony_calls WHERE workspace_id=:w AND account_id=:a'),{'w':workspace,'a':row['account_id']}).scalar_one()
             result={key:row[key] for key in ('enabled','history_days','poll_seconds','version','running','last_sync_at','last_error_code','retry_at','archive_done')} | {'call_count':count,'next_at':row['due_at']}
+            result['history_days']=min(7,result['history_days'])
             account=row['account_id']
         result['api_limits']=account_snapshot(self.accounts.engine,account)
         return result
@@ -84,7 +86,8 @@ class TelephonyCalls:
                 where=' AND (c.started_at,c.id)<(:before_time,:before_id)'
                 params.update(before_time=before_time,before_id=before_id)
             rows=list(db.execute(text("SELECT c.*,s.connected FROM telephony_calls c JOIN telephony_state s ON s.workspace_id=c.workspace_id AND s.account_id=c.account_id WHERE c.workspace_id=:w AND c.phone=ANY(CAST(:phones AS text[]))"+where+' ORDER BY c.started_at DESC,c.id DESC LIMIT :limit'),params).mappings())
-            return {'calls':[call_view(row,audio_available=row['connected']) for row in reversed(rows[:limit])],
+            ai=ai_views(db,workspace,[row['id'] for row in rows[:limit]])
+            return {'calls':[call_view(row,audio_available=row['connected']) | {'ai':ai.get(row['id']),'transcription_status':ai[row['id']]['phase'] if row['id'] in ai else 'not_requested'} for row in reversed(rows[:limit])],
                     'has_more':len(rows)>limit,'match':'current_crm_phone','scope':scope}
 
     def recording(self,actor,workspace,conversation,call,range_header,*,contact=False):

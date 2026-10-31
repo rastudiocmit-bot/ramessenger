@@ -226,4 +226,114 @@ class TelephonyUpdateTests(unittest.TestCase):
         self.assertEqual((self.root/'.env').read_bytes(),self.old_env)
 
 
+class ThreeProcessSchemaTests(unittest.TestCase):
+    def setUp(self):
+        fixture.WorkerUpdateTests.setUp(self)
+        self.old_phone='center-messenger:telephony-old'
+        self.phone={'Id':'old-phone-container','Image':'old-phone-id','Config':{'Image':self.old_phone,
+            'Env':['CM_RUNTIME_ROLE=telephony'],'Labels':{'com.docker.compose.project':'center-messenger'}},'State':{'Status':'running','Health':{'Status':'healthy'}}}
+        (self.root/'.env').write_text((self.root/'.env').read_text()+'CM_TELEPHONY_IMAGE='+self.old_phone+'\n')
+        (self.root/phone.STATE).write_text(json.dumps({'phase':'complete','worker_image':self.old_phone,'worker_id':'old-phone-id','schema_revision':'0031_telephony_calls','contract':'old-phone-contract'}))
+        migration='app/backend/migrations/versions/0032_telephony_ai.py'
+        path=self.source/migration;path.parent.mkdir(parents=True);path.write_text('retained additive AI tables')
+        self.policy={'schema_revision':'0032_telephony_ai','worker_runtime_contract':'schema-32','telephony_runtime_contract':'phone-ai-v1',
+            'protected':{migration:runtime.digest(path),'compose.yaml':runtime.digest(self.source/'compose.yaml')},
+            'paired_schema_update':{'from':'0031_telephony_calls','to':'0032_telephony_ai','migration':migration,'rollback_preserves_data':True}}
+        (self.source/'deploy/max-protection.json').write_text(json.dumps(self.policy))
+        self.revision='0031_telephony_calls';self.original_env=(self.root/'.env').read_bytes()
+        self.original_phone=(self.root/phone.STATE).read_bytes()
+        self.promoter=Mock();self.promoter.wait_ready.return_value=True
+
+    def inspect(self,name):
+        if name==runtime.NAME:return self.worker
+        if name==phone.NAME:return self.phone
+        return self.api
+
+    def command(self,*args,**kwargs):
+        self.calls.append(args)
+        if args[:1]==('git',):return SHA
+        if args[:2]==('docker','exec'):return self.revision
+        if args[:3]==('docker','image','inspect'):return '[{"Id":"sha256:new-image"}]'
+        if args[:2]==('docker','ps'):return phone.NAME if '--filter' in args else runtime.NAME+'\ncenter-messenger-api-1\n'+phone.NAME
+        if args[:2]==('docker','compose') and 'up' in args:
+            target=args[-1];env=kwargs['env']
+            if target=='max-worker':self.worker['Config']['Image']=env['CM_MAX_IMAGE'];self.worker['Image']='sha256:old-worker' if env['CM_MAX_IMAGE']==self.max_image else 'sha256:new-image'
+            if target=='telephony-worker':self.phone['Config']['Image']=env['CM_TELEPHONY_IMAGE'];self.phone['Image']='old-phone-id' if env['CM_TELEPHONY_IMAGE']==self.old_phone else 'sha256:new-image'
+            if target=='api':self.api['Config']['Image']=env['CM_IMAGE']
+        return ''
+
+    def context(self):
+        from contextlib import ExitStack
+        stack=ExitStack()
+        for target,name,value in [(runtime,'run',self.command),(runtime,'inspect',self.inspect),
+                                  (runtime,'schema_revision',lambda:self.revision)]:
+            stack.enter_context(patch.object(target,name,side_effect=value))
+        stack.enter_context(patch.object(runtime,'wait_worker',return_value=True))
+        stack.enter_context(patch.object(phone,'wait',return_value=True))
+        stack.enter_context(patch.object(runtime.subprocess,'run',return_value=Mock(returncode=1)))
+        return stack
+
+    def prepare(self):
+        with self.context():runtime.prepare_update(self.root,self.source,SHA,OLD,self.max_image,runtime.digest(self.source/'deploy/max-protection.json'),schema_from='0031_telephony_calls',update_telephony=True,expected_telephony=self.old_phone)
+
+    def migrating(self):
+        with self.context():runtime.begin_schema_update(self.root,self.source,SHA,NEW,self.backup)
+        self.revision='0032_telephony_ai'
+
+    def test_schema_change_is_blocked_without_all_three_exact_pins(self):
+        with self.context():
+            with self.assertRaisesRegex(RuntimeError,'three-process'):
+                runtime.prepare_update(self.root,self.source,SHA,OLD,self.max_image,runtime.digest(self.source/'deploy/max-protection.json'),schema_from='0031_telephony_calls')
+            with self.assertRaises(RuntimeError):
+                runtime.prepare_update(self.root,self.source,SHA,OLD,self.max_image,runtime.digest(self.source/'deploy/max-protection.json'),schema_from='0031_telephony_calls',update_telephony=True,expected_telephony='wrong')
+        self.assertEqual((self.root/'.env').read_bytes(),self.original_env)
+
+    def test_preparation_changes_no_container_and_admits_only_the_reviewed_schema(self):
+        self.prepare()
+        with self.context():
+            self.assertTrue(runtime.allows_schema_update(self.root,self.source,SHA,'0031_telephony_calls','0032_telephony_ai'))
+            runtime.verify_runtime_layout(self.root,self.source)
+        self.assertFalse(any('up' in command for command in self.calls))
+
+    def test_promotion_updates_phone_and_max_for_the_shared_readiness_revision(self):
+        self.prepare();self.migrating()
+        with self.context():runtime.promote_update(self.root,self.source,SHA,OLD,NEW,self.backup,self.promoter)
+        self.assertEqual(json.loads((self.root/phone.STATE).read_text())['schema_revision'],'0032_telephony_ai')
+        self.assertEqual(json.loads((self.root/runtime.UPDATE).read_text())['phase'],'complete')
+        self.assertEqual([command[-1] for command in self.calls if command[:2]==('docker','compose') and 'up' in command],['max-worker','telephony-worker'])
+        before=len(self.calls)
+        with self.context():runtime.verify_runtime_layout(self.root,self.source)
+        self.assertFalse(any('up' in command for command in self.calls[before:]))
+
+    def test_failed_api_restores_both_original_worker_pins_without_restoring_a_dump(self):
+        self.prepare();self.migrating();self.promoter.deploy_api_with_rollback.side_effect=RuntimeError('synthetic API failure')
+        def restore(*_):self.revision='0031_telephony_calls'
+        with self.context(),patch.object(runtime,'restore_schema',side_effect=restore):
+            with self.assertRaisesRegex(RuntimeError,'synthetic API failure'):
+                runtime.promote_update(self.root,self.source,SHA,OLD,NEW,self.backup,self.promoter)
+        self.assertEqual((self.root/'.env').read_bytes(),self.original_env)
+        self.assertEqual((self.root/phone.STATE).read_bytes(),self.original_phone)
+        self.assertFalse(any('pg_restore' in command for command in self.calls))
+
+    def test_migration_interruption_checks_phone_identity_before_recovery(self):
+        self.prepare();self.migrating();self.phone['Image']='someone-else'
+        with self.context(),patch.object(runtime,'restore_schema') as restore:
+            with self.assertRaises(RuntimeError):runtime.recover_update(self.root,self.promoter)
+            restore.assert_not_called()
+
+    def test_crash_after_phone_metadata_commit_recovers_both_original_states(self):
+        self.prepare();self.migrating();original_write=runtime.write;failed=False
+        def write(path,body,**kwargs):
+            nonlocal failed
+            if path==self.root/runtime.PLAN and not failed:
+                failed=True;raise RuntimeError('synthetic metadata crash')
+            return original_write(path,body,**kwargs)
+        def restore(*_):self.revision='0031_telephony_calls'
+        with self.context(),patch.object(runtime,'write',side_effect=write),patch.object(runtime,'restore_schema',side_effect=restore):
+            with self.assertRaisesRegex(RuntimeError,'metadata crash'):
+                runtime.promote_update(self.root,self.source,SHA,OLD,NEW,self.backup,self.promoter)
+        self.assertEqual((self.root/phone.STATE).read_bytes(),self.original_phone)
+        self.assertEqual((self.root/'.env').read_bytes(),self.original_env)
+
+
 if __name__=='__main__':unittest.main()

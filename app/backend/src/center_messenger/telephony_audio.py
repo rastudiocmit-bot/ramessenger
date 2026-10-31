@@ -27,13 +27,14 @@ def control_key(config):
         raise AuthError(503,'Сервис аудио телефонии пока не подключён.') from None
 
 
-def requested_range(value):
-    if not value:return 0,CHUNK-1
+def requested_range(value,chunk_size=CHUNK):
+    if type(chunk_size) is not int or not 1<=chunk_size<=32*1024*1024:raise ValueError('Invalid audio chunk bound')
+    if not value:return 0,chunk_size-1
     match=re.fullmatch(r'bytes=(\d{1,12})-(\d{0,12})',value)
     if not match:raise AuthError(416,'Неподдерживаемый диапазон записи.')
-    start=int(match[1]);end=int(match[2]) if match[2] else start+CHUNK-1
+    start=int(match[1]);end=int(match[2]) if match[2] else start+chunk_size-1
     if start>=MAX_FILE or end<start:raise AuthError(416,'Неподдерживаемый диапазон записи.')
-    return start,min(end,start+CHUNK-1,MAX_FILE-1)
+    return start,min(end,start+chunk_size-1,MAX_FILE-1)
 
 
 def location(url,resolver=socket.getaddrinfo):
@@ -61,8 +62,8 @@ class PinnedHTTPS(http.client.HTTPSConnection):
             sock.close();raise
 
 
-def fetch(url,range_header=None,*,resolver=socket.getaddrinfo,connection_factory=PinnedHTTPS):
-    start,end=requested_range(range_header)
+def fetch(url,range_header=None,*,resolver=socket.getaddrinfo,connection_factory=PinnedHTTPS,chunk_size=CHUNK):
+    start,end=requested_range(range_header,chunk_size)
     if not SLOTS.acquire(blocking=False):raise AuthError(429,'Все каналы прослушивания заняты. Повторите позже.',retry_after=3)
     try:
         for hop in range(4):
@@ -81,7 +82,7 @@ def fetch(url,range_header=None,*,resolver=socket.getaddrinfo,connection_factory
                 if response.status not in (200,206) or mime in ('text/html','application/json'):
                     raise AuthError(502,'Запись пока недоступна. Повторите позже.')
                 size=response.getheader('Content-Length','')
-                if not size.isdecimal() or not 1<=int(size)<=CHUNK:
+                if not size.isdecimal() or not 1<=int(size)<=chunk_size:
                     raise AuthError(502,'Новофон не поддержал порционное чтение этой записи.')
                 if response.status==206:
                     match=re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)',response.getheader('Content-Range',''))

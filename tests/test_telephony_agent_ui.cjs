@@ -26,7 +26,7 @@ test('saving edits uses the known version and never starts a model request',asyn
  assert.equal(writes[0].data.expected_version,1);assert.equal(writes[0].data.prompt,'Инструкция только для звонков');
  assert.equal(s.calls.filter(c=>c.method==='POST').length,0);
  done({...defaults,version:2,prompt:'Инструкция только для звонков'});await flush();
- assert.match(s.$('#telephony-agent-message').textContent,/ещё не запущена/);
+ assert.match(s.$('#telephony-agent-message').textContent,/не перерабатываются/);
 });
 test('unsaved instruction cannot be tested against the old saved version',async t=>{
  const s=setup(t);await s.ui.load();const form=s.$('#telephony-agent-form');

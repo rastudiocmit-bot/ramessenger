@@ -113,8 +113,14 @@ class TelephonyImport:
         archive_done = False if reset else state['archive_done']
         if not recent:
             recent=window(now-timedelta(days=1),now)
+        elif datetime.fromisoformat(recent['from'])<now-timedelta(days=7):
+            # A long outage must not turn the ordinary lane into a daytime
+            # historical backfill. Old calls belong to the explicit night job.
+            recent=window(now-timedelta(days=1),now)
+        if archive and datetime.fromisoformat(archive['from'])<now-timedelta(days=7):
+            archive={};archive_done=False
         if not archive and not archive_done:
-            start=now-timedelta(days=state['history_days'])
+            start=now-timedelta(days=min(7,state['history_days']))
             cutoff=now-timedelta(days=1)
             archive=window(start,min(start+timedelta(days=1),cutoff)) | {'cutoff':cutoff.isoformat()}
             archive_done=start>=cutoff
