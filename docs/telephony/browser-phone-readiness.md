@@ -109,8 +109,11 @@ behind an open form, including before its first edit, so old fields cannot
 silently overwrite another administrator's newer settings. Malformed stored
 profile IDs return a safe settings error without exposing stored credentials.
 Server checks use the real encryption and actual ASGI authentication/CSRF/input
-validation chain with synthetic accounts and storage. Chromium checks exercise
-add/edit on desktop and mobile. No production password, registration or call
+validation chain with synthetic accounts and storage, including employee-only
+reads and DELETE permission, CSRF and version checks. Chromium checks exercise
+add/edit on desktop and mobile and reject invalid SIP numbers before sending
+them; leading zeros and supported hyphen/underscore/dot logins remain valid.
+No production password, registration or call
 was used. Live persistence remains subject to the normal VPS deployment and
 its database/readiness checks; local storage tests do not replace that gate.
 

@@ -246,7 +246,7 @@
 <div id="sip-lines-list" class="sip-lines-list"></div><div class="btn-row"><button class="btn sec" id="sip-lines-add" type="button" disabled>Добавить SIP-линию</button></div>
 <form id="sip-lines-form" class="sip-lines-form" autocomplete="off" hidden><h4 id="sip-lines-form-title">Новая SIP-линия</h4>
 <div class="sip-lines-fields"><label class="fld">Сотрудник мессенджера<select name="member_id" required></select><small>Сотрудники добавляются в разделе «Сотрудники». Привязка выполняется к выбранной учётной записи.</small></label>
-<label class="fld">SIP-номер<input name="sip_number" type="text" maxlength="80" pattern="[A-Za-z0-9_.-]+" required spellcheck="false" autocomplete="off"/><small>Полный SIP-номер из Новофона, включая начальные нули. Это не внутренний номер сотрудника.</small></label>
+<label class="fld">SIP-номер<input name="sip_number" type="text" maxlength="80" pattern="[A-Za-z0-9_.\-]+" required spellcheck="false" autocomplete="off"/><small>Полный SIP-номер из Новофона, включая начальные нули. Это не внутренний номер сотрудника.</small></label>
 <label class="fld">Внутренний номер<input name="extension" type="text" inputmode="numeric" maxlength="12" pattern="[0-9]*" autocomplete="off"/><small>Необязательно. Например, 101. Хранится отдельно от SIP-номера.</small></label>
 <label class="fld">SIP-сервер<input name="server" type="text" value="sip.novofon.ru" maxlength="253" required spellcheck="false" autocomplete="off"/></label>
 <label class="fld">SIP-порт<input name="port" type="number" value="5060" min="1" max="65535" required/></label>

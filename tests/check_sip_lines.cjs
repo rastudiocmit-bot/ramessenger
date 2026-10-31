@@ -27,7 +27,16 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    const page=await context.newPage();page.setDefaultTimeout(10000);await page.goto('https://cabinet.example.test/');await page.locator('#connections-tab').evaluate(e=>e.click());await page.locator('#connections-novofon-tab').click();
    await page.locator('#sip-lines-add:not([disabled])').waitFor();await page.locator('#sip-lines-add').click();
    const form=page.locator('#sip-lines-form');await form.locator('[name=member_id]').selectOption(members[1].id);
-   await form.locator('[name=sip_number]').fill('0004567');await form.locator('[name=extension]').fill('004');await form.locator('[name=password]').fill('synthetic-browser-password');
+   await form.locator('[name=extension]').fill('004');await form.locator('[name=password]').fill('synthetic-browser-password');
+   const sipNumber=form.locator('[name=sip_number]');
+   for(const invalid of ['sip:user@example','000 123','000/123']){
+    await sipNumber.fill(invalid);assert.equal(await sipNumber.evaluate(e=>e.checkValidity()),false);
+    await page.locator('#sip-lines-save').click();assert.equal(writes.length,0);
+   }
+   for(const valid of ['0004567','146000-100','office_001.test']){
+    await sipNumber.fill(valid);assert.equal(await sipNumber.evaluate(e=>e.checkValidity()),true);
+   }
+   await sipNumber.fill('0004567');
    const formOverflow=await form.evaluate(e=>e.scrollWidth-e.clientWidth);assert.ok(formOverflow<=1);
    if(process.env.CM_APPEARANCE_SCREENSHOT_DIR){fs.mkdirSync(process.env.CM_APPEARANCE_SCREENSHOT_DIR,{recursive:true});await form.locator('[name=password]').fill('');await page.locator('#sip-lines-card').screenshot({path:path.join(process.env.CM_APPEARANCE_SCREENSHOT_DIR,`sip-form-${width}.png`)});await form.locator('[name=password]').fill('synthetic-browser-password');}
    await page.locator('#sip-lines-save').click();await form.waitFor({state:'hidden'});assert.equal(writes[0].sip_number,'0004567');assert.equal(writes[0].member_id,members[1].id);assert.equal(writes[0].extension,'004');
@@ -35,7 +44,7 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    await page.locator('.sip-line-actions button').first().click();await form.locator('[name=extension]').fill('005');await page.locator('#sip-lines-save').click();await form.waitFor({state:'hidden'});assert.equal(writes[1].password,null);assert.ok(writes[1].line_id);
    const overflow=await page.locator('#sip-lines-card').evaluate(e=>e.scrollWidth-e.clientWidth);assert.ok(overflow<=1);
    if(process.env.CM_APPEARANCE_SCREENSHOT_DIR)await page.locator('#sip-lines-card').screenshot({path:path.join(process.env.CM_APPEARANCE_SCREENSHOT_DIR,`sip-saved-${width}.png`)});
-   assert.deepEqual(data.errors,[]);reports.push({width,writes:writes.length,formOverflow,overflow,leadingZerosKept:true,providerRequests:0});await page.close();
+   assert.deepEqual(data.errors,[]);reports.push({width,writes:writes.length,formOverflow,overflow,leadingZerosKept:true,invalidSipBlocked:true,providerRequests:0});await page.close();
   }
   console.log(JSON.stringify({browser:browser.version(),reports},null,2));
  }finally{await browser.close();}

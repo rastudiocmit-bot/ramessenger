@@ -185,7 +185,7 @@ class SipLineTests(unittest.TestCase):
 class SipHttpTests(unittest.TestCase):
     setUp = SipLineTests.setUp
     data = SipLineTests.data
-    def request(self, payload, csrf=True):
+    def request(self, payload=None, csrf=True, *, method='PUT', suffix=''):
         from center_messenger.main import create_app
         from center_messenger.config import Settings
         app = create_app(Settings(public_url='https://cabinet.example.test'))
@@ -193,11 +193,11 @@ class SipHttpTests(unittest.TestCase):
         self.accounts.settings = SimpleNamespace(cookie_name='session')
         self.accounts.authenticate = lambda raw: self.actor
         app.state.accounts = self.accounts; app.state.alfa = SimpleNamespace(vault=self.vault)
-        body = json.dumps(payload).encode(); path = f'/api/workspaces/{self.workspace}/integrations/novofon/sip-lines'
+        body = json.dumps(payload).encode(); path = f'/api/workspaces/{self.workspace}/integrations/novofon/sip-lines{suffix}'
         async def run():
             headers = [(b'content-type', b'application/json'), (b'origin', b'https://cabinet.example.test')]
             if csrf: headers.append((b'x-csrf-token', csrf_token(self.actor.raw_session).encode()))
-            scope = {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'}, 'http_version': '1.1', 'method': 'PUT', 'scheme': 'https', 'path': path, 'raw_path': path.encode(), 'query_string': b'', 'headers': headers, 'client': ('test', 1), 'server': ('cabinet.example.test', 443)}
+            scope = {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'}, 'http_version': '1.1', 'method': method, 'scheme': 'https', 'path': path, 'raw_path': path.encode(), 'query_string': b'', 'headers': headers, 'client': ('test', 1), 'server': ('cabinet.example.test', 443)}
             messages = []; delivered = False
             async def receive():
                 nonlocal delivered
@@ -219,3 +219,28 @@ class SipHttpTests(unittest.TestCase):
         status, body = self.request(self.payload())
         self.assertEqual(status, 200); self.assertNotIn(PASSWORD, body); self.assertNotIn('password_ciphertext', body)
         self.assertEqual(json.loads(body)['lines'][0]['sip_number'], '0001234')
+
+    def test_real_http_staff_read_and_delete_cannot_access_other_employee_profiles(self):
+        self.request(self.payload())
+        status, body = self.request(self.payload(expected_version=1, member_id=self.other, sip_number='0005678'))
+        self.assertEqual(status, 200); other_line = json.loads(body)['lines'][-1]['id']
+        self.accounts.role = 'operator'
+        status, body = self.request(method='GET')
+        self.assertEqual(status, 403)
+        status, body = self.request(method='GET', suffix='/mine')
+        self.assertEqual(status, 200); self.assertEqual(len(json.loads(body)['lines']), 1)
+        for excluded in ('0005678', str(self.other), '@example.test', PASSWORD, 'password_ciphertext'):
+            self.assertNotIn(excluded, body)
+        before = copy.deepcopy(self.db.rows)
+        status, body = self.request({'expected_version': 2}, method='DELETE', suffix='/' + other_line)
+        self.assertEqual(status, 403); self.assertEqual(self.db.rows, before)
+
+    def test_real_http_delete_checks_csrf_and_version_before_removing_line(self):
+        status, body = self.request(self.payload()); line = json.loads(body)['lines'][0]['id']
+        before = copy.deepcopy(self.db.rows)
+        for payload, csrf, expected in (({'expected_version': 1}, False, 403), ({'expected_version': 0}, True, 409), ({'expected_version': True}, True, 422)):
+            status, body = self.request(payload, csrf, method='DELETE', suffix='/' + line)
+            self.assertEqual(status, expected); self.assertEqual(self.db.rows, before)
+        status, body = self.request({'expected_version': 1}, method='DELETE', suffix='/' + line)
+        self.assertEqual(status, 200); self.assertEqual(json.loads(body)['lines'], [])
+        self.assertEqual(json.loads(body)['version'], 2); self.assertNotIn(PASSWORD, body)
