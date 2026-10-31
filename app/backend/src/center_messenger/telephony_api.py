@@ -6,6 +6,7 @@ from pydantic import Field
 
 from center_messenger.accounts_api import identity
 from center_messenger.auth_security import AuthError,InputModel
+from center_messenger.telephony_agent import TelephonyAgent
 
 router=APIRouter(prefix='/api/workspaces/{workspace_id}')
 
@@ -21,6 +22,40 @@ def service(request):
     value=getattr(request.app.state,'telephony',None)
     if value is None:raise AuthError(503,'Телефония временно недоступна.')
     return value
+
+
+class PhoneAgentInput(InputModel):
+    expected_version:int=Field(ge=0,strict=True)
+    name:str=Field(min_length=1,max_length=120)
+    model:str=Field(min_length=1,max_length=80)
+    recognition_provider:str=Field(default='yandex',max_length=20)
+    prompt:str=Field(min_length=1,max_length=4000)
+    temperature:float=Field(default=0.1,ge=0,le=1)
+
+
+class PhoneAgentTest(InputModel):
+    expected_version:int=Field(ge=1,strict=True)
+    text:str=Field(min_length=1,max_length=20000)
+
+
+def agent_service(request):
+    value=service(request)
+    return TelephonyAgent(value.accounts,value.vault)
+
+
+@router.get('/integrations/novofon/agent')
+def phone_agent(workspace_id:UUID,request:Request):
+    return agent_service(request).settings(identity(request),workspace_id)
+
+
+@router.put('/integrations/novofon/agent')
+def save_phone_agent(workspace_id:UUID,model:PhoneAgentInput,request:Request):
+    return agent_service(request).save(identity(request,mutation=True),workspace_id,model.model_dump())
+
+
+@router.post('/integrations/novofon/agent/test')
+def test_phone_agent(workspace_id:UUID,model:PhoneAgentTest,request:Request):
+    return agent_service(request).test(identity(request,mutation=True),workspace_id,model.model_dump())
 
 
 @router.get('/integrations/novofon/loader')

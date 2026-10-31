@@ -73,7 +73,8 @@
     "app/backend/src/center_messenger/novofon_client.py": "f23dd333cba78292025d3ffe651d08fdec34ce03df0b89dbcf889ad9e1a6ce89",
     "app/backend/src/center_messenger/novofon_quota.py": "b610e120d7cd147a6821b2e3760355e3a5c3c7c14e3c935e37a0caa4f8716333",
     "app/backend/src/center_messenger/novofon_service.py": "6dcf599722cb0c8e90eb9e77614cdfef3a2fe7610e100d5f47376660159aad25",
-    "app/backend/src/center_messenger/telephony_api.py": "cb374541e800c2993718b7999d906b3f9f9240bd4514e6f736d985642bc83a80",
+    "app/backend/src/center_messenger/telephony_agent.py": "f175418101c33b65cc876a4de73d0603d8dbb30de29477e52c314877230b5e82",
+    "app/backend/src/center_messenger/telephony_api.py": "60d30ddc89d191c0a0cb7e076426082a2b621f77fac9c60edd51705f80b4dafa",
     "app/backend/src/center_messenger/telephony_audio.py": "7b9255e2dfafd62e0a9b45e6e1ea96488d1d958e876f1c14dbe7e468219011a9",
     "app/backend/src/center_messenger/telephony_calls.py": "0f05040d63d131de5f15ce55d28f54418c52b088cea4c4e4b22a41bef2450525",
     "app/backend/src/center_messenger/telephony_import.py": "a8ae307e9a2e6f7d5100b4de5f276fcb4d1b9251fdefe439d5068ab63d3a04aa",
@@ -95,7 +96,7 @@
     "scripts/prepare_telephony_release.py": "ca256ed2bcd84c85ec1c85e7c86aafa843f46467551bb3c14e1ff339f027aab1",
     "scripts/prepare_telephony_update.py": "28bce3a9f837d5661bb97e2845aa96c5d742b9ebafbc7e75803139f5458aff78",
     "scripts/telephony_runtime.py": "0673dcee6a41b5a868f2f8d355cdab80fccc1e73cb699ac313ac08723d11554a",
-    "tests/run_max_compatibility.py": "9e654aa598ef76207e7660c51932490f284ab7a8d059933d8b88ca2c53fe0483",
+    "tests/run_max_compatibility.py": "a89f2aae82e9ae1852fe8c736118ffa762426119891e960d0b6b63a88b187644",
     "tests/test_compose_recipient.py": "e32ecd4c6c9613871b8354e02d433a9ad3b075f6541dc13857cb972f76aba4a8",
     "tests/test_github_deploy_rollback.py": "219e5ea565d5306b11b5c748acfd579bd17d3f3fef2146d70932f3542c84f5f0",
     "tests/test_history_audit.py": "86d404e24da7df39f2335a958e9e8b166bc805e0b7aaf2cbe42998bc6ee04d5e",
@@ -114,6 +115,8 @@
     "tests/test_novofon_quota.py": "a4b737cccd8a773d70ea188b17f0dbbe7ceb0ab1ddcab27ba8b71bd77f352d1e",
     "tests/test_novofon_quota_database.py": "b496940f67c9efe94afd1cfa915d9ea403a90485ead6c244884f77a364fd0061",
     "tests/test_support_access.py": "20635c574d605a7bcab75bc46571af1962b3acabfdfa57cf954fee7fbf3430c7",
+    "tests/test_telephony_agent.py": "eb7a90d88e16aca32030a6fb900afe22ac8dd2f8366316904f98450231a6f183",
+    "tests/test_telephony_agent_database.py": "5d5d9a39055412dd13f10492b214379f86a5be833c8e98c171b1b54d3a9417bc",
     "tests/test_telephony_calls.py": "d09ae880dbec4d786ac726b49743142a99b2790651f1131f92defbe3bcd1509b",
     "tests/test_telephony_database.py": "7ad7b2c90713d92bd6e4236d9a97d00b97a514cf4426c3130c79259757201078",
     "tests/test_telephony_runtime.py": "82d89321098cf62b1cbfbc6673c84d61fb1479c2f78fab9d915d5771e660a42c"
@@ -152,7 +155,9 @@
     "tests/test_telephony_calls.py",
     "tests/test_telephony_database.py",
     "tests/test_novofon_quota.py",
-    "tests/test_novofon_quota_database.py"
+    "tests/test_novofon_quota_database.py",
+    "tests/test_telephony_agent.py",
+    "tests/test_telephony_agent_database.py"
   ],
   "version": 1,
   "worker_runtime_contract": "telephony-calls-schema-v1"

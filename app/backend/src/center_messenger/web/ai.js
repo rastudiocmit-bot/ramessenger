@@ -2,6 +2,7 @@
 // Connections → service settings: Yandex Cloud and DeepSeek keys and the workspace's AI agents.
 // Owners and administrators only; the server enforces the same rule.
 window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
+  const phoneAgent = window.CenterTelephonyAgent?.({ $, state, api, notice, confirm });
   const form = $("#ai-settings-form"), agentForm = $("#ai-agent-form"), list = $("#ai-agent-list");
   const dsForm = $("#ai-deepseek-form"), routesForm = $("#ai-routes-form"), voiceForm = $("#ai-voice-options-form");
   const verifying = new Map();
@@ -123,6 +124,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   }
 
   async function load() {
+    void phoneAgent?.load();
     if (!admin() || !state.workspace) return;
     const mine = ++seq; verifying.clear();
     try {

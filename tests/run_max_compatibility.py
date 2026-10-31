@@ -28,9 +28,11 @@ CASES = (
     'test_novofon_connection.NovofonServiceTests',
     'test_telephony_calls',
     'test_novofon_quota.QuotaTests',
+    'test_telephony_agent.TelephonyAgentTests',
 )
 
 DATABASE_CASES = (
+    'test_telephony_agent_database.TelephonyAgentDatabaseTests',
     'test_novofon_quota_database.QuotaDatabaseTests',
     'test_novofon_connection.NovofonDatabaseTests',
     'test_telephony_database.TelephonyDatabaseTests',
