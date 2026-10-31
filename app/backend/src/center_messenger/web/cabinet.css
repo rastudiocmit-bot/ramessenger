@@ -2629,3 +2629,33 @@ body:has(#cabinet[hidden]){overflow:auto}
 .directory-call-history{display:flex;flex-direction:column;gap:12px;margin-top:18px;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}.directory-call-history>h3{margin:0;font-size:15px}
 
 .call-ai{margin-top:12px;border-top:1px solid var(--line);padding-top:10px;display:grid;gap:9px}.call-ai-status{font-size:12px;color:var(--muted);margin:0;min-height:1.6em}.call-ai-summary{font-size:13px;line-height:1.65;white-space:pre-wrap;margin:0;overflow-wrap:anywhere}.call-ai small{font-size:11px;color:var(--muted);line-height:1.5}.call-ai details{font-size:12px;line-height:1.6}.call-ai details p{white-space:pre-wrap;overflow-wrap:anywhere}.call-ai textarea{box-sizing:border-box;width:100%;resize:vertical;min-height:100px}.call-ai .btn{min-height:40px;justify-self:start}.call-ai-transcript>div{max-height:340px;overflow:auto;overscroll-behavior:contain}
+
+/* Telephone-agent fields and archive controls share the connection card rhythm. */
+#pane-connections #connections-agents-view>.settings-card+.settings-card{margin-top:16px}
+#pane-connections :is(#telephony-agent-card,#telephony-processing-card)>.card-b{display:grid;gap:16px;padding-top:0}
+#pane-connections :is(#telephony-agent-card,#telephony-processing-card) .card-b>:is(.form-note,.connection-help){margin:0}
+#telephony-agent-form{display:grid;gap:16px;min-width:0}
+#telephony-agent-card .fld{display:flex;flex-direction:column;align-items:stretch;gap:6px;margin:0;min-width:0;font-size:12px;line-height:1.5}
+#telephony-agent-card .fld>small{display:block;margin:0;font-weight:400;overflow-wrap:anywhere}
+#telephony-agent-card .fld>:is(input,select){display:block;width:100%;margin:0;font-size:13px;font-weight:400}
+#telephony-agent-card textarea{display:block;box-sizing:border-box;width:100%;min-width:0;min-height:180px;margin:0;padding:12px 14px;border:1px solid var(--line);border-radius:11px;resize:vertical;font:inherit;font-size:13px;font-weight:400;line-height:1.65;color:var(--ink);background:var(--surface-2)}
+#telephony-agent-card textarea:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+#telephony-agent-form>.telephony-loader-fields{margin:0;gap:16px;align-items:start}
+#telephony-agent-form>.telephony-agent-temperature{width:100%;max-width:320px}
+#telephony-agent-card #telephony-agent-sample{min-height:140px}
+#telephony-agent-card .connection-help>.fld{margin:0 0 12px}
+#telephony-agent-card #telephony-agent-history p{white-space:pre-wrap;overflow-wrap:anywhere}
+#pane-connections :is(#telephony-agent-card,#telephony-processing-card) .btn-row{gap:10px;align-items:center}
+#pane-connections :is(#telephony-agent-card,#telephony-processing-card) .btn{height:auto;min-height:44px;padding:10px 16px;white-space:normal;line-height:1.45}
+#pane-connections :is(#telephony-agent-card,#telephony-processing-card) .card-b>:is(.form-note,.notice):empty{display:none}
+#telephony-processing-form{display:grid;gap:12px;min-width:0}
+#telephony-processing-form>:is(.check-label,.form-note){margin:0}
+#telephony-processing-form>.check-label{align-items:flex-start;line-height:1.55}
+#telephony-processing-form>.check-label input{flex:none;margin-top:3px}
+@media(max-width:640px){
+ #pane-connections :is(#telephony-agent-card,#telephony-processing-card) .connection-status{max-width:100%;white-space:normal;line-height:1.5}
+ #telephony-agent-form>.telephony-agent-temperature{max-width:none}
+ #pane-connections :is(#telephony-agent-card,#telephony-processing-card) .btn-row{align-items:stretch}
+ #pane-connections :is(#telephony-agent-card,#telephony-processing-card) .btn-row>.btn{flex:1 1 100%;width:100%}
+ #telephony-agent-card textarea{min-height:200px}
+}
