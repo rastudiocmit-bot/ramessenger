@@ -76,6 +76,7 @@ def public_report(report):
 class Novofon:
     def __init__(self, accounts, vault, client_factory=Client):
         self.accounts, self.vault, self.client_factory = accounts, vault, client_factory
+        self.calls = None
 
     @staticmethod
     def _row(db, workspace, lock=False):
@@ -148,6 +149,8 @@ class Novofon:
                            {'w': workspace, 'id': connection, 'c': cipher, 'h': data['sample_hours'], 'u': actor.user_id}).mappings().one_or_none()
                 if inserted is None:
                     raise AuthError(409, 'Подключение уже настроил другой администратор. Обновите настройки.')
+            if self.calls:
+                self.calls.credentials_changed(db,workspace,True)
             account_audit(db, 'novofon_settings_saved', user_id=actor.user_id, workspace_id=workspace)
             return self._public(self._row(db, workspace), workspace)
 
@@ -162,7 +165,9 @@ class Novofon:
                                 "check_token=NULL,check_until=NULL,checked_at=NULL,report='{}'::jsonb,"
                                 "updated_at=now(),updated_by=:u WHERE workspace_id=:w"),
                            {'w': workspace, 'u': actor.user_id})
-                account_audit(db, 'novofon_disconnected', user_id=actor.user_id, workspace_id=workspace)
+                if self.calls:
+                    self.calls.credentials_changed(db,workspace,False)
+            account_audit(db, 'novofon_disconnected', user_id=actor.user_id, workspace_id=workspace)
             return self._public(self._row(db, workspace), workspace)
 
     def verify(self, actor, workspace, expected_version, probe_recording=False):

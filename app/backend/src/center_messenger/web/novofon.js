@@ -3,6 +3,7 @@
 window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
   const form = $("#novofon-form"), key = form.elements.api_key, support = form.elements.support_secret, hours = form.elements.sample_hours;
   let saved = null, busy = false, generation = 0;
+  const loader = window.CenterTelephonyLoader?.({ $, state, api, notice });
   const current = context => context.generation === generation && context.workspace === state.workspace?.id && context.user === state.user?.id;
   const snapshot = () => ({ generation, workspace: state.workspace?.id, user: state.user?.id });
   const context = () => { generation++; return snapshot(); };
@@ -72,6 +73,7 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
     controls();
   }
   function reset() {
+    loader?.reset();
     generation++; saved = null; busy = false; form.reset(); key.type = "password";
     support.value = ""; support.type = "password";
     hours.querySelectorAll('[data-custom]').forEach(option => option.remove()); hours.value = "24";
@@ -94,6 +96,7 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
     finally { if (current(ctx)) { busy = false; controls(); } }
   }
   async function load() {
+    loader?.load();
     return run(async ctx => { const value = await api(endpoint(ctx), { timeoutMs: 10000 }); if (current(ctx)) render(value); });
   }
   async function verify(ctx, audio) {

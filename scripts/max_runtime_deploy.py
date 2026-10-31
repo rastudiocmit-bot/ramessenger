@@ -80,7 +80,7 @@ def update_for(root, source, sha):
         return None
     if plan['phase'] not in {'prepared', 'migrating'}:
         raise RuntimeError('MAX worker update requires explicit recovery/preparation')
-    if plan['sha'] != sha or plan['compose'] != digest(source / 'compose.yaml'):
+    if plan['sha'] != sha or plan.get('new_compose',plan['compose']) != digest(source / 'compose.yaml'):
         raise RuntimeError('MAX worker update is for a different source SHA/Compose')
     if (plan['compose'] != digest(root / 'compose.yaml') or plan['environment'] != digest(root / '.env')
             or plan['runtime_state'] != digest(root / PLAN)):
@@ -111,6 +111,10 @@ def plan_for(root, source, sha):
 
 def validate_transition(root, source):
     sha = run('git', '-C', str(source), 'rev-parse', 'HEAD')
+    if (root/UPDATE).exists():
+        update=update_for(root,source,sha)
+        if update and update.get('telephony_install'):
+            return
     if plan_for(root, source, sha) is None:
         raise RuntimeError('Compose changed: explicit MAX runtime transition required')
 
@@ -126,6 +130,8 @@ def verify_runtime_layout(root, source):
         return
     verify_pin(root)
     pending = update_for(root, source, run('git', '-C', str(source), 'rev-parse', 'HEAD')) if (root / UPDATE).exists() else None
+    import telephony_runtime
+    telephony_runtime.verify(root,source,__import__(__name__),pending)
     contract = worker_contract(source)
     if contract and state.get('worker_runtime_contract') != contract and pending is None:
         raise RuntimeError('Reviewed MAX worker update must be explicitly prepared before this API release')
@@ -247,12 +253,20 @@ def recover(root, promoter):
     print('MAX RUNTIME SPLIT ROLLED BACK; DATABASE PRESERVED', flush=True)
 
 
-def prepare_update(root, source, sha, expected_api, expected_max, expected_policy, schema_from=None):
+def prepare_update(root, source, sha, expected_api, expected_max, expected_policy, schema_from=None, install_telephony=False):
     if not re.fullmatch('[a-f0-9]{40}', sha) or run('git', '-C', str(source), 'rev-parse', 'HEAD') != sha:
         raise RuntimeError('Exact reviewed source SHA required')
     if digest(source / 'deploy/max-protection.json') != expected_policy:
         raise RuntimeError('Reviewed policy mismatch')
-    if digest(source / 'compose.yaml') != digest(root / 'compose.yaml'):
+    policy = json.loads((source / 'deploy/max-protection.json').read_text())
+    extra={}
+    if schema_from and (root/'telephony-runtime.json').exists():
+        raise RuntimeError('A schema change with installed telephony requires a separately reviewed three-process update')
+    if install_telephony:
+        if not schema_from:raise RuntimeError('Initial telephony installation requires its exact schema plan')
+        import telephony_runtime
+        extra=telephony_runtime.prepare(root,source,policy,__import__(__name__))
+    elif digest(source / 'compose.yaml') != digest(root / 'compose.yaml'):
         raise RuntimeError('Worker update cannot change Compose or the database schema')
     state, worker = verify_pin(root)
     api = inspect('center-messenger-api-1')
@@ -284,6 +298,9 @@ def prepare_update(root, source, sha, expected_api, expected_max, expected_polic
         'runtime_state':digest(root / PLAN), 'schema_revision':revision}
     if transition:
         plan['schema_transition'] = transition
+    plan.update(extra)
+    if install_telephony:
+        telephony_runtime.install_key(root,__import__(__name__))
     save_update(root, plan)
     state_path = root / 'local-build-state.json'
     if state_path.exists():
@@ -362,6 +379,12 @@ def promote_update(root, source, sha, old_api, new_api, backup, promoter):
     archive = Path(tempfile.mkdtemp(prefix='max-update-' + sha[:12] + '-', dir=root / 'rollback'))
     old_env, old_state = (root / '.env').read_bytes(), (root / PLAN).read_bytes()
     next_env = with_image(old_env, max_image)
+    if plan.get('telephony_install'):
+        import telephony_runtime
+        telephony_image=telephony_runtime.tag(__import__(__name__),image_id,sha)
+        next_env=telephony_runtime.environment(next_env,telephony_image)
+        write(archive/'compose.yaml',(root/'compose.yaml').read_bytes())
+        plan['telephony_image']=telephony_image
     next_state = json.loads(old_state)
     next_state.update(worker_image=max_image, worker_id=image_id, worker_source_sha=sha,
                       worker_runtime_contract=worker_contract(source))
@@ -375,11 +398,18 @@ def promote_update(root, source, sha, old_api, new_api, backup, promoter):
     compose = ['docker','compose','-p','center-messenger','-f',str(root / 'compose.yaml')]
     try:
         write(root / '.env', next_env)
+        if plan.get('telephony_install'):
+            write(root/'compose.yaml',(source/'compose.yaml').read_bytes(),mode=0o644)
         env = dict(os.environ, CM_IMAGE=new_api, CM_MAX_IMAGE=max_image)
+        if plan.get('telephony_install'):env['CM_TELEPHONY_IMAGE']=telephony_image
         run(*compose, 'config', '--quiet', env=env)
         run(*compose, 'up', '-d', '--no-deps', '--no-build', '--force-recreate', 'max-worker', env=env, timeout=300)
         if not wait_worker(max_image):
             raise RuntimeError('Updated MAX worker did not become ready')
+        if plan.get('telephony_install'):
+            run(*compose,'up','-d','--no-deps','--no-build','telephony-worker',env=env,timeout=300)
+            if not telephony_runtime.wait(__import__(__name__),telephony_image):
+                raise RuntimeError('Telephony worker did not become ready')
         if plan.get('schema_transition'):
             promoter.deploy_api_with_rollback(old_api, new_api, backup,
                 before_rollback=lambda: restore_schema(root, plan))
@@ -387,6 +417,9 @@ def promote_update(root, source, sha, old_api, new_api, backup, promoter):
             promoter.deploy_api_with_rollback(old_api, new_api, backup)
         if not wait_worker(max_image):
             raise RuntimeError('Updated MAX worker stopped during API promotion')
+        if plan.get('telephony_install'):
+            if not telephony_runtime.wait(__import__(__name__),telephony_image):raise RuntimeError('Telephony worker stopped during API promotion')
+            telephony_runtime.complete(root,source,sha,telephony_image,image_id,__import__(__name__))
         write(root / PLAN, next_body)
         plan.update(phase='complete')
         save_update(root, plan)
@@ -422,7 +455,7 @@ def recover_update(root, promoter):
     archive = Path(plan['archive'])
     if archive.parent != root / 'rollback' or archive.is_symlink() or not archive.name.startswith('max-update-' + plan['sha'][:12] + '-'):
         raise RuntimeError('Unexpected MAX update recovery directory')
-    if (digest(root / 'compose.yaml') != plan['compose'] or
+    if (digest(root / 'compose.yaml') not in {plan['compose'],plan.get('new_compose',plan['compose'])} or
             digest(root / '.env') not in {plan['environment'], plan['new_environment']} or
             digest(root / PLAN) not in {plan['runtime_state'], plan['new_runtime_state']}):
         raise RuntimeError('MAX configuration changed outside its update; manual review required')
@@ -436,6 +469,11 @@ def recover_update(root, promoter):
             raise RuntimeError('Unexpected MAX worker identity during update recovery')
     if 'center-messenger-api-1' in present and inspect('center-messenger-api-1')['Config']['Image'] not in {plan['old_api'], plan['new_api']}:
         raise RuntimeError('Unexpected API identity during MAX update recovery')
+    if plan.get('telephony_install'):
+        if digest(archive/'compose.yaml')!=plan['compose']:raise RuntimeError('Original Compose recovery checksum mismatch')
+        import telephony_runtime
+        telephony_runtime.remove_new(root,plan,__import__(__name__))
+        write(root/'compose.yaml',(archive/'compose.yaml').read_bytes(),mode=0o644)
     write(root / '.env', (archive / 'environment').read_bytes())
     # Old images use exact schema readiness; downgrade before waiting for them.
     restore_schema(root, plan)
@@ -503,6 +541,7 @@ if __name__ == '__main__':
     parser.add_argument('--expected-api', required=True)
     parser.add_argument('--expected-policy', required=True)
     parser.add_argument('--update-worker', action='store_true')
+    parser.add_argument('--install-telephony',action='store_true')
     parser.add_argument('--expected-max')
     parser.add_argument('--schema-from', help='Explicit reviewed source revision for a paired schema update')
     options = parser.parse_args()
@@ -514,6 +553,6 @@ if __name__ == '__main__':
             if not options.expected_max:
                 parser.error('--update-worker requires --expected-max')
             prepare_update(guard.ROOT, options.source.resolve(), options.sha, options.expected_api,
-                           options.expected_max, options.expected_policy, options.schema_from)
+                           options.expected_max, options.expected_policy, options.schema_from, options.install_telephony)
         else:
             prepare(guard.ROOT, options.source.resolve(), options.sha, options.expected_api, options.expected_policy)

@@ -267,6 +267,8 @@ def main(preview, *, verified_source=None, compatibility=None, helper_root=None)
             "-p","test_support_access.py",cwd=src,timeout=120)
         run("python3","-m","unittest","discover","-s","tests",
             "-p","test_max_runtime_deploy.py",cwd=src,timeout=120)
+        run("python3","-m","unittest","discover","-s","tests",
+            "-p","test_telephony_runtime.py",cwd=src,timeout=120)
         announce("BUILD",target)
         subprocess.run(["docker","build","--platform","linux/amd64","--build-arg","CM_BUILD_SHA="+sha,"-t",target,"."],
                        cwd=src,check=True,timeout=1500)

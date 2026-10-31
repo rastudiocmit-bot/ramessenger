@@ -31,6 +31,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   let listGeometry = null, listViewportFrame = 0, listViewportWidth = 0, listRenderRevision = 0, listMeasureRevision = 0, lastViewportKey = "";
   let listTopSpacer = null, listBottomSpacer = null;
   const cache = new Map();
+  const callHistory = window.CenterCallHistory?.({state,api,node,context:() => active() ? selected : null,changed:id => { const data = cache.get(id); if (data && selected === id) { data.messageRevision++; renderMessages(id); } }});
   const active = () => state.user && state.workspace && state.pane === "messages";
   const valid = (epoch, gen) => state.epoch === epoch && generation === gen;
   const base = () => `/workspaces/${state.workspace.id}`;
@@ -54,6 +55,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     for (const child of [...parent.children]) if (!retained.has(child)) child.remove();
   }
   function reset() {
+    callHistory?.reset();
     stopStream(); bootstrapBusy = false; notifyAgain = false;
     streamVersion = null; lastViewVersion = null;
     bulkSeq += 1; bulkOperation = null; bulkLoading = false; bulkBusy = false;
@@ -680,7 +682,8 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     renderHistoryControls(data, { preserve: false });
     const existing = new Map(history.dataset.conversation === id ? [...history.children].map(child => [child.dataset.key, child]) : []);
     const wanted = []; let day = "";
-    const messages = [...data.messages.values()].sort(compareMessages);
+    const callControls = callHistory?.controls(id); if (callControls) wanted.push(callControls);
+    const messages = [...data.messages.values(), ...(callHistory?.messages(id) || [])].sort(compareMessages);
     // Each message that went out answers only the nearest earlier failed copy of its text.
     const resentBy = new Map(), waiting = new Map();
     for (const m of messages) {
@@ -709,6 +712,9 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
       if (retained?.messageKey === messageKey) {
         if (message.actor_type !== "automation") { retained.classList.toggle("first", first); retained.classList.toggle("last", !grouped); }
         wanted.push(retained); continue;
+      }
+      if (message.actor_type === "call") {
+        const bubble = callHistory.render(message.call,id); bubble.dataset.id = message.id; bubble.dataset.key = key; bubble.messageKey = messageKey; wanted.push(bubble); continue;
       }
       if (message.actor_type === "automation") {
         const bubble = node("div", undefined, "chat-bubble system sys"); bubble.dataset.id = message.id;
@@ -880,6 +886,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
     reconcilePending(data);
     renderMessages(id, { bottom: mode === "initial" || result.reset, older: mode === "older" && !result.reset }); renderList();
     refreshIdentityDetails();
+    callHistory?.refresh(id);
     if (result.more_changes && mode !== "older") await loadHistoryPage(id);
   }
   async function select(id, mobile = true, preparedHistory = null, deferHistory = false) {

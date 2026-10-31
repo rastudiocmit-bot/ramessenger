@@ -29,8 +29,9 @@ class Settings(BaseSettings):
     trust_proxy_ip: bool = False
     crm_sync_worker: bool = False
     max_worker: bool = False
-    runtime_role: Literal['combined', 'api', 'max'] = 'combined'
+    runtime_role: Literal['combined', 'api', 'max', 'telephony'] = 'combined'
     max_worker_key_file: Path | None = None
+    telephony_worker_key_file: Path | None = None
     db_pool_size: int = Field(default=6, ge=1, le=8)
     db_max_overflow: int = Field(default=2, ge=0, le=3)
     session_hours: int = Field(default=1200, ge=1, le=8760)

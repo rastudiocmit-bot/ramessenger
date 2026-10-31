@@ -30,6 +30,7 @@ from uuid import uuid4
 ROOT = Path('/opt/center-messenger-github')
 TRUST = Path('/etc/ramessenger-max-guard')
 API, MAX, DB = 'center-messenger-api-1', 'center-messenger-max-worker-1', 'center-messenger-db-1'
+TELEPHONY = 'center-messenger-telephony-worker-1'
 PROJECT = 'center-messenger'
 GIB = 1024 ** 3
 RESERVE = 3 * GIB
@@ -251,7 +252,8 @@ AUDIT_SQL = """SELECT json_build_object(
 
 def audit(runner, root=ROOT, trust=None):
     trust = TRUST if trust is None else trust
-    containers = {name: inspect(runner, name) for name in (API, MAX, DB)}
+    runtime_names=[API,MAX,DB]+([TELEPHONY] if (root/'telephony-runtime.json').exists() else [])
+    containers = {name: inspect(runner, name) for name in runtime_names}
     issues = []
     for name, container in containers.items():
         if container['State']['Status'] != 'running' or container['State'].get('Health', {}).get('Status') != 'healthy':
@@ -267,6 +269,12 @@ def audit(runner, root=ROOT, trust=None):
             if line.startswith('CM_MAX_IMAGE=')]
     if pins != [worker['Config']['Image']]:
         issues.append('CM_MAX_IMAGE disagrees')
+    if TELEPHONY in containers:
+        phone=json.loads((root/'telephony-runtime.json').read_text())
+        item=containers[TELEPHONY]
+        pins=[line.split('=',1)[1].strip() for line in (root/'.env').read_text().splitlines() if line.startswith('CM_TELEPHONY_IMAGE=')]
+        if phone.get('phase')!='complete' or phone.get('worker_id')!=item['Image'] or pins!=[item['Config']['Image']]:
+            issues.append('Telephony image pin disagrees')
     generation = (trust / 'active').resolve(strict=True)
     if generation.parent != trust or not re.fullmatch('[a-f0-9]{64}', generation.name):
         raise BackupError('Unexpected installed MAX guard location')
@@ -447,9 +455,10 @@ class FullBackup:
                 raise BackupError('Legacy deployment owner is active: ' + unit)
         names = self.runner.run(['docker', 'ps', '-a', '--filter', 'label=com.docker.compose.project=' + PROJECT,
                                  '--format', '{{.Names}}']).splitlines()
-        if set(names) != {API, MAX, DB}:
+        expected={API,MAX,DB}|({TELEPHONY} if (ROOT/'telephony-runtime.json').exists() else set())
+        if set(names) != expected:
             raise BackupError('Unexpected project containers; inspect inventory first')
-        self.containers = {name: inspect(self.runner, name) for name in (API, MAX, DB)}
+        self.containers = {name: inspect(self.runner, name) for name in [API,MAX,DB]+([TELEPHONY] if TELEPHONY in expected else [])}
         for name, container in self.containers.items():
             if container['State']['Status'] != 'running' or container['State'].get('Health', {}).get('Status') != 'healthy':
                 raise BackupError('Project container is not healthy: ' + name)

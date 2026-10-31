@@ -41,6 +41,8 @@ from center_messenger.max_connections import MaxConnections
 from center_messenger.messaging import Messaging
 from center_messenger.novofon_api import router as novofon_router
 from center_messenger.novofon_service import Novofon
+from center_messenger.telephony_calls import TelephonyCalls
+from center_messenger.telephony_api import router as telephony_router
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ def create_app(
     max_client_factory=MaxClient,
 ) -> FastAPI:
     config = settings or Settings()
-    if config.runtime_role == 'max':
+    if config.runtime_role in {'max','telephony'}:
         raise ValueError('MAX runtime must use center_messenger.max_worker:app')
 
     @asynccontextmanager
@@ -96,6 +98,9 @@ def create_app(
             else None
         )
         app.state.chats = ChatReader(app.state.messaging) if app.state.messaging else None
+        app.state.telephony = TelephonyCalls(app.state.accounts,app.state.alfa.vault,app.state.alfa,app.state.chats,config) if app.state.alfa else None
+        if app.state.novofon:
+            app.state.novofon.calls = app.state.telephony
         app.state.loader = build_loader(app.state, config)
         app.state.loader.start()
         try:
@@ -127,6 +132,7 @@ def create_app(
     app.include_router(ai_router)
     app.include_router(tasks_router)
     app.include_router(novofon_router)
+    app.include_router(telephony_router)
     app.include_router(max_hooks)
     web = Path(__file__).with_name("web")
     app.mount("/assets", StaticFiles(directory=web), name="assets")

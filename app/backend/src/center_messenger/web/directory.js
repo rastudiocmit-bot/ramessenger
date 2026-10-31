@@ -7,6 +7,8 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   const cache = new Map();
   const contactRequests = new Map();
   const renderSavedCard = window.CenterDirectoryCard({ node, date });
+  const callTimeline = window.CenterCallHistory?.({state,api,node,sourcePath:"directory",context:() => active() && $("#directory-contact-dialog")?.open ? selected : null,changed:id => renderContactCalls(id)});
+  $("#directory-contact-dialog")?.addEventListener("close", () => callTimeline?.reset());
   const active = () => state.user && state.workspace && state.pane === "clients";
   const readonly = () => !["owner", "admin"].includes(state.workspace?.role);
   const path = () => `/workspaces/${state.workspace.id}/${readonly() ? "chat-contacts" : "directory"}`;
@@ -21,6 +23,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
     $("#directory-detail").replaceChildren(blank);
   }
   function reset() {
+    callTimeline?.reset();
     generation += 1; listRequest += 1; cardRequest += 1;
     clearTimeout(timer); clearTimeout(searchTimer); cache.clear(); contactRequests.clear();
     status = null; snapshot = null; items = []; page = 0; total = 0; more = false; actionBusy = false; listBusy = false;
@@ -188,6 +191,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
     finally { if (contactRequests.get(key) === request) contactRequests.delete(key); }
   }
   async function selectContact(id, mobile = true) {
+    callTimeline?.pause();
     const epoch = state.epoch, gen = generation, seq = ++detailRequest;
     selected = id; renderList();
     if (mobile) $("#directory-layout").classList.add("has-selection");
@@ -204,6 +208,27 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   }
   function renderDetail(contact) {
     $("#directory-detail").replaceChildren(renderSavedCard(contact));
+    if (callTimeline && selected) {
+      const section = node("section", undefined, "directory-call-history"); section.append(node("h3", "Звонки"), node("p", "Читаем сохранённые звонки…", "muted")); $("#directory-detail").append(section);
+      if (callTimeline.messages(selected).length) renderContactCalls(selected);
+      callTimeline.refresh(selected,false,true);
+    }
+  }
+  function renderContactCalls(id) {
+    if (selected !== id || !$("#directory-contact-dialog")?.open) return;
+    const section = $("#directory-detail .directory-call-history"); if (!section) return;
+    const retained = new Map([...section.querySelectorAll(".call-event[data-call-id]")].map(row => [row.dataset.callId,row]));
+    const wanted = [section.querySelector("h3") || node("h3", "Звонки")];
+    const controls = callTimeline.controls(id); if (controls) wanted.push(controls);
+    const calls = callTimeline.messages(id).sort((a,b) => Date.parse(b.occurred_at)-Date.parse(a.occurred_at));
+    if (!calls.length) wanted.push(node("p", "Сохранённых звонков с этим номером пока нет.", "muted"));
+    for (const item of calls) {
+      const key = JSON.stringify(item.call), old = retained.get(item.call.id);
+      if (old?.callKey === key) wanted.push(old);
+      else { old?.querySelector("audio")?.pause(); const row = callTimeline.render(item.call,id); row.callKey = key; wanted.push(row); }
+    }
+    for (const row of retained.values()) if (!wanted.includes(row)) row.querySelector("audio")?.pause();
+    section.replaceChildren(...wanted);
   }
   async function openCards(id) {
     const epoch = state.epoch, gen = generation, seq = ++cardRequest;

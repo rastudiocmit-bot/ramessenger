@@ -49,7 +49,8 @@ services:
       CM_MAX_WORKER: 'true'
       CM_RUNTIME_ROLE: api
       CM_MAX_WORKER_KEY_FILE: /run/secrets/max_worker_key
-    secrets: [db_app_password, owner_bootstrap_token, connection_master_key, max_worker_key]
+      CM_TELEPHONY_WORKER_KEY_FILE: /run/secrets/telephony_worker_key
+    secrets: [db_app_password, owner_bootstrap_token, connection_master_key, max_worker_key, telephony_worker_key]
     ports: ["127.0.0.1:8100:8000"]
     networks: [private]
     depends_on:
@@ -116,6 +117,49 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
+  telephony-worker:
+    # Pinned independently; ordinary API/MAX releases must not recreate it.
+    image: ${CM_TELEPHONY_IMAGE:?A reviewed telephony image must be pinned}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    command: ["uvicorn", "center_messenger.telephony_worker:app", "--factory", "--host", "0.0.0.0", "--port", "8002", "--workers", "1", "--no-access-log", "--no-proxy-headers"]
+    environment:
+      CM_ENVIRONMENT: production
+      CM_RUNTIME_ROLE: telephony
+      CM_CRM_SYNC_WORKER: 'false'
+      CM_MAX_WORKER: 'false'
+      CM_DB_HOST: db
+      CM_DB_NAME: center_messenger
+      CM_DB_USER: cm_app
+      CM_EXPECTED_DB_ROLE: cm_app
+      CM_DB_PASSWORD_FILE: /run/secrets/db_app_password
+      CM_DB_POOL_SIZE: '2'
+      CM_DB_MAX_OVERFLOW: '0'
+      CM_CONNECTION_MASTER_KEY_FILE: /run/secrets/connection_master_key
+      CM_TELEPHONY_WORKER_KEY_FILE: /run/secrets/telephony_worker_key
+      CM_PUBLIC_URL: ${CM_PUBLIC_URL:-https://messenger.rastudio.org}
+    secrets: [db_app_password, connection_master_key, telephony_worker_key]
+    networks: [private]
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health/ready', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 96
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
   migrate:
     image: ${CM_IMAGE:-center-messenger:local}
     profiles: [tools]
@@ -144,6 +188,8 @@ volumes:
   database: {}
 
 secrets:
+  telephony_worker_key:
+    file: ./.secrets/telephony_worker_key
   max_worker_key:
     file: ./.secrets/max_worker_key
   db_owner_password:
