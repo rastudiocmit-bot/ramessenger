@@ -23,7 +23,9 @@ whether the signal is audible. Site/tab/OS mute cannot be read by the page.
 User-provided screenshots confirm an active SIP line, `sip.novofon.ru:5060`,
 inbound/outbound direction and a masked password. A historical “Softphone Web”
 registration is not evidence of a currently registered browser or a public WSS
-endpoint. No SIP password was received or copied into this repository.
+endpoint. No SIP password from the screenshots is copied into this repository
+or installed on the server by this release. Credentials are entered in the
+authenticated SIP-line form described below.
 
 The provided texts cover Data API, Call API and HTTP event notifications.
 Call API uses JSON-RPC and controls calls; these documents do not specify a
@@ -54,6 +56,54 @@ transport/codecs and registration/routing rules, WSS/TLS, ICE/NAT media handling
 staff authorization and a designated test number. Keep media independent from
 import/ASR work. No direct edits to the MAX/browser contour, new deploy owner or
 live firewall changes are part of this UI release.
+
+## Employee SIP profiles
+
+Connections → Novofon → “SIP-линии сотрудников” now lets an owner/admin add,
+edit and remove profiles assigned to actual active messenger member UUIDs.
+Names/emails and the provider's employee IDs are not used to guess identity.
+Members must first be added through the existing team/invitation workflow.
+
+Each profile has a SIP number (text, with leading zeros), optional internal
+extension (separate text), server, port, password, enabled flag and primary
+flag. Default server/port are `sip.novofon.ru:5060` from the supplied settings;
+no SIP transport, WSS host or registration is inferred from them. Up to five
+profiles can be assigned per member, 100 per workspace. A SIP account cannot
+be duplicated across employees. There is one primary enabled profile per
+employee when enabled profiles exist. Disabling/deleting it selects another
+enabled profile; inactive profiles are never selected as primary.
+
+The registry uses the established workspace-scoped settings pattern in
+`outbox_events`, its own topic `novofon-sip-profiles-v1`, and `published` state.
+It is not enqueued as a message or loader job. No migration or worker update
+is needed. Read-modify-write operations take a workspace advisory transaction
+lock (including first insert) and require an exact registry version. Member
+assignment is validated against active memberships under a shared row lock.
+
+Passwords are encrypted with AES-GCM and the existing connection master key,
+with separate AAD binding workspace, profile and assigned member. This is a
+separate `sl1` secret format; it does not reinterpret an API key as a password
+or weaken the connector vault's validation. Settings responses contain only
+`password_configured`; ciphertext and plaintext are never returned. Empty
+password preserves an unchanged profile's secret. Changing assignment, SIP
+number, server or port requires explicit password reentry. No provider request
+or automatic registration occurs during save.
+
+`GET /api/workspaces/{workspace}/integrations/novofon/sip-lines` and the PUT /
+DELETE mutations are owner/admin-only. `GET .../sip-lines/mine` checks active
+workspace/message access and returns only the actor's assigned metadata. The
+device-check window shows this list without any password. An observer has no
+calling permission. Disabling workspace membership immediately denies this
+read. Future call-session authorization must also check live membership,
+profile enablement and profile version before issuing any media credentials.
+
+UI checks include stale save replies, workspace changes, blank-secret edits,
+leading zeros, duplicate submissions, escaping and optimistic-version conflicts.
+Server checks use the real encryption and actual ASGI authentication/CSRF/input
+validation chain with synthetic accounts and storage. Chromium checks exercise
+add/edit on desktop and mobile. No production password, registration or call
+was used. Live persistence remains subject to the normal VPS deployment and
+its database/readiness checks; local storage tests do not replace that gate.
 
 Provider request prepared for the account owner (not sent):
 

@@ -2787,5 +2787,16 @@ body:has(#cabinet[hidden]){overflow:auto}
 :root[data-theme=dark] .phone-devices-dialog audio{color-scheme:dark}
 .phone-devices-answers{margin:8px 0 16px}.phone-devices-answers .text-button{min-height:40px;padding:6px 10px}
 .phone-devices-line-status{margin:18px 0 0;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);font-size:12px;line-height:1.5}
+.phone-device-profiles{margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}.phone-device-profiles[hidden]{display:none}.phone-device-profiles h3{font-size:14px;margin:0 0 8px}.phone-device-profiles p{margin:5px 0}
 .novofon-next>[data-phone-devices]{justify-self:start;padding:6px 0;min-height:40px}
 @media(max-width:560px){.phone-devices-dialog{padding:18px}.phone-devices-fields{grid-template-columns:minmax(0,1fr)}.phone-devices-dialog .btn-row>.btn{flex:1 1 170px}}
+.sip-lines-card{grid-column:1/-1}.sip-lines-list{display:grid;gap:10px;margin:18px 0}
+.sip-line-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px 16px;border:1px solid var(--line);border-radius:12px}
+.sip-line-copy{min-width:0;overflow-wrap:anywhere}.sip-line-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.sip-line-copy p{margin:5px 0;font-size:14px}.sip-line-copy small{font-size:12px;line-height:1.5;color:var(--muted)}
+.sip-line-badge{padding:3px 8px;border-radius:7px;background:var(--primary-tint);color:var(--primary-ink);font-size:11px;font-weight:600}
+.sip-line-actions{display:flex;flex:none;gap:12px;flex-wrap:wrap}.sip-line-actions button{min-height:40px;padding:3px 0}
+.sip-lines-form{margin-top:20px;padding-top:20px;border-top:1px solid var(--line)}.sip-lines-form h4{font-size:17px;margin:0 0 18px}.sip-lines-form[hidden]{display:none}
+.sip-lines-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 20px;margin-bottom:18px}.sip-lines-fields .fld{min-width:0;margin:0}.sip-lines-fields :is(input,select){width:100%;min-width:0}.sip-lines-fields small{line-height:1.5}
+.sip-password-field{grid-column:1/-1}.sip-password-field .novofon-key-row{display:flex;gap:12px;align-items:center}.sip-password-field button{flex:none;min-height:44px}
+.sip-line-switches{display:flex;align-items:center;gap:14px 24px;flex-wrap:wrap;margin:10px 0 20px}.sip-lines-footnote{padding-top:16px;margin:20px 0 0;border-top:1px solid var(--line);font-size:12px;line-height:1.6;color:var(--muted)}
+@media(max-width:700px){.sip-lines-fields{grid-template-columns:minmax(0,1fr)}.sip-line-row{flex-direction:column;gap:6px}.sip-lines-card .card-h{flex-wrap:wrap;gap:8px}.sip-line-switches{align-items:flex-start;flex-direction:column}}

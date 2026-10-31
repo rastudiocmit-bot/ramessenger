@@ -632,7 +632,7 @@
       } else showLogin(status.setup_required ? "Первичная настройка пока недоступна. Обратитесь к владельцу сервиса." : "");
     } catch (error) { showLogin(error.message); }
   }
-  const phoneDevices = window.CenterPhoneDevices ? window.CenterPhoneDevices({ state }) : null;
+  const phoneDevices = window.CenterPhoneDevices ? window.CenterPhoneDevices({ state, api }) : null;
   const directory = window.CenterDirectory({ $, state, api, node, show, notice, date });
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast: feedback, confirm, renderPane });
   window.CenterVoice({ $, state, api, toast: feedback });

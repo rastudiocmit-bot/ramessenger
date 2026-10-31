@@ -13,7 +13,7 @@ function setup(t,opts={}){
  Object.defineProperty(w.navigator,'mediaDevices',{value:{enumerateDevices:async()=>[{kind:'audioinput',deviceId:'mic-one',label:'Тестовый микрофон'},{kind:'audiooutput',deviceId:'speaker-one',label:'Тестовая гарнитура'}],getUserMedia:opts.microphone||async function(data){calls.push(['microphone',data]);return stream;},addEventListener(){}}});
  class Recorder extends w.EventTarget{static isTypeSupported(){return true}constructor(){super();this.state='inactive';this.mimeType='audio/webm'}start(){this.state='recording'}stop(){this.state='inactive';queueMicrotask(()=>{const e=new w.Event('dataavailable');e.data=new w.Blob(['synthetic-audio'],{type:this.mimeType});this.dispatchEvent(e);this.dispatchEvent(new w.Event('stop'));});}}
  w.MediaRecorder=Recorder;w.fetch=()=>{throw Error('No network allowed')};w.eval(source);
- const state={user:{id:'u1'},workspace:{id:'w1'},epoch:1},ui=w.CenterPhoneDevices({state});
+ const state={user:{id:'u1'},workspace:{id:'w1'},epoch:1},ui=w.CenterPhoneDevices({state,api:opts.api||null});
  t.after(()=>{ui.reset();w.close()});const $=s=>w.document.querySelector(s);
  return{w,$,state,ui,tracks,blobs,revoked,calls};
 }
@@ -53,4 +53,11 @@ test('a disconnected output is rolled back instead of silently reporting a new d
 test('a stale microphone result cannot enter a different workspace',async t=>{
  let done;const u=setup(t,{microphone:()=>new Promise(r=>done=r)});u.ui.open();u.$('[data-phone-check=microphone]').click();await flush();u.state.workspace={id:'w2'};u.state.epoch++;u.ui.reset();u.ui.open();
  done({getTracks:()=>u.tracks});await flush();assert.ok(u.tracks[0].stopped>0);assert.equal(u.blobs.size,0);assert.equal(u.$('.phone-devices-message').textContent,'');
+});
+test('assigned lines use the own-profile endpoint and cannot enter another workspace after reset',async t=>{
+ let done;const paths=[];const u=setup(t,{api:url=>{paths.push(url);return new Promise(r=>done=r)}});u.ui.open();assert.equal(paths[0],'/workspaces/w1/integrations/novofon/sip-lines/mine');
+ u.state.workspace={id:'w2'};u.state.epoch++;u.ui.reset();done({lines:[{sip_number:'000-old',enabled:true,primary:true}],may_call:true});await flush();assert.doesNotMatch(u.$('dialog').textContent,/000-old/);
+});
+test('staff sees own line metadata without a registration or calling claim',async t=>{
+ const u=setup(t,{api:async()=>({lines:[{sip_number:'000123',extension:'001',enabled:true,primary:true}],may_call:true})});u.ui.open();await flush();assert.match(u.$('.phone-device-profiles').textContent,/000123/);assert.match(u.$('.phone-device-profiles').textContent,/внутренний 001/);assert.match(u.$('.phone-devices-line-status').textContent,/ещё не подключены/);
 });

@@ -1,8 +1,9 @@
 "use strict";
 // Device checks stay in this tab. They never call Novofon, ASR or a customer.
-window.CenterPhoneDevices = ({ state }) => {
+window.CenterPhoneDevices = ({ state, api = null }) => {
   let generation = 0, stream = null, recorder = null, timer = null, clip = null;
   let output = "", busy = false, returnFocus = null, dialog = null;
+  let profilesRequest = 0, profileList = null;
   const create = (tag, text, cls) => {
     const e = document.createElement(tag); if (text) e.textContent = text;
     if (cls) e.className = cls; return e;
@@ -186,7 +187,9 @@ window.CenterPhoneDevices = ({ state }) => {
     heard.hidden = true; silent.hidden = true; answers.append(heard, silent);
     const privacy = create("p", "Тестовая запись хранится только в памяти этой вкладки и удаляется при закрытии проверки. В Новофон и ИИ она не отправляется.", "form-note");
     status = create("p", "Разговоры через браузер ещё не подключены. Проверка устройств не подтверждает работу телефонной линии.", "phone-devices-line-status");
-    dialog.append(heading, intro, fields, actions, message, player, answers, privacy, status); document.body.append(dialog);
+    const profiles = create("section", null, "phone-device-profiles"); profiles.hidden = !api;
+    profileList = create("div"); profiles.append(create("h3", "Мои SIP-линии"), profileList);
+    dialog.append(heading, intro, fields, actions, message, player, answers, privacy, profiles, status); document.body.append(dialog);
     dialog.addEventListener("cancel", e => { e.preventDefault(); close(); });
     dialog.addEventListener("close", () => { if (!dialog.open) cleanup(); });
     navigator.mediaDevices?.addEventListener?.("devicechange", () => { if (dialog.open) void enumerate(); });
@@ -196,9 +199,20 @@ window.CenterPhoneDevices = ({ state }) => {
     if (!dialog) build();
     if (dialog.open) return;
     cleanup(); returnFocus = document.activeElement; dialog.showModal(); void enumerate();
+    if (api) {
+      const request = ++profilesRequest, context = scope(), workspace = state.workspace.id;
+      const active = () => request === profilesRequest && context === scope() && dialog.open;
+      profileList.replaceChildren(create("p", "Получаем назначенные линии…", "form-note"));
+      api(`/workspaces/${workspace}/integrations/novofon/sip-lines/mine`, { timeoutMs: 10000 }).then(value => {
+        if (!active()) return; profileList.replaceChildren();
+        for (const line of value.lines || []) profileList.append(create("p", `${line.primary ? "Основная · " : ""}SIP ${line.sip_number}${line.extension ? ` · внутренний ${line.extension}` : ""} · ${line.enabled ? "Включена" : "Отключена"}`, "form-note"));
+        if (!value.lines?.length) profileList.append(create("p", "Линии не назначены. Администратор добавляет их в разделе «Подключения → Новофон».", "form-note"));
+        if (value.may_call === false) profileList.append(create("p", "Для вашей роли звонки недоступны.", "form-note"));
+      }).catch(() => { if (active()) profileList.replaceChildren(create("p", "Не удалось получить назначенные линии. Проверка звука доступна отдельно.", "form-note")); });
+    }
   }
   function reset() {
-    cleanup(); output = "";
+    cleanup(); output = ""; profilesRequest++; profileList?.replaceChildren();
     if (dialog?.open) dialog.close();
     if (input) { input.replaceChildren(new Option("Микрофон по умолчанию", "")); sink.replaceChildren(new Option("Динамик по умолчанию", "")); }
     returnFocus = null;
