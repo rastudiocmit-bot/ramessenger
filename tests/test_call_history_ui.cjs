@@ -10,6 +10,17 @@ function setup(t,api,options={}){
  w.eval(script);const ui=w.CenterCallHistory({state,api,node,...options,context:()=>selected,changed:()=>changes++});
  t.after(()=>{ui.reset();w.close();});return {w,state,ui,setSelected:id=>selected=id,changes:()=>changes};
 }
+test('play waits for the chosen output and rejects a stale context before starting',async t=>{
+ const s=setup(t,async()=>({calls:[],scope:'one'}));let release;s.state.prepareCallAudio=()=>new Promise(r=>release=r);
+ const bubble=s.ui.render(call,'chat-one');s.w.document.querySelector('#history').append(bubble);const audio=bubble.querySelector('audio');
+ bubble.querySelector('[data-call-action=play]').click();assert.equal(audio.playedByTest,undefined);
+ s.state.epoch++;s.ui.reset();release();await new Promise(r=>setImmediate(r));assert.equal(audio.playedByTest,undefined);
+});
+test('a missing chosen output is reported without playing through another speaker',async t=>{
+ const s=setup(t,async()=>({calls:[],scope:'one'}));s.state.prepareCallAudio=async()=>{const e=new Error('missing');e.name='AudioOutputError';throw e;};
+ const bubble=s.ui.render(call,'chat-one');s.w.document.querySelector('#history').append(bubble);bubble.querySelector('[data-call-action=play]').click();await new Promise(r=>setImmediate(r));
+ assert.equal(bubble.querySelector('audio').playedByTest,undefined);assert.match(bubble.querySelector('.call-audio-error').textContent,/динамик недоступен/);
+});
 test('one source call appears once after repeated reads and keeps older cached pages',async t=>{
  const s=setup(t,async()=>({calls:[call],scope:'scope-one',has_more:false}));
  await s.ui.refresh('chat-one');await s.ui.refresh('chat-one',false,true);assert.equal(s.ui.messages('chat-one').length,1);

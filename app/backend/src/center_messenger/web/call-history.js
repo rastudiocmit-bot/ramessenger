@@ -207,7 +207,7 @@ window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "c
       audio.controls=true;audio.preload='none';audio.hidden=true;audio.playsInline=true;audio.defaultMuted=false;audio.muted=false;audio.volume=1;
       audio.setAttribute('aria-label','Аудиозапись звонка');unmute.type='button';unmute.hidden=true;error.setAttribute('role','status');
       let attempt=0,failedMessage=false;
-      const diagnostic=node('details',undefined,'call-audio-diagnostic'),report=node('p');diagnostic.append(node('summary','Состояние плеера'),report);bubble.audioDiagnostic=diagnostic;
+      const diagnostic=node('details',undefined,'call-audio-diagnostic'),report=node('p'),devices=node('button','Проверить звук и микрофон','text-button');devices.type='button';devices.dataset.phoneDevices='';diagnostic.append(node('summary','Состояние плеера'),report,devices);bubble.audioDiagnostic=diagnostic;
       function reportState(){if(!diagnostic.open)return;const at=Number.isFinite(audio.currentTime)?Math.floor(audio.currentTime):0;const reason={1:'воспроизведение прервано',2:'ошибка загрузки',3:'ошибка декодирования',4:'формат недоступен'}[audio.error?.code]||'нет';report.textContent=`По данным браузера\nВоспроизведение: ${audio.paused?'пауза':'идёт'}\nЗвук плеера: ${audio.muted?'выключен':'включён'}\nГромкость: ${Math.round(audio.volume*100)}%\nПозиция: ${Math.floor(at/60)}:${String(at%60).padStart(2,'0')}\nОшибка аудио: ${reason}`;}
       diagnostic.addEventListener('toggle',reportState);for(const event of ['timeupdate','volumechange','playing','pause','error'])audio.addEventListener(event,reportState);
       const epoch=state.epoch,gen=generation,callData=entry(conversation);
@@ -229,7 +229,7 @@ window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "c
         play.replaceChildren(icon('play'));play.title='Повторить загрузку аудио';play.setAttribute('aria-label',play.title);play.setAttribute('aria-expanded','false');
         error.textContent='Запись не удалось воспроизвести. Нажмите прослушивание ещё раз.';error.hidden=false;bubble.dataset.audioState='error';
       };
-      play.addEventListener('click',()=>{
+      play.addEventListener('click',async()=>{
         if(!alive())return;
         if(!audio.paused&&!audio.ended&&!audio.muted&&audio.volume>0){audio.pause();return;}
         const request=++attempt;failedMessage=false;error.hidden=true;
@@ -242,10 +242,10 @@ window.CenterCallHistory = ({state, api, node, context, changed, sourcePath = "c
           if(request!==attempt||!alive())return;
           if(audio.error){failed();return;}
           failedMessage=true;error.hidden=false;bubble.dataset.audioState='blocked';
-          error.textContent=e?.name==='NotAllowedError'?'Браузер не разрешил запуск. Нажмите ▶ в самом плеере.':e?.name==='AbortError'?'Воспроизведение прервано. Нажмите ▶ ещё раз.':'Не удалось запустить плеер. Попробуйте кнопку ▶ в самом плеере.';
+          error.textContent=e?.name==='AudioOutputError'?'Выбранный динамик недоступен. Откройте проверку звука и выберите другое устройство.':e?.name==='NotAllowedError'?'Браузер не разрешил запуск. Нажмите ▶ в самом плеере.':e?.name==='AbortError'?'Воспроизведение прервано. Нажмите ▶ ещё раз.':'Не удалось запустить плеер. Попробуйте кнопку ▶ в самом плеере.';
           playbackIcon();
         };
-        try{audio.play()?.catch(rejected);}catch(e){rejected(e);}
+        try{if(state.prepareCallAudio){await state.prepareCallAudio(audio);if(request!==attempt||!alive())return;}audio.play()?.catch(rejected);}catch(e){rejected(e);}
       });
       unmute.addEventListener('click',()=>{if(alive()){failedMessage=false;enableSound();if(audio.paused)play.click();}});
       audio.addEventListener('error',()=>{if(alive())failed();});

@@ -69,6 +69,7 @@
   }
   function clearPrivateViews() {
     notices?.reset();
+    phoneDevices?.reset();
     team.reset(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); novofon.reset(); directory.reset(); chat.reset();
     cabinet.reset(); cardLoader.reset();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
@@ -144,7 +145,7 @@
     const previousWorkspace = state.workspace?.id;
     state.epoch += 1; state.user = payload.user; state.csrf = payload.csrf; state.workspaces = payload.workspaces; state.chatProtocol = payload.chat_protocol || 1;
     state.workspace = state.workspaces.find(item => item.id === state.workspace?.id) || state.workspaces[0] || null;
-    if (previousWorkspace !== state.workspace?.id) { team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); cardLoader.reset(); directory.reset(); chat.reset(); }
+    if (previousWorkspace !== state.workspace?.id) { phoneDevices?.reset(); team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); cardLoader.reset(); directory.reset(); chat.reset(); }
   }
   async function enter(payload) {
     setSession(payload);
@@ -314,7 +315,7 @@
     cabinet.navigate(button.dataset.pane).catch(error => { if (error.name !== "AbortError") feedback(error.message, true); });
   });
   $("#workspace-select").addEventListener("change", async event => {
-    state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); directory.reset(); chat.reset();
+    state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; phoneDevices?.reset(); team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); directory.reset(); chat.reset();
     try { await renderPane(state.pane); } catch (error) { if (error.name !== "AbortError") feedback(error.message, true); }
   });
   $("#workspace-form").addEventListener("submit", event => {
@@ -631,6 +632,7 @@
       } else showLogin(status.setup_required ? "Первичная настройка пока недоступна. Обратитесь к владельцу сервиса." : "");
     } catch (error) { showLogin(error.message); }
   }
+  const phoneDevices = window.CenterPhoneDevices ? window.CenterPhoneDevices({ state }) : null;
   const directory = window.CenterDirectory({ $, state, api, node, show, notice, date });
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast: feedback, confirm, renderPane });
   window.CenterVoice({ $, state, api, toast: feedback });
