@@ -17,7 +17,8 @@
     "test:loading": "node tests/check_chat_loading.cjs",
     "test:startup": "node tests/check_chat_startup.cjs",
     "test:crm-review": "node tests/check_crm_review.cjs",
-    "test:agents-workspace": "node tests/check_agents_workspace.cjs"
+    "test:agents-workspace": "node tests/check_agents_workspace.cjs",
+    "test:call-bubbles": "node tests/check_call_bubbles.cjs"
   },
   "devDependencies": {
     "jsdom": "30.1.3",

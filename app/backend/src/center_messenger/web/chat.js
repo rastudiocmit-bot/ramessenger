@@ -31,7 +31,7 @@ window.CenterChat = ({ $, state, api, node, show, notice, date, toast, confirm, 
   let listGeometry = null, listViewportFrame = 0, listViewportWidth = 0, listRenderRevision = 0, listMeasureRevision = 0, lastViewportKey = "";
   let listTopSpacer = null, listBottomSpacer = null;
   const cache = new Map();
-  const callHistory = window.CenterCallHistory?.({state,api,node,context:() => active() ? selected : null,changed:id => { const data = cache.get(id); if (data && selected === id) { data.messageRevision++; renderMessages(id); } }});
+  const callHistory = window.CenterCallHistory?.({state,api,node,subscriber:id => { const meta={...cache.get(id)?.meta,...items.find(item=>item.id===id)}; return meta.contact_id ? (meta.parent_name === undefined ? meta.name : meta.parent_name) : null; },context:() => active() ? selected : null,changed:id => { const data = cache.get(id); if (data && selected === id) { data.messageRevision++; renderMessages(id); } }});
   const active = () => state.user && state.workspace && state.pane === "messages";
   const valid = (epoch, gen) => state.epoch === epoch && generation === gen;
   const base = () => `/workspaces/${state.workspace.id}`;

@@ -6,8 +6,9 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   let page = 0, total = 0, more = false, actionBusy = false, listBusy = false;
   const cache = new Map();
   const contactRequests = new Map();
+  let callSubscriber = null;
   const renderSavedCard = window.CenterDirectoryCard({ node, date });
-  const callTimeline = window.CenterCallHistory?.({state,api,node,sourcePath:"directory",context:() => active() && $("#directory-contact-dialog")?.open ? selected : null,changed:id => renderContactCalls(id)});
+  const callTimeline = window.CenterCallHistory?.({state,api,node,sourcePath:"directory",subscriber:() => callSubscriber,context:() => active() && $("#directory-contact-dialog")?.open ? selected : null,changed:id => renderContactCalls(id)});
   $("#directory-contact-dialog")?.addEventListener("close", () => callTimeline?.reset());
   const active = () => state.user && state.workspace && state.pane === "clients";
   const readonly = () => !["owner", "admin"].includes(state.workspace?.role);
@@ -16,7 +17,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
   const running = () => ["running", "queued"].includes(status?.state);
   function fail(error) { if (error.name !== "AbortError") notice(error.message, $("#directory-error")); }
   function resetDetail() {
-    selected = null; detailRequest += 1;
+    selected = null; callSubscriber = null; detailRequest += 1;
     $("#directory-layout").classList.remove("has-selection");
     const blank = node("div", undefined, "detail-placeholder");
     blank.append(node("span", "◈", "detail-placeholder-icon"), node("h2", "Всё о семье — рядом"), node("p", "Выберите контакт слева, чтобы увидеть детей, их группы и статусы."), node("small", "Кружок рядом с именем открывает карточку АльфаCRM."));
@@ -207,6 +208,7 @@ window.CenterDirectory = ({ $, state, api, node, show, notice, date }) => {
     } finally { if (current(epoch, gen) && seq === detailRequest) detail.setAttribute("aria-busy", "false"); }
   }
   function renderDetail(contact) {
+    callSubscriber = contact.name || null;
     $("#directory-detail").replaceChildren(renderSavedCard(contact));
     if (callTimeline && selected) {
       const section = node("section", undefined, "directory-call-history"); section.append(node("h3", "Звонки"), node("p", "Читаем сохранённые звонки…", "muted")); $("#directory-detail").append(section);
