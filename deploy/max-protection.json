@@ -72,7 +72,7 @@
     "app/backend/src/center_messenger/novofon_budget.py": "d70cafdda5cfe433abc709f82ab8bea35da6d13ecf21eb8c84a003e4b90641e1",
     "app/backend/src/center_messenger/novofon_client.py": "f23dd333cba78292025d3ffe651d08fdec34ce03df0b89dbcf889ad9e1a6ce89",
     "app/backend/src/center_messenger/novofon_quota.py": "b610e120d7cd147a6821b2e3760355e3a5c3c7c14e3c935e37a0caa4f8716333",
-    "app/backend/src/center_messenger/novofon_service.py": "3986fc7db23c47b6906973bff23756fcf57a00e35ea3c3064f61b2823c09be96",
+    "app/backend/src/center_messenger/novofon_service.py": "6dcf599722cb0c8e90eb9e77614cdfef3a2fe7610e100d5f47376660159aad25",
     "app/backend/src/center_messenger/telephony_api.py": "cb374541e800c2993718b7999d906b3f9f9240bd4514e6f736d985642bc83a80",
     "app/backend/src/center_messenger/telephony_audio.py": "7b9255e2dfafd62e0a9b45e6e1ea96488d1d958e876f1c14dbe7e468219011a9",
     "app/backend/src/center_messenger/telephony_calls.py": "0f05040d63d131de5f15ce55d28f54418c52b088cea4c4e4b22a41bef2450525",
