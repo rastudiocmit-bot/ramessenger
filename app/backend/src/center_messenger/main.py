@@ -44,6 +44,7 @@ from center_messenger.novofon_service import Novofon
 from center_messenger.telephony_calls import TelephonyCalls
 from center_messenger.telephony_api import router as telephony_router
 from center_messenger.sip_lines_api import router as sip_lines_router
+from center_messenger.phone_care_api import router as phone_care_router
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ def create_app(
         redoc_url=None,
         openapi_url=None,
     )
+    app.state.phone_care_config = config
 
     app.add_middleware(SecurityMiddleware, settings=config)
     app.add_middleware(StaticCompressionMiddleware)
@@ -135,6 +137,7 @@ def create_app(
     app.include_router(novofon_router)
     app.include_router(telephony_router)
     app.include_router(sip_lines_router)
+    app.include_router(phone_care_router)
     app.include_router(max_hooks)
     web = Path(__file__).with_name("web")
     app.mount("/assets", StaticFiles(directory=web), name="assets")

@@ -187,7 +187,11 @@ class TelephonyImport:
                 params=call | {'w':job['workspace'],'employees':json.dumps(call['employees']),
                     'recording':self.vault.seal_recording(job['workspace'],call['connection_id'],call['id'],record) if record else None,
                     'record_hash':hashlib.sha256(record.encode()).hexdigest() if record else None}
-                changed+=len(db.execute(text(UPSERT),params).all())
+                updated=db.execute(text(UPSERT),params).all()
+                changed+=len(updated)
+                if updated:
+                    from center_messenger.phone_care import enqueue
+                    enqueue(db,job['workspace'],call['id'],priority=2 if call['started_at']>=self.clock()-timedelta(days=1) else 1)
             db.execute(text("UPDATE telephony_state SET connected=true,settings_version=:v,account_id=:a,timezone=:z,recent=CAST(:r AS jsonb),archive=CAST(:b AS jsonb),archive_done=:done,recent_due=:due,last_error_code=NULL,retry_at=NULL,attempts=0,imported=imported+:n,last_sync_at=CASE WHEN :success THEN now() ELSE last_sync_at END,updated_at=now() WHERE workspace_id=:w"),
                 {'w':job['workspace'],'v':job['settings']['version'],'a':account,'z':zone,'r':json.dumps(recent),'b':json.dumps(archive),'done':archive_done,'due':recent_due,'n':changed,'success':successful_read})
             self.release(db,job,delay)

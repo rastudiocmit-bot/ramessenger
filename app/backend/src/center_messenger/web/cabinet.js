@@ -4,7 +4,7 @@ window.CenterCabinet = ({ $, state, api, node, show, roles, renderPane }) => {
   let summaryController = null, summaryComputedAt = null;
   const icon = name => window.CenterIcon(name);
   const definition = [
-    ["messages", "Чаты", "chats"], ["tasks", "Задачи", "task"], ["summary", "Сводка", "chart"],
+    ["messages", "Чаты", "chats"], ["tasks", "Задачи", "task"], ["telephony", "Телефония", "phone"], ["summary", "Сводка", "chart"],
     ["clients", "Клиенты", "people"], ["team", "Сотрудники", "team"],
     ["connections", "Подключения", "plug"], ["overview", "Организация", "building"],
     ["security", "Безопасность", "shield"], ["profile", "Профиль", "user"]

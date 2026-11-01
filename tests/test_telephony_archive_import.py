@@ -20,6 +20,7 @@ class Result:
     def one(self):return self.value
     def scalar_one(self):return self.value
     def scalar_one_or_none(self):return self.value
+    def all(self):return [] if self.value is None else [(self.value,)]
 
 
 class ArchiveImportTests(unittest.TestCase):
@@ -37,6 +38,7 @@ class ArchiveImportTests(unittest.TestCase):
             if sql.startswith('SELECT * FROM telephony_archive_control'):return Result(self.current)
             if sql.startswith('SELECT version FROM novofon_settings'):return Result(self.settings['version'])
             self.writes.append((sql,params))
+            if sql.startswith('INSERT INTO telephony_calls'):return Result(params['id'])
             return Result(params.get('call') if sql.startswith('INSERT INTO telephony_archive_seen') else None)
         @contextmanager
         def tenant(*_):yield SimpleNamespace(execute=execute)
@@ -55,6 +57,9 @@ class ArchiveImportTests(unittest.TestCase):
         self.assertEqual(args['date_from'],'2020-10-31 00:00:00')
         self.assertEqual(args['date_till'],'2020-11-30 00:00:00')
         self.assertFalse(args['include_ongoing_calls']);self.assertTrue(queue.call_args.kwargs['historical'])
+        care_source=next(params for sql,params in self.writes if params and params.get('t')=='phone-care-source-v1')
+        self.assertEqual(care_source['state'],'pending')
+        self.assertIn('"priority": 0',care_source['p'])
         cursor=next(params for sql,params in self.writes if 'cursor_start=:start' in sql)
         self.assertEqual(cursor['start'],schedule.START+timedelta(days=30));self.assertEqual(cursor['offset'],0)
 

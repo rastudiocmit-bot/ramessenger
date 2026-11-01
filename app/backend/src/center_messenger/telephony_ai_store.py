@@ -112,6 +112,9 @@ class Store:
             if not self.owned(db,job):return False
             clause=','.join(f'{key}=:{key}' for key in values)
             db.execute(text(f'UPDATE telephony_ai_runs SET {clause},version=version+1,updated_at=now() WHERE workspace_id=:w AND id=:id'),values | {'w':job['workspace'],'id':job['run']['id']})
+            if values.get('phase')=='complete':
+                from center_messenger.phone_care import enqueue
+                enqueue(db,job['workspace'],job['run']['call_id'],priority=0 if job['run']['historical'] else 2)
         job['run'].update(values)
         return True
 

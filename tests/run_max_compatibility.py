@@ -33,9 +33,12 @@ CASES = (
     'test_telephony_archive_import',
     'test_telephony_media',
     'test_telephony_ai_worker',
+    'test_phone_care',
+    'test_tasks',
 )
 
 DATABASE_CASES = (
+    'test_phone_care_database.FamilyCareDatabaseTests',
     'test_telephony_ai_database.TelephoneAIDatabaseTests',
     'test_telephony_agent_database.TelephonyAgentDatabaseTests',
     'test_novofon_quota_database.QuotaDatabaseTests',

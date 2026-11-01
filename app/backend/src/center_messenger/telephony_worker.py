@@ -21,6 +21,8 @@ from center_messenger.loader.scheduler import Scheduler
 from center_messenger.telephony_audio import control_key,fetch
 from center_messenger.telephony_import import TelephonyImport
 from center_messenger.telephony_ai_worker import TelephoneWorker
+from center_messenger.phone_care import FamilyCare
+from center_messenger.phone_care_worker import CareWorker,install_routes
 
 
 class AudioInput(InputModel):
@@ -28,13 +30,15 @@ class AudioInput(InputModel):
     call:UUID
 
 
-def build_worker_loader(importer,processor=None):
+def build_worker_loader(importer,processor=None,care=None):
     registry=Registry()
     steps=[Step('calls',Capability.CALLS,lambda op:importer.run_next(),lane='maintenance',active_delay=1,idle_delay=2,budget=45)]
     capabilities={Capability.CALLS}
     if processor is not None:
         capabilities.add(Capability.TRANSCRIBE)
         steps.append(Step('ai',Capability.TRANSCRIBE,lambda op:processor.run_next(),lane='media',active_delay=1,idle_delay=3,budget=180))
+    if care is not None:
+        steps.append(Step('care',Capability.CALLS,lambda op:care.run_next(),lane='maintenance',active_delay=0.5,idle_delay=10,budget=10))
     registry.register(Manifest('novofon',frozenset(capabilities)),lambda:steps)
     return Scheduler(registry,limits={'messages':1,'maintenance':1,'media':1})
 
@@ -51,7 +55,8 @@ def create_worker(settings=None,*,engine_factory=make_engine,readiness_check=dat
         vault=ConnectorVault(config.connection_master_key_file)
         importer=TelephonyImport(accounts,vault)
         processor=TelephoneWorker(accounts,vault)
-        loader=build_worker_loader(importer,processor)
+        loader=build_worker_loader(importer,processor,CareWorker(accounts))
+        app.state.family_care=FamilyCare(accounts)
         app.state.db_engine,app.state.vault,app.state.loader=engine,vault,loader
         loader.start()
         try:yield
@@ -66,7 +71,8 @@ def create_worker(settings=None,*,engine_factory=make_engine,readiness_check=dat
     async def private(request,call_next):
         if request.url.path not in ('/health/live','/health/ready') and not hmac.compare_digest(request.headers.get('x-cm-telephony-key','').encode(),key.encode()):
             return JSONResponse({'detail':'Недоступно.'},status_code=403)
-        if request.headers.get('content-length','').isdigit() and int(request.headers['content-length'])>1024:
+        limit=32768 if request.url.path=='/care' else 1024
+        if request.headers.get('content-length','').isdigit() and int(request.headers['content-length'])>limit:
             return JSONResponse({'detail':'Слишком большой запрос.'},status_code=413)
         return await call_next(request)
 
@@ -86,7 +92,7 @@ def create_worker(settings=None,*,engine_factory=make_engine,readiness_check=dat
         try:
             loader=app.state.loader
             ok=(readiness_check(app.state.db_engine,config.expected_db_role) and
-                set(loader.steps)=={'novofon.calls','novofon.ai'} and not loader.registration_errors and
+                set(loader.steps)=={'novofon.calls','novofon.ai','novofon.care'} and not loader.registration_errors and
                 not loader.stopping.is_set() and bool(loader._threads) and all(t.is_alive() for t in loader._threads))
         except Exception:ok=False
         return JSONResponse({'status':'ready' if ok else 'not_ready','role':'telephony'},status_code=200 if ok else 503)
@@ -100,6 +106,7 @@ def create_worker(settings=None,*,engine_factory=make_engine,readiness_check=dat
             url=app.state.vault.open_recording(model.workspace,row['connection_id'],model.call,row['recording_ciphertext'])
         body,headers,status=fetch(url,request.headers.get('range'))
         return Response(body,status_code=status,headers=headers)
+    install_routes(app)
     return app
 
 

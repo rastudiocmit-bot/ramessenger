@@ -69,7 +69,7 @@
   }
   function clearPrivateViews() {
     notices?.reset();
-    phoneDevices?.reset();
+    phoneDevices?.reset(); phoneCare?.reset();
     team.reset(); $("#sessions-list").replaceChildren(); resetAlfa(); resetAlfaMax(); novofon.reset(); directory.reset(); chat.reset();
     cabinet.reset(); cardLoader.reset();
     $("#workspace-select").replaceChildren(); $("#workspace-form").reset();
@@ -145,7 +145,7 @@
     const previousWorkspace = state.workspace?.id;
     state.epoch += 1; state.user = payload.user; state.csrf = payload.csrf; state.workspaces = payload.workspaces; state.chatProtocol = payload.chat_protocol || 1;
     state.workspace = state.workspaces.find(item => item.id === state.workspace?.id) || state.workspaces[0] || null;
-    if (previousWorkspace !== state.workspace?.id) { phoneDevices?.reset(); team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); cardLoader.reset(); directory.reset(); chat.reset(); }
+    if (previousWorkspace !== state.workspace?.id) { phoneDevices?.reset(); phoneCare?.reset(); team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); cardLoader.reset(); directory.reset(); chat.reset(); }
   }
   async function enter(payload) {
     setSession(payload);
@@ -190,11 +190,14 @@
     state.pane = pane === "queue" ? "messages" : pane;
     const sections = grantedSections();
     sections.profile = true;
+    sections.telephony = Boolean(sections.messages);
+    if (!sections.telephony) phoneCare?.reset();
     if (!sections.connections) novofon.reset();
     sections.summary = sections.overview && sections.messages && state.workspace?.role !== "operator";
     if (!sections[state.pane]) state.pane = ["messages", "tasks", "summary", "clients", "overview", "security", "profile"].find(key => sections[key]);
     if (state.pane !== "connections") alfaMaxProgress.reset();
 
+    if (state.pane !== "telephony") phoneCare?.leave();
     if (state.pane !== "clients") directory.leave();
     if (state.pane !== "messages") chat.leave();
     show($("#no-workspaces"), !state.workspace && state.pane !== "security" && state.pane !== "profile");
@@ -218,6 +221,7 @@
     if (state.pane === "connections" && state.connectionsView === "novofon") await novofon.load();
     if (state.pane === "messages") { chat.setView(state.chatView || "all", false); await chat.enter(); }
     if (state.pane === "tasks") await tasks?.enter();
+    if (state.pane === "telephony") await phoneCare?.enter();
     if (state.pane === "summary") await cabinet.summary();
     if (state.pane === "clients") await directory.enter();
     if (["profile", "overview"].includes(state.pane) && sections.messages) await cabinet.metadata();
@@ -315,7 +319,7 @@
     cabinet.navigate(button.dataset.pane).catch(error => { if (error.name !== "AbortError") feedback(error.message, true); });
   });
   $("#workspace-select").addEventListener("change", async event => {
-    state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; phoneDevices?.reset(); team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); directory.reset(); chat.reset();
+    state.epoch += 1; state.workspace = state.workspaces.find(item => item.id === event.target.value) || null; phoneDevices?.reset(); phoneCare?.reset(); team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); directory.reset(); chat.reset();
     try { await renderPane(state.pane); } catch (error) { if (error.name !== "AbortError") feedback(error.message, true); }
   });
   $("#workspace-form").addEventListener("submit", event => {
@@ -637,6 +641,14 @@
   const chat = window.CenterChat({ $, state, api, node, show, notice, date, toast: feedback, confirm, renderPane });
   window.CenterVoice({ $, state, api, toast: feedback });
   const tasks = window.CenterTasks ? window.CenterTasks({ $, state, api, node, show, toast: feedback, notices, renderPane }) : null;
+  const phoneCare = window.CenterPhoneCare ? window.CenterPhoneCare({ $, state, api, renderPane, confirm,
+    openTask: async id => { const epoch = state.epoch; const result = await api(`/workspaces/${state.workspace.id}/tasks/${id}`); if (epoch === state.epoch) await tasks?.open({ task: result.task }); }
+  }) : null;
+  document.addEventListener("cm:phone-care-open", async event => {
+    if (!state.user || !state.workspace || !event.detail?.case_id) return;
+    await renderPane("telephony");
+    if (state.pane === "telephony") await phoneCare?.openCase(event.detail.case_id);
+  });
   const novofon = window.CenterNovofon({ $, state, api, show, notice, confirm });
   const ai = window.CenterAi({ $, state, api, node, show, notice, toast: feedback, confirm });
   const alfaMaxProgress = window.CenterAlfaProgress({ $, state, api, show, date, onStatus: (payload, view) => {

@@ -514,6 +514,11 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
   function paintQuotes(sources, editable, open = false) {
     const box = sheet.querySelector(".task-quotes"); box.replaceChildren(); box.classList.toggle("open", open);
     box.hidden = !sources.length; if (!sources.length) return;
+    const phoneSource = source => {
+      const link = node("button", "Открыть телефонное обращение", "text-button"); link.type = "button";
+      link.addEventListener("click", () => { sheet.close(); document.dispatchEvent(new CustomEvent("cm:phone-care-open", { detail: { case_id: source.case_id } })); });
+      return link;
+    };
     if (!open) {
       const short = node("button", undefined, `task-quote task-quote-short ${sources[0].direction === "out" ? "out" : "in"}`); short.type = "button";
       short.setAttribute("aria-label", "Показать сообщения целиком");
@@ -522,12 +527,15 @@ window.CenterTasks = ({ $, state, api, node, show, toast = () => {}, notices = n
       if (sources.length > 1) short.append(node("span", `+${sources.length - 1}`, "task-quote-more"));
       const chev = node("span", undefined, "task-quote-chev"); chev.setAttribute("aria-hidden", "true"); chev.append(icon("chevron")); short.append(chev);
       short.addEventListener("click", () => { paintQuotes(sources, editable, true); paintEdges(sheet); revealIn(box); });
-      box.append(short); return;
+      box.append(short);
+      if (sources[0].case_id) box.append(phoneSource(sources[0]));
+      return;
     }
     for (const source of sources) {
       const quote = node("div", undefined, `task-quote ${source.direction === "out" ? "out" : "in"}`);
       const glyph = node("span", "“", "task-quote-mark"); glyph.setAttribute("aria-hidden", "true");
       quote.append(glyph, node("span", source.text || "Сообщение без текста", "task-quote-text"));
+      if (source.case_id) quote.append(phoneSource(source));
       if (editable && sources.length > 1) {
         const remove = node("button", undefined, "task-quote-del"); remove.type = "button"; remove.setAttribute("aria-label", "Убрать сообщение из задачи"); remove.append(icon("close"));
         remove.addEventListener("click", () => { sheetDraft.sources = sheetDraft.sources.filter(s => s.id !== source.id); paintQuotes(sheetDraft.sources, true, true); });

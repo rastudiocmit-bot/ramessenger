@@ -67,8 +67,11 @@ class ArchiveImport:
             added=0
             for call,url in normalized:
                 cipher=self.vault.seal_recording(workspace,row['connection_id'],call['id'],url) if url else None
-                db.execute(text(UPSERT),call | {'w':workspace,'employees':json.dumps(call['employees']),
-                    'recording':cipher,'record_hash':hashlib.sha256(url.encode()).hexdigest() if url else None})
+                updated=db.execute(text(UPSERT),call | {'w':workspace,'employees':json.dumps(call['employees']),
+                    'recording':cipher,'record_hash':hashlib.sha256(url.encode()).hexdigest() if url else None}).all()
+                if updated:
+                    from center_messenger.phone_care import enqueue as care_enqueue
+                    care_enqueue(db,workspace,call['id'],priority=0)
                 seen=db.execute(text('INSERT INTO telephony_archive_seen(workspace_id,call_id) VALUES(:w,:call) ON CONFLICT DO NOTHING RETURNING call_id'),{'w':workspace,'call':call['id']}).scalar_one_or_none()
                 added+=int(seen is not None)
                 if schedule.eligible(call['started_at'],self.store.clock()) and not call['missed'] and call['talk_seconds']:

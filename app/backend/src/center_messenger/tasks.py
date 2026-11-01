@@ -364,40 +364,50 @@ class Tasks:
 
     def create(self, actor, workspace, data):
         with self._enter(actor, workspace) as db:
-            member = self._member(db, actor, workspace)
-            if member["observer"]:
-                raise AuthError(403, "Роль «Наблюдатель» не может создавать задачи.")
-            studio = self._studio(db, workspace)
-            conversation = data.get("conversation_id")
-            if conversation is not None and db.execute(text(
-                    "SELECT 1 FROM conversations WHERE workspace_id=:w AND id=:c"),
-                    {"w": workspace, "c": conversation}).scalar_one_or_none() is None:
-                raise AuthError(404, "Переписка не найдена.")
-            due = self._due(data.get("due_at"), required=False)
-            if due is None:
-                now = db.execute(text("SELECT now()")).scalar_one()
-                due = datetime.fromisoformat(presets(now, ZoneInfo(member["timezone"]), studio)["default"])
-            assignee = data.get("assignee_id") or actor.user_id
-            assignee_name = self._assignee(db, workspace, assignee, actor, member)
-            kind = data.get("kind")
-            if kind is not None and kind not in KINDS:
-                raise AuthError(422, "Неизвестный тип задачи.")
-            origin = data.get("origin") or "manual"
-            if origin not in ORIGINS:
-                origin = "manual"
-            task = uuid4()
-            db.execute(text(
-                "INSERT INTO tasks(workspace_id,id,conversation_id,client_label,title,details,kind,due_at,origin,"
-                "sources,created_by,assignee_id,assignee_name) VALUES(:w,:id,:c,:label,:title,:details,:kind,:due,:origin,"
-                "CAST(:sources AS jsonb),:me,:assignee,:assignee_name)"),
-                {"w": workspace, "id": task, "c": conversation,
-                 "label": " ".join(str(data.get("client_label") or "").split())[:200],
-                 "title": self._title(data.get("title")), "details": str(data.get("details") or "").strip()[:2000],
-                 "kind": kind, "due": due, "origin": origin,
-                 "sources": json.dumps(self._sources(db, workspace, conversation, data.get("message_ids"))),
-                 "me": actor.user_id, "assignee": assignee, "assignee_name": assignee_name[:200]})
-            self._event(db, workspace, task, "created", actor.user_id, {"origin": origin})
-            return self._public(self._row(db, task))
+            return self.create_in(db, actor, workspace, data)
+
+    def create_in(self, db, actor, workspace, data, *, task_id=None, call_source=None):
+        """Shared task creation in an already authorized transaction; internal call evidence only."""
+        member = self._member(db, actor, workspace)
+        if member["observer"]:
+            raise AuthError(403, "Роль «Наблюдатель» не может создавать задачи.")
+        studio = self._studio(db, workspace)
+        if task_id is not None:
+            existing = self._row(db, task_id)
+            if existing is not None:
+                if not self._may_see(actor, member, studio, existing):
+                    raise AuthError(404, "Задача недоступна.")
+                return self._public(existing)
+        conversation = data.get("conversation_id")
+        if conversation is not None and db.execute(text(
+                "SELECT 1 FROM conversations WHERE workspace_id=:w AND id=:c"),
+                {"w": workspace, "c": conversation}).scalar_one_or_none() is None:
+            raise AuthError(404, "Переписка не найдена.")
+        due = self._due(data.get("due_at"), required=False)
+        if due is None:
+            now = db.execute(text("SELECT now()")).scalar_one()
+            due = datetime.fromisoformat(presets(now, ZoneInfo(member["timezone"]), studio)["default"])
+        assignee = data.get("assignee_id") or actor.user_id
+        assignee_name = self._assignee(db, workspace, assignee, actor, member)
+        kind = data.get("kind")
+        if kind is not None and kind not in KINDS:
+            raise AuthError(422, "Неизвестный тип задачи.")
+        origin = data.get("origin") or "manual"
+        if origin not in ORIGINS:
+            origin = "manual"
+        task = task_id or uuid4()
+        db.execute(text(
+            "INSERT INTO tasks(workspace_id,id,conversation_id,client_label,title,details,kind,due_at,origin,"
+            "sources,created_by,assignee_id,assignee_name) VALUES(:w,:id,:c,:label,:title,:details,:kind,:due,:origin,"
+            "CAST(:sources AS jsonb),:me,:assignee,:assignee_name)"),
+            {"w": workspace, "id": task, "c": conversation,
+             "label": " ".join(str(data.get("client_label") or "").split())[:200],
+             "title": self._title(data.get("title")), "details": str(data.get("details") or "").strip()[:2000],
+             "kind": kind, "due": due, "origin": origin,
+             "sources": json.dumps([call_source] if call_source is not None else self._sources(db, workspace, conversation, data.get("message_ids"))),
+             "me": actor.user_id, "assignee": assignee, "assignee_name": assignee_name[:200]})
+        self._event(db, workspace, task, "created", actor.user_id, {"origin": origin})
+        return self._public(self._row(db, task))
 
     def voice(self, actor, workspace, data):
         """A dictated task: fields from the phrase, sources from the dialog's last messages.
