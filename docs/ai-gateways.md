@@ -136,6 +136,13 @@ protocol and configured/enabled flags only. The password is never returned.
 Blank input preserves the existing password; replacing the API key preserves
 the proxy. Deleting the Grok key deletes this connection's proxy too.
 
+The card shows the saved address, protocol, enabled/disabled state and sealed
+password status outside the collapsible editor. This summary is rebuilt from
+server settings after reload, including a saved but disabled proxy. The secret
+entry stays empty after a successful save. A failed save restores the password
+draft only within the same current workspace/account; it is never put into the
+visible summary or browser storage.
+
 The route is passed explicitly per request for connection verification, voice
 text polishing, general text, task assistance, telephone-agent tests and
 background call summaries. No process-wide proxy is installed. A proxy or TLS

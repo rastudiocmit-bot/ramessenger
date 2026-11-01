@@ -141,6 +141,10 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     if(subject!==who()){
       for (const card of gatewayCards) {
         card.querySelector('.grok-proxy-form')?.reset();
+        const address = card.querySelector('.grok-proxy-saved-address'), saved = card.querySelector('.grok-proxy-saved-state'), description = card.querySelector('.grok-proxy-saved-description');
+        if (address) address.value = '';
+        if (saved) { saved.textContent = 'Не сохранён'; saved.dataset.state = ''; }
+        if (description) description.textContent = '';
         const result = card.querySelector('.grok-proxy-result');
         if (result) { result.replaceChildren(); show(result, false); }
       }
@@ -350,6 +354,14 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         proxyForm.elements.protocol.value = proxy.protocol || 'socks5';
         proxyForm.elements.proxy.placeholder = proxy.configured ? 'Прокси сохранён; пустое поле сохраняет пароль' : 'IPv4:порт:логин:пароль';
         card.querySelector('.grok-route-note').textContent = proxy.enabled ? `Все агенты Grok используют ${proxy.protocol === 'http' ? 'HTTP CONNECT' : 'SOCKS5'} · ${proxy.endpoint}` : 'Все агенты Grok используют прямое подключение.';
+        const stored = proxy.configured === true, enabled = stored && proxy.enabled === true;
+        card.querySelector('.grok-proxy-saved-address').value = stored ? proxy.endpoint || '' : '';
+        const status = card.querySelector('.grok-proxy-saved-state');
+        status.textContent = stored ? enabled ? 'Сохранён · включён' : 'Сохранён · выключен' : 'Не сохранён';
+        status.dataset.state = enabled ? 'active' : '';
+        card.querySelector('.grok-proxy-saved-description').textContent = stored
+          ? `${proxy.protocol === 'http' ? 'HTTP CONNECT' : 'SOCKS5'} · пароль сохранён зашифрованным и скрыт. Пустое поле ниже сохраняет прежние данные.`
+          : 'Сохраните прокси в настройках ниже. После обновления страницы он останется здесь.';
       }
       const proxyResult = card.querySelector('.grok-proxy-result');
       if (proxyResult) { proxyResult.replaceChildren(); show(proxyResult, false); }
@@ -471,7 +483,12 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         if (mine !== seq || owner !== who()) return;
         settings.gateways[provider] = loaded.gateways[provider];renderSettings();
         toast(clear ? 'Прокси Grok удалён.' : 'Настройки подключения Grok сохранены. Проверьте подключение.');
-      } catch (error) { if (mine === seq && owner === who() && error.name !== 'AbortError') notice(error.message,errorTarget); }
+      } catch (error) {
+        if (mine === seq && owner === who() && error.name !== 'AbortError') {
+          if (!clear && !form.elements.proxy.value) form.elements.proxy.value = proxy;
+          notice(error.message,errorTarget);
+        }
+      }
       finally {
         if (verifying.get(provider)?.token === token) verifying.delete(provider);
         if (mine === seq && owner === who()) renderGatewayStatus(card,settings.gateways[provider]);

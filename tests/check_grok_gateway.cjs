@@ -61,6 +61,8 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   await card.locator('.grok-proxy-form [name=enabled]').check();await card.locator('.grok-proxy-save').click();
   await page.waitForFunction(()=>document.querySelector('.grok-route-note').textContent.includes('8.8.4.4:8080'));
   assert.equal(proxySaves,1);assert.equal(await card.locator('.grok-proxy-form [name=proxy]').inputValue(),'');
+  assert.equal(await card.locator('.grok-proxy-saved-address').inputValue(),'8.8.4.4:8080');
+  assert.equal(await card.locator('.grok-proxy-saved-state').textContent(),'Сохранён · включён');
   assert.match(await card.locator('.grok-route-note').textContent(),/SOCKS5/);
   assert.equal(data.mutations.filter(c=>c.path.endsWith('/grok/verify')).length,0);
   await card.locator('[data-verify=text]').click();await page.waitForFunction(()=>document.querySelector('[data-gateway=grok] .gateway-status').dataset.state==='active');

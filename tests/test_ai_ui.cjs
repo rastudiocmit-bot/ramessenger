@@ -10,7 +10,7 @@ async function setup(t){
  let agents=[],failures=new Map(),checkGate=null,diagnostic={ok:false,http_status:403,code:'forbidden',message:'xAI запретил доступ с сервера.',models:[],checked_at:'2026-11-01T08:26:56Z'};
  const api=async(url,args={})=>{calls.push({url,...args});if(url.endsWith('/settings')){if(args.data)settings={...settings,...args.data};return settings;}
   if(url.endsWith('/gateways/grok/diagnostic')||url.endsWith('/gateways/grok/proxy-diagnostic')){if(checkGate)await checkGate;return diagnostic;}
-  if(url.endsWith('/gateways/grok/proxy')){if(checkGate)await checkGate;const item=settings.gateways.grok;
+  if(url.endsWith('/gateways/grok/proxy')){if(checkGate)await checkGate;if(failures.has('grok:proxy'))throw Error('Не удалось сохранить настройки.');const item=settings.gateways.grok;
    item.proxy=args.data.clear_proxy?{configured:false,enabled:false,protocol:'socks5',endpoint:''}:{configured:!!args.data.proxy||item.proxy?.configured,enabled:args.data.enabled,protocol:args.data.protocol,endpoint:'8.8.4.4:8080'};
    delete item.checks;delete item.models;return settings;}
   if(url.endsWith('/gateways/routes')){settings.gateways={...settings.gateways,...args.data};return settings;}
@@ -179,12 +179,38 @@ test('saving Grok proxy changes the shared route without an inference request an
  card.querySelector('.grok-proxy-save').click();await s.flush();
  const request=s.calls.find(c=>c.url.endsWith('/grok/proxy'));assert.equal(request.method,'PUT');assert.equal(request.data.enabled,true);
  assert.equal(form.elements.proxy.value,'');assert.match(card.querySelector('.grok-route-note').textContent,/SOCKS5.*8.8.4.4:8080/);
+ assert.equal(card.querySelector('.grok-proxy-saved-address').value,'8.8.4.4:8080');
+ assert.equal(card.querySelector('.grok-proxy-saved-address').readOnly,true);
+ assert.equal(card.querySelector('.grok-proxy-saved-state').textContent,'Сохранён · включён');
+ await s.app.load();
+ assert.equal(card.querySelector('.grok-proxy-saved-address').value,'8.8.4.4:8080');
+ assert.match(card.querySelector('.grok-proxy-saved-description').textContent,/SOCKS5.*пароль сохранён/);
  assert.equal(card.querySelector('.gateway-status').textContent,'Не проверено');assert.equal(s.calls.filter(c=>c.url.endsWith('/verify')).length,0);
  assert.doesNotMatch(card.textContent,/synthetic-password/);assert.equal(card.querySelector('.grok-proxy-remove').disabled,false);
  card.querySelector('.grok-proxy-remove').click();await s.flush();
  assert.equal(s.calls.filter(c=>c.url.endsWith('/grok/proxy')).at(-1).data.clear_proxy,true);
  assert.match(card.querySelector('.grok-route-note').textContent,/прямое подключение/);assert.equal(form.elements.enabled.checked,false);
  assert.equal(card.querySelector('.grok-proxy-remove').disabled,true);
+ assert.equal(card.querySelector('.grok-proxy-saved-address').value,'');
+ assert.equal(card.querySelector('.grok-proxy-saved-state').textContent,'Не сохранён');
+});
+
+test('saved disabled proxy remains visible after reload and a failed save keeps its password draft private',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),keyForm=card.querySelector('.gateway-form'),form=card.querySelector('.grok-proxy-form');
+ keyForm.elements.api_key.value='xai-synthetic-key-only';keyForm.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ form.elements.proxy.value='8.8.4.4:8080:u:synthetic-password';form.elements.enabled.checked=false;
+ card.querySelector('.grok-proxy-save').click();await s.flush();await s.app.load();
+ assert.equal(card.querySelector('.grok-proxy-saved-address').value,'8.8.4.4:8080');
+ assert.equal(card.querySelector('.grok-proxy-saved-state').textContent,'Сохранён · выключен');
+ form.elements.proxy.value='8.8.4.4:8080:u:replacement-password';s.fail('grok','proxy','network');
+ card.querySelector('.grok-proxy-save').click();await s.flush();
+ assert.equal(form.elements.proxy.value,'8.8.4.4:8080:u:replacement-password');
+ assert.equal(form.elements.proxy.type,'password');assert.doesNotMatch(card.textContent,/replacement-password/);
+ assert.equal(card.querySelector('.grok-proxy-saved-address').value,'8.8.4.4:8080');
+ s.state.workspace.id='other';const loaded=s.app.load();
+ assert.equal(card.querySelector('.grok-proxy-saved-address').value,'');
+ assert.equal(card.querySelector('.grok-proxy-saved-description').textContent,'');
+ await loaded;assert.equal(form.elements.proxy.value,'');
 });
 
 test('Grok proxy protocol detection cannot become a permanent route and late saves cannot enter another workspace',async t=>{
