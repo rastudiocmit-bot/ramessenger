@@ -2140,22 +2140,35 @@ body:has(#cabinet[hidden]){overflow:auto}
  #pane-connections .gateway-flat .grok-proxy-saved{row-gap:0}
  #pane-connections .gateway-flat .grok-connection-check{padding-top:12px;margin-top:4px}
 }
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-inline-form{display:grid;gap:10px}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-flat-options{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:12px}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-flat-options .fld>span{margin-bottom:6px}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-provider-caption{margin:0;font-size:11px;line-height:1.5}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-provider-actions{border-top:1px solid var(--line);padding-top:12px;gap:10px}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-capabilities{margin:0;display:grid;gap:0}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability{padding:8px 0;border-bottom:1px solid var(--line);gap:10px}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability:last-child{border-bottom:0;padding-bottom:0}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability>span{font-size:12px}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability small{display:inline;margin-left:8px;font-size:11px}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability time{display:block;margin-top:3px;font-size:10px;color:var(--muted)}
-#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability .btn{min-width:108px}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-inline-form{display:grid;gap:10px}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-flat-options{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:12px}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-flat-options .fld>span{margin-bottom:6px}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-provider-caption{margin:0;font-size:11px;line-height:1.5}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-provider-actions{border-top:1px solid var(--line);padding-top:12px;gap:10px}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capabilities{margin:0;display:grid;gap:0}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capability{padding:8px 0;border-bottom:1px solid var(--line);gap:10px}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capability:last-child{border-bottom:0;padding-bottom:0}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capability>span{font-size:12px}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capability small{display:inline;margin-left:8px;font-size:11px}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capability time{display:block;margin-top:3px;font-size:10px;color:var(--muted)}
+#pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capability .btn{min-width:108px}
 @media(max-width:700px){
- #pane-connections [data-gateway=mimo].gateway-flat .gateway-flat-options{grid-template-columns:minmax(0,1fr);gap:10px}
- #pane-connections [data-gateway=mimo].gateway-flat .gateway-capability small{display:block;margin-left:0}
- #pane-connections [data-gateway=mimo].gateway-flat .gateway-capability .btn{min-width:82px}
+ #pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-flat-options{grid-template-columns:minmax(0,1fr);gap:10px}
+ #pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capability small{display:block;margin-left:0}
+ #pane-connections :is([data-gateway=mimo],[data-gateway=mimo_plan]).gateway-flat .gateway-capability .btn{min-width:82px}
+}
+/* Independent accounts share the tallest content height through grid tracks. */
+#pane-connections .gateway-account-grid{display:grid;grid-column:1/-1;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:1fr;gap:16px;align-items:stretch;min-width:0}
+#pane-connections .gateway-account-grid>.gateway-card{align-self:stretch;margin:0!important;min-width:0}
+#pane-connections .gateway-account-grid>.gateway-flat>.card-b{display:flex;flex-direction:column;flex:1;min-height:0}
+#pane-connections .gateway-account-grid #ai-grok-card .grok-proxy-form{display:flex;flex-direction:column;flex:1}
+#pane-connections .gateway-account-grid #ai-grok-card .grok-connection-check{margin-top:auto}
+#pane-connections .gateway-account-grid :is([data-gateway=mimo],[data-gateway=mimo_plan]) .gateway-capabilities{margin-top:auto}
+@media(max-width:1279px){
+ #pane-connections .gateway-account-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:1000px){
+ #pane-connections .gateway-account-grid{grid-template-columns:minmax(0,1fr)}
 }
 #pane-connections .small-tag{background:var(--surface-2);color:var(--muted)}
 #pane-connections .btn-row{flex-wrap:wrap}
