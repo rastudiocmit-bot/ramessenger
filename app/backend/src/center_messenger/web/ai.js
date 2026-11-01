@@ -351,6 +351,8 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       const provider = card.dataset.gateway, mine = seq, requestPath = path(), token = {};
       if (verifying.has(provider) || !settings.gateways?.[provider]?.configured) return;
       if (!savedKeyReady()) return;
+      const oldDiagnostic = card.querySelector(".gateway-diagnostic-result");
+      if (oldDiagnostic) { oldDiagnostic.replaceChildren(); show(oldDiagnostic, false); }
       notice("", errorTarget);
       try {
         for (const capability of capabilities) {

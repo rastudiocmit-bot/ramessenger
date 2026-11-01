@@ -98,6 +98,8 @@ test('Grok access report shows exact HTTP refusal without an inference request',
  s.setDiagnostic({ok:true,http_status:200,message:'Доступен каталог.',models:['grok-4.7'],checked_at:'2026-11-01T08:30:00Z'});
  button.click();await s.flush();assert.match(result.textContent,/HTTP 200/);assert.match(result.textContent,/grok-4.7/);
  assert.equal(card.querySelector('.gateway-status').dataset.state,'','catalogue access never marks inference as verified');
+ card.querySelector('[data-verify=text]').click();await s.flush();
+ assert.equal(result.hidden,true);assert.equal(result.textContent,'','a fresh inference check clears the older access report');
 });
 
 test('an unsaved Grok key cannot accidentally test the previously saved key',async t=>{
