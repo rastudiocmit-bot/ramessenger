@@ -3,7 +3,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs');
 (async()=>{
  const checks=[];
- for(const width of [1440,390,320]){
+ for(const width of [1440,1024,390,320]){
   const browser=await chromium.launch({executablePath:process.env.CM_TEST_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--disable-dev-shm-usage',...JSON.parse(process.env.CM_TEST_CHROMIUM_ARGS||'[]')]});
   try{
    const context=await browser.newContext({viewport:{width,height:1000},isMobile:width<720,hasTouch:width<720,reducedMotion:'reduce'});
@@ -58,14 +58,41 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
    await page.locator('#ai-routes-form button[type=submit]').click();
    await page.waitForFunction(()=>document.querySelector('#voice-active-summary').textContent.includes('MiMo Token Plan'));
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
-   assert.ok(await page.evaluate(()=>{const providers=document.querySelector('.ai-providers').getBoundingClientRect(),routes=document.querySelector('.gateway-routes').getBoundingClientRect(),options=document.querySelector('.gateway-options-grid').getBoundingClientRect();return Math.abs(providers.left-routes.left)<1&&Math.abs(providers.right-routes.right)<1&&Math.abs(options.left-routes.left)<1&&Math.abs(options.right-routes.right)<1;}),'all three sections must share the same left and right edges');
+   assert.ok(await page.evaluate(()=>{const providers=document.querySelector('.ai-providers').getBoundingClientRect(),tools=document.querySelector('.gateway-tools-grid').getBoundingClientRect();return Math.abs(providers.left-tools.left)<1&&Math.abs(providers.right-tools.right)<1;}),'providers and tools share the same outer edges');
+   const checkTools=async()=>{
+    const cards=page.locator('.gateway-tools-grid>.gateway-tools-card');assert.equal(await cards.count(),3);
+    const boxes=await cards.evaluateAll(nodes=>nodes.map(e=>{const r=e.getBoundingClientRect();return {height:r.height,top:r.top,left:r.left,overflow:e.scrollWidth-e.clientWidth};}));
+    assert.ok(Math.max(...boxes.map(e=>e.height))-Math.min(...boxes.map(e=>e.height))<1,'three voice tools have equal height at '+width+': '+JSON.stringify(boxes));
+    assert.ok(boxes.every(e=>e.overflow<=1),'no voice tool overflow');
+    if(width>=1280)assert.ok(boxes.every(e=>Math.abs(e.top-boxes[0].top)<1),'three desktop columns');
+    else if(width>1000){assert.ok(Math.abs(boxes[0].top-boxes[1].top)<1);assert.ok(boxes[2].top>boxes[0].top+boxes[0].height);}
+    else assert.ok(boxes[1].top>boxes[0].top+boxes[0].height&&boxes[2].top>boxes[1].top+boxes[1].height,'single narrow column');
+    assert.equal(await page.locator('.gateway-tools-grid details').count(),0);
+   };
+   await checkTools();
+   await page.locator('#ai-voice-options-form [name=voice_max_seconds]').fill('90');
+   await page.locator('#ai-voice-options-form [name=monthly_limit_rub]').fill('250');
+   await page.locator('#ai-voice-options-form [type=submit]').click();
+   await page.waitForFunction(()=>document.querySelector('#ai-voice-options-result').textContent.includes('сохранены'));
+   const optionsSave=data.mutations.filter(m=>m.method==='PUT'&&m.path.endsWith('/ai/settings')).at(-1);
+   assert.equal(optionsSave.body.voice_max_seconds,90);assert.equal(optionsSave.body.monthly_limit_rub,250);
+   await page.locator('#ai-routes-form [name=synthesis_provider]').selectOption('mimo_plan');
+   await page.locator('#ai-routes-form [type=submit]').click();
+   await page.waitForFunction(()=>!document.querySelector('#ai-synthesis-test').disabled);
+   await page.locator('#ai-synthesis-text').fill('Hello, this is a voice check.');await page.locator('#ai-synthesis-test').click();
+   await page.locator('#ai-synthesis-play:not([hidden])').waitFor();assert.equal(await page.locator('#ai-synthesis-audio').isVisible(),true);
+   assert.equal(data.mutations.filter(m=>m.path.endsWith('/ai/synthesize')).at(-1).body.text,'Hello, this is a voice check.');
+   await page.locator('#ai-synthesis-play').click();await page.waitForFunction(()=>!document.querySelector('#ai-synthesis-audio').paused);
+   await page.locator('#ai-synthesis-audio').evaluate(e=>e.pause());
+   await checkTools();await page.locator('.gateway-tools-grid').screenshot({path:'/tmp/cm-voice-tools-'+width+'.png'});
+
    if(process.env.CM_TEST_SCREENSHOTS){fs.mkdirSync(process.env.CM_TEST_SCREENSHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`ai-gateways-${width}.png`)});}
    await page.locator('#connections-agents-tab').click();
-   assert.ok(await page.locator('#ai-agents-card').evaluate(el=>{const b=el.getBoundingClientRect(),view=el.closest('.connection-view'),cs=getComputedStyle(view),left=view.getBoundingClientRect().left+parseFloat(cs.paddingLeft);return Math.abs(b.left-left)<1&&Math.abs(b.width-(view.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight)))<2;}),'agents card shares the full content width and left edge');
-   await page.locator('#ai-agent-new').click();
+   assert.ok(await page.locator('#ai-agents-card').evaluate(el=>{const b=el.getBoundingClientRect(),view=el.closest('#agents-generic-workarea'),cs=getComputedStyle(view),left=view.getBoundingClientRect().left+parseFloat(cs.paddingLeft);return Math.abs(b.left-left)<1&&Math.abs(b.width-(view.clientWidth-parseFloat(cs.paddingLeft)-parseFloat(cs.paddingRight)))<2;}),'agents card fills its own work area');
+   await page.locator('[data-agent-purpose=text_processing]').click();await page.locator('#ai-agent-new').click();
    await page.locator('#ai-agent-form [name=provider][value=mimo_plan]').check();
    assert.equal(await page.locator('#ai-agent-form [name=model]').inputValue(),'mimo-plan-v2.6-pro');
-   await page.locator('#ai-agent-form [name=task]').selectOption('text_processing');
+   assert.equal(await page.locator('#ai-agent-form [name=task]').inputValue(),'text_processing');
    await page.locator('#ai-agent-form button[type=submit]').click();
    await page.waitForSelector('#ai-agent-list .ai-agent');
    await page.locator('#ai-agent-list .ai-agent').click();
@@ -81,7 +108,7 @@ const {chromium}=require('playwright'),{fixture}=require('./browser_fixture.cjs'
     assert.ok(await page.locator('#connections-'+view+'-view').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'no dark theme overflow');
     if(process.env.CM_TEST_SCREENSHOTS){await page.locator('#pane-connections > .scroll').evaluate(el=>el.scrollTop=0);await page.screenshot({path:path.join(process.env.CM_TEST_SCREENSHOTS,`connections-${view}-dark-${width}.png`)});}
    }
-   checks.push({width,consistent_four_sections:true,gateway_saved:true,capability_checks_independent:true,routes_saved:true,mimo_agent_retained:true,keyboard_tabs:true,no_page_overflow:true});
+   checks.push({width,consistent_four_sections:true,gateway_saved:true,capability_checks_independent:true,routes_saved:true,three_voice_tools:true,recording_options_saved:true,preview_audio_played:true,mimo_agent_retained:true,keyboard_tabs:true,no_page_overflow:true});
   }finally{await browser.close();}
  }
  console.log(JSON.stringify({checks,ok:true},null,2));

@@ -2191,6 +2191,37 @@ body:has(#cabinet[hidden]){overflow:auto}
 @media(max-width:700px){
  #pane-connections .gateway-primary-check .btn{min-width:86px}
 }
+/* Three voice tools keep their own forms, matching the account cards above. */
+#pane-connections .gateway-tools-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:1fr;gap:16px;align-items:stretch;min-width:0}
+#pane-connections .gateway-tools-grid>.gateway-tools-card{align-self:stretch;min-width:0;margin:0;max-width:none}
+#pane-connections .gateway-tools-grid .card-h h3{margin:0;font-size:15px;font-weight:650;line-height:1.4}
+#pane-connections .gateway-tools-grid .card-b{display:flex;flex-direction:column;flex:1;min-height:0;gap:12px}
+#pane-connections .gateway-tools-grid :is(.gateway-tool-description,.form-note){margin:0;font-size:11px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere}
+#pane-connections .gateway-tools-grid form{display:flex;flex-direction:column;flex:1;gap:12px;margin:0;min-width:0}
+#pane-connections .gateway-tools-grid .ai-agent-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+#pane-connections .gateway-tools-grid .fld{display:flex;flex-direction:column;gap:6px;margin:0;min-width:0}
+#pane-connections .gateway-tools-grid .fld>span{margin:0;font-size:12px;line-height:1.5}
+#pane-connections .gateway-tools-grid .fld>small{font-size:11px;line-height:1.5}
+#pane-connections .gateway-tools-grid .voice-options-fields{display:grid;gap:14px}
+#pane-connections .gateway-tools-grid .ai-voice-toggle{min-height:28px}
+#pane-connections .gateway-tools-grid .ai-voice-toggle+ .form-note{margin-top:4px}
+#pane-connections .gateway-tools-grid textarea{display:block;width:100%;min-height:128px;margin:0;padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:var(--surface-2);color:var(--ink);font:inherit;font-size:12px;line-height:1.5;resize:vertical}
+#pane-connections .gateway-tools-grid .gateway-tool-footer{display:grid;gap:8px;margin-top:auto;padding-top:12px;border-top:1px solid var(--line)}
+#pane-connections .gateway-tools-grid .gateway-tool-footer>.btn{width:100%}
+#pane-connections .gateway-tools-grid .gateway-tool-buttons{display:flex;flex-wrap:wrap;gap:8px}
+#pane-connections .gateway-tools-grid .gateway-tool-buttons>.btn{flex:1;min-width:0}
+#pane-connections .gateway-tools-grid #ai-synthesis-play{margin:0}
+#pane-connections .gateway-tools-grid audio{width:100%;max-width:100%;min-width:0;height:40px}
+#pane-connections .gateway-tools-grid :is(#ai-voice-options-result,#ai-synthesis-result):empty{display:none}
+@media(max-width:1279px){
+ #pane-connections .gateway-tools-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:1000px){
+ #pane-connections .gateway-tools-grid{grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:700px){
+ #pane-connections .gateway-tools-grid .ai-agent-row{grid-template-columns:minmax(0,1fr)}
+}
 #pane-connections .small-tag{background:var(--surface-2);color:var(--muted)}
 #pane-connections .btn-row{flex-wrap:wrap}
 #pane-connections .connection-inline-tip{margin:0 0 10px;font-size:12px;line-height:1.6;color:var(--muted)}
