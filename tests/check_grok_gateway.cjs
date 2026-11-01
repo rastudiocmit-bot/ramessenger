@@ -71,10 +71,11 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   assert.ok(await card.evaluate(e=>e.scrollWidth<=e.clientWidth+1),'gateway card overflow at '+width);
   assert.equal(await card.locator('.grok-proxy-saved-address').isVisible(),true);
   assert.equal(await card.locator('.grok-proxy-form').isVisible(),true);
-  await page.waitForFunction(()=>Math.abs(document.querySelector('[data-gateway=grok]').getBoundingClientRect().height-document.querySelector('[data-gateway=mimo]').getBoundingClientRect().height)<1);
   await card.locator('.grok-proxy-form').evaluate(e=>e.scrollIntoView());
   const flatSize=await card.evaluate(e=>({height:e.getBoundingClientRect().height,referenceHeight:document.querySelector('[data-gateway=mimo]').getBoundingClientRect().height,bodyHeight:e.querySelector('.card-b').clientHeight,contentHeight:e.querySelector('.card-b').scrollHeight}));
-  assert.equal(flatSize.height,flatSize.referenceHeight,'Grok height must exactly match MiMo at '+width);
+  assert.equal(await card.evaluate(e=>e.style.height),'','Grok has no forced reference height');
+  const bottomGap=await card.evaluate(e=>e.getBoundingClientRect().bottom-e.querySelector('.grok-connection-check').getBoundingClientRect().bottom);
+  assert.ok(bottomGap<25,'Grok ends after its controls rather than an empty fixed-height area at '+width+': '+bottomGap);
   if(width===1440||width===390||width===320)await card.screenshot({path:'/tmp/cm-grok-harmony-'+width+'.png'});
   assert.ok(flatSize.contentHeight<=flatSize.bodyHeight+1,'flat controls should fit without scrolling at '+width+': '+JSON.stringify(flatSize));
   const alignment=await card.evaluate(e=>['.grok-key-row','.grok-proxy-actions'].map(selector=>{
@@ -87,12 +88,19 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   await card.locator('.reveal').click();assert.equal(await card.locator('[name=api_key]').getAttribute('type'),'password');
   assert.equal(await card.locator('[data-verify=text]').isVisible(),true);
   if(width===1440||width===390)await card.screenshot({path:'/tmp/cm-grok-card-'+width+'.png'});
-  const mimoEditor=page.locator('[data-gateway=mimo] .gateway-credentials > summary');
-  await mimoEditor.click();
-  await page.waitForFunction(()=>Math.abs(document.querySelector('[data-gateway=grok]').getBoundingClientRect().height-document.querySelector('[data-gateway=mimo]').getBoundingClientRect().height)<1);
-  assert.ok((await card.boundingBox()).height>flatSize.height,'height follows an expanded reference card');
-  await mimoEditor.click();
-  await page.waitForFunction(()=>Math.abs(document.querySelector('[data-gateway=grok]').getBoundingClientRect().height-document.querySelector('[data-gateway=mimo]').getBoundingClientRect().height)<1);
+  const mimo=page.locator('[data-gateway=mimo]');
+  assert.equal(await mimo.locator('details').count(),0);
+  for(const name of ['api_key','base_url','protocol'])assert.equal(await mimo.locator(`[name=${name}]`).isVisible(),true);
+  await mimo.locator('[name=api_key]').fill('mimo-synthetic-new-key');
+  await mimo.locator('[name=protocol]').selectOption('responses');
+  await mimo.locator('[type=submit]').click();
+  await page.waitForFunction(()=>document.querySelector('[data-gateway=mimo] [name=api_key]').value==='');
+  const mimoSave=data.mutations.filter(c=>c.path.endsWith('/gateways/mimo')).at(-1);
+  assert.equal(mimoSave.body.api_key,'mimo-synthetic-new-key');assert.equal(mimoSave.body.protocol,'responses');
+  assert.equal(mimoSave.body.base_url,'https://api.xiaomimimo.com/v1');
+  assert.equal(await mimo.locator('details').count(),0);
+  assert.ok(Math.abs((await card.boundingBox()).height-flatSize.height)<1,'MiMo saves do not stretch Grok');
+  if(width===1440||width===390||width===320)await mimo.screenshot({path:'/tmp/cm-mimo-open-'+width+'.png'});
   assert.equal(await card.locator('.grok-proxy-saved-address').inputValue(),'8.8.4.4:8080');
   await page.locator('#connections-agents-tab').click();
   const choose=async task=>{if(width<700&&!await page.locator(`[data-agent-purpose="${task}"]`).isVisible())await page.locator('#agents-back').click();await page.locator(`[data-agent-purpose="${task}"]`).click();await page.locator('[data-agent-section=settings]').click();};
@@ -112,7 +120,7 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   assert.equal(phoneWrites.length,2);assert.equal(phoneWrites[0].body.model,'grok-4.7');assert.equal(phoneWrites[1].body.expected_version,2);
   assert.deepEqual(data.errors,[]);assert.deepEqual(data.unexpected,[]);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'page overflow');
-  reports.push({width,grokHeight:flatSize.height,mimoHeight:flatSize.referenceHeight,noAccordions:true,controlsFit:true,savedKey:true,exactDiagnosticStatus:true,accountStatus:true,textVerified:true,genericTasks:3,phoneModelSaved:true,phoneAsrGateways:4,phoneAsrSaved:true,phoneTested:true,noOverflow:true});await context.close();
+  reports.push({width,grokHeight:flatSize.height,mimoHeight:flatSize.referenceHeight,noAccordions:true,mimoAlwaysOpen:true,mimoSaved:true,naturalHeight:true,controlsFit:true,savedKey:true,exactDiagnosticStatus:true,accountStatus:true,textVerified:true,genericTasks:3,phoneModelSaved:true,phoneAsrGateways:4,phoneAsrSaved:true,phoneTested:true,noOverflow:true});await context.close();
  }finally{await browser.close();}
  }
  console.log(JSON.stringify({reports}));

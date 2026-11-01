@@ -2089,56 +2089,73 @@ body:has(#cabinet[hidden]){overflow:auto}
 #pane-connections :is(input,select,textarea){max-width:100%;min-width:0}
 #pane-connections .fld{min-width:0}
 #pane-connections .fld>small{font-size:11.5px;line-height:1.55;color:var(--muted)}
-/* Flat Grok settings use the same height as MiMo, with three clear groups. */
-#pane-connections #ai-grok-card{display:flex;flex-direction:column;min-height:0;--grok-save-width:128px}
-#pane-connections #ai-grok-card .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
-#pane-connections #ai-grok-card .card-h{flex:none}
-#pane-connections #ai-grok-card .card-b{display:grid;align-content:start;gap:12px;flex:1;min-height:0;overflow-y:auto;padding-top:0;padding-bottom:12px;scrollbar-width:thin}
-#pane-connections #ai-grok-card :is(.fld,.password-field,.form-note){margin:0}
-#pane-connections #ai-grok-card .fld>.grok-key-label{margin-bottom:6px}
-#pane-connections #ai-grok-card :is(.grok-key-row,.grok-proxy-actions){display:grid;grid-template-columns:minmax(0,1fr) var(--grok-save-width) 36px;align-items:end;gap:8px}
-#pane-connections #ai-grok-card .password-field input{padding-right:40px}
-#pane-connections #ai-grok-card .password-field .reveal{display:grid;place-items:center;width:36px;min-height:36px;height:36px;padding:0;font-size:0;color:var(--muted)}
-#pane-connections #ai-grok-card .password-field .reveal:before{content:"";width:18px;height:18px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7'%3E%3Cpath d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E") center/contain no-repeat}
-#pane-connections #ai-grok-card .password-field .reveal[aria-pressed=true]{color:var(--primary-ink)}
-#pane-connections #ai-grok-card :is(.grok-proxy-form,.grok-proxy-saved){display:grid;gap:8px}
-#pane-connections #ai-grok-card .grok-proxy-form{padding-top:12px;border-top:1px solid var(--line)}
-#pane-connections #ai-grok-card .grok-proxy-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px}
-#pane-connections #ai-grok-card .grok-toggle{display:inline-flex;align-items:center;min-height:24px;gap:8px;margin:0;font-weight:600;cursor:pointer}
-#pane-connections #ai-grok-card .grok-toggle input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:30px;height:18px;min-height:0;padding:0;margin:0;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);box-shadow:none;cursor:pointer}
-#pane-connections #ai-grok-card .grok-toggle input:before{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--muted);transition:transform .15s}
-#pane-connections #ai-grok-card .grok-toggle input:checked{background:var(--primary);border-color:var(--primary)}
-#pane-connections #ai-grok-card .grok-toggle input:checked:before{background:#fff;transform:translateX(12px)}
-#pane-connections #ai-grok-card .grok-toggle input:focus-visible{outline:2px solid var(--primary);outline-offset:3px}
-#pane-connections #ai-grok-card .grok-toggle input:disabled{opacity:.5;cursor:default}
-#pane-connections #ai-grok-card .grok-proxy-saved-state{font-size:11px;color:var(--muted)}
-#pane-connections #ai-grok-card .grok-proxy-saved-state[data-state=active]{color:var(--primary-ink)}
-#pane-connections #ai-grok-card .grok-proxy-saved{display:flex;align-items:baseline;flex-wrap:wrap;column-gap:12px;row-gap:2px}
-#pane-connections #ai-grok-card .grok-proxy-address{display:flex;flex:1 1 180px;flex-direction:row;align-items:baseline;gap:6px;margin:0;font-size:11px;font-weight:400;color:var(--muted)}
-#pane-connections #ai-grok-card .grok-proxy-saved-address{flex:1;width:100%;min-width:0;min-height:0;height:20px;border:0;box-shadow:none;background:transparent;padding:0;color:var(--ink);font-size:12px}
-#pane-connections #ai-grok-card .form-note{font-size:11px;line-height:1.5}
-#pane-connections #ai-grok-card :is(.btn,.fld input,.fld select){height:40px;min-height:40px;font-size:12px}
-#pane-connections #ai-grok-card .btn{padding:0 10px;box-shadow:none;line-height:1.25}
-#pane-connections #ai-grok-card .grok-save{width:100%;white-space:nowrap}
-#pane-connections #ai-grok-card .grok-icon{display:grid;place-items:center;width:36px;min-height:40px;height:40px;padding:0;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--muted)}
-#pane-connections #ai-grok-card .grok-icon:hover:not(:disabled){color:var(--danger);border-color:var(--danger)}
-#pane-connections #ai-grok-card .grok-icon svg{width:16px;height:16px}
+/* Grok and the ordinary MiMo account stay open and follow their content. */
+#pane-connections .gateway-flat{display:flex;flex-direction:column;min-height:0;--grok-save-width:128px}
+#pane-connections .gateway-flat .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+#pane-connections .gateway-flat .card-h{flex:none}
+#pane-connections .gateway-flat .card-b{display:grid;align-content:start;gap:12px;min-height:0;padding-top:0;padding-bottom:12px}
+#pane-connections .gateway-flat :is(.fld,.password-field,.form-note){margin:0}
+#pane-connections .gateway-flat .fld>.gateway-key-label{margin-bottom:6px}
+#pane-connections .gateway-flat :is(.grok-key-row,.gateway-key-row,.grok-proxy-actions){display:grid;grid-template-columns:minmax(0,1fr) var(--grok-save-width) 36px;align-items:end;gap:8px}
+#pane-connections .gateway-flat .password-field input{padding-right:40px}
+#pane-connections .gateway-flat .password-field .reveal{display:grid;place-items:center;width:36px;min-height:36px;height:36px;padding:0;font-size:0;color:var(--muted)}
+#pane-connections .gateway-flat .password-field .reveal:before{content:"";width:18px;height:18px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7'%3E%3Cpath d='M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E") center/contain no-repeat}
+#pane-connections .gateway-flat .password-field .reveal[aria-pressed=true]{color:var(--primary-ink)}
+#pane-connections .gateway-flat :is(.grok-proxy-form,.grok-proxy-saved){display:grid;gap:8px}
+#pane-connections .gateway-flat .grok-proxy-form{padding-top:12px;border-top:1px solid var(--line)}
+#pane-connections .gateway-flat .grok-proxy-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12px}
+#pane-connections .gateway-flat .grok-toggle{display:inline-flex;align-items:center;min-height:24px;gap:8px;margin:0;font-weight:600;cursor:pointer}
+#pane-connections .gateway-flat .grok-toggle input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:30px;height:18px;min-height:0;padding:0;margin:0;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);box-shadow:none;cursor:pointer}
+#pane-connections .gateway-flat .grok-toggle input:before{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--muted);transition:transform .15s}
+#pane-connections .gateway-flat .grok-toggle input:checked{background:var(--primary);border-color:var(--primary)}
+#pane-connections .gateway-flat .grok-toggle input:checked:before{background:#fff;transform:translateX(12px)}
+#pane-connections .gateway-flat .grok-toggle input:focus-visible{outline:2px solid var(--primary);outline-offset:3px}
+#pane-connections .gateway-flat .grok-toggle input:disabled{opacity:.5;cursor:default}
+#pane-connections .gateway-flat .grok-proxy-saved-state{font-size:11px;color:var(--muted)}
+#pane-connections .gateway-flat .grok-proxy-saved-state[data-state=active]{color:var(--primary-ink)}
+#pane-connections .gateway-flat .grok-proxy-saved{display:flex;align-items:baseline;flex-wrap:wrap;column-gap:12px;row-gap:2px}
+#pane-connections .gateway-flat .grok-proxy-address{display:flex;flex:1 1 180px;flex-direction:row;align-items:baseline;gap:6px;margin:0;font-size:11px;font-weight:400;color:var(--muted)}
+#pane-connections .gateway-flat .grok-proxy-saved-address{flex:1;width:100%;min-width:0;min-height:0;height:20px;border:0;box-shadow:none;background:transparent;padding:0;color:var(--ink);font-size:12px}
+#pane-connections .gateway-flat .form-note{font-size:11px;line-height:1.5}
+#pane-connections .gateway-flat :is(.btn,.fld input,.fld select){height:40px;min-height:40px;font-size:12px}
+#pane-connections .gateway-flat .btn{padding:0 10px;box-shadow:none;line-height:1.25}
+#pane-connections .gateway-flat :is(.grok-save,.gateway-save){width:100%;white-space:nowrap}
+#pane-connections .gateway-flat :is(.grok-icon,.gateway-icon){display:grid;place-items:center;width:36px;min-height:40px;height:40px;padding:0;border:1px solid var(--line);border-radius:10px;background:transparent;color:var(--muted)}
+#pane-connections .gateway-flat :is(.grok-icon,.gateway-icon):hover:not(:disabled){color:var(--danger);border-color:var(--danger)}
+#pane-connections .gateway-flat :is(.grok-icon,.gateway-icon) svg{width:16px;height:16px}
 #pane-connections #ai-grok-card .gateway-capabilities{margin:0}
 #pane-connections #ai-grok-card .gateway-capability{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));padding:0;border:0;gap:10px 8px}
 #pane-connections #ai-grok-card .gateway-capability>span{grid-column:1/-1;min-width:0}
 #pane-connections #ai-grok-card .gateway-capability>span>small{display:inline;margin-left:8px}
 #pane-connections #ai-grok-card .gateway-capability time{display:block;font-size:10px;margin-top:3px}
-#pane-connections #ai-grok-card .grok-connection-check{border-top:1px solid var(--line);margin-top:0;padding-top:12px;display:grid;gap:8px}
-#pane-connections #ai-grok-card :is(.gateway-diagnostic-result,.grok-proxy-result){max-height:100px;overflow:auto}
-#pane-connections #ai-grok-card :is(.gateway-diagnostic-result,.grok-proxy-result) p{margin:6px 0}
+#pane-connections .gateway-flat .grok-connection-check{border-top:1px solid var(--line);margin-top:0;padding-top:12px;display:grid;gap:8px}
+#pane-connections .gateway-flat :is(.gateway-diagnostic-result,.grok-proxy-result){max-height:100px;overflow:auto}
+#pane-connections .gateway-flat :is(.gateway-diagnostic-result,.grok-proxy-result) p{margin:6px 0}
 @media(max-width:700px){
- #pane-connections #ai-grok-card{--grok-save-width:86px}
- #pane-connections #ai-grok-card .grok-save-object{display:none}
- #pane-connections #ai-grok-card .card-b{gap:12px}
- #pane-connections #ai-grok-card :is(.grok-key-row,.grok-proxy-actions){gap:6px}
- #pane-connections #ai-grok-card .grok-proxy-form{padding-top:12px}
- #pane-connections #ai-grok-card .grok-proxy-saved{row-gap:0}
- #pane-connections #ai-grok-card .grok-connection-check{padding-top:12px;margin-top:4px}
+ #pane-connections .gateway-flat{--grok-save-width:86px}
+ #pane-connections .gateway-flat .grok-save-object{display:none}
+ #pane-connections .gateway-flat .card-b{gap:12px}
+ #pane-connections .gateway-flat :is(.grok-key-row,.gateway-key-row,.grok-proxy-actions){gap:6px}
+ #pane-connections .gateway-flat .grok-proxy-form{padding-top:12px}
+ #pane-connections .gateway-flat .grok-proxy-saved{row-gap:0}
+ #pane-connections .gateway-flat .grok-connection-check{padding-top:12px;margin-top:4px}
+}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-inline-form{display:grid;gap:10px}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-flat-options{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:12px}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-flat-options .fld>span{margin-bottom:6px}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-provider-caption{margin:0;font-size:11px;line-height:1.5}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-provider-actions{border-top:1px solid var(--line);padding-top:12px;gap:10px}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-capabilities{margin:0;display:grid;gap:0}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability{padding:8px 0;border-bottom:1px solid var(--line);gap:10px}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability:last-child{border-bottom:0;padding-bottom:0}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability>span{font-size:12px}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability small{display:inline;margin-left:8px;font-size:11px}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability time{display:block;margin-top:3px;font-size:10px;color:var(--muted)}
+#pane-connections [data-gateway=mimo].gateway-flat .gateway-capability .btn{min-width:108px}
+@media(max-width:700px){
+ #pane-connections [data-gateway=mimo].gateway-flat .gateway-flat-options{grid-template-columns:minmax(0,1fr);gap:10px}
+ #pane-connections [data-gateway=mimo].gateway-flat .gateway-capability small{display:block;margin-left:0}
+ #pane-connections [data-gateway=mimo].gateway-flat .gateway-capability .btn{min-width:82px}
 }
 #pane-connections .small-tag{background:var(--surface-2);color:var(--muted)}
 #pane-connections .btn-row{flex-wrap:wrap}
