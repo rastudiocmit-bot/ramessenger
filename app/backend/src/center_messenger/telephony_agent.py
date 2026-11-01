@@ -11,7 +11,7 @@ from uuid import uuid5
 
 from sqlalchemy import text
 
-from center_messenger import ai_gateways, ai_mimo
+from center_messenger import ai_gateways, ai_mimo, ai_grok
 from center_messenger.accounts import audit
 from center_messenger.ai_deepseek import DeepSeekClient
 from center_messenger.ai_voice import AiVoice, CATALOG, PROVIDERS, model_cost, provider_of, visible
@@ -73,11 +73,12 @@ class TelephonyAgent:
     _credentials = AiVoice._credentials
     _usage = AiVoice._usage
 
-    def __init__(self, accounts, vault, *, yandex=None, deepseek=None, mimo=None):
+    def __init__(self, accounts, vault, *, yandex=None, deepseek=None, mimo=None, grok=None):
         self.accounts, self.vault = accounts, vault
         self.client = yandex or YandexClient()
         self.deepseek = deepseek or DeepSeekClient()
         self.mimo = mimo or ai_mimo.MimoClient()
+        self.grok = grok or ai_grok.GrokClient()
 
     @staticmethod
     def public(row, workspace):
@@ -137,7 +138,7 @@ class TelephonyAgent:
         if not creds.get(provider):
             raise AuthError(409, 'Подключите выбранную модель в разделе «ИИ-шлюзы».')
         self.accounts.throttle(f'telephony-agent-test:{workspace}:{actor.user_id}', limit=5, minutes=1)
-        client = self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == 'deepseek' else self.client
+        client = self.grok if provider == 'grok' else self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == 'deepseek' else self.client
         options = {'api_key': creds[provider], 'folder_id': creds['folder']}
         if provider in ai_gateways.PROVIDERS:
             options |= ai_gateways.options(creds, provider)

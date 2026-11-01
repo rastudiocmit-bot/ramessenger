@@ -118,6 +118,32 @@ class TelephoneWorkerTests(unittest.TestCase):
         self.assertIn(self.store.run['profile']['fixed_rules'],options['prompt'])
         self.assertFalse(options['rules']);self.assertIn('роль не подтверждена',self.client.complete.call_args.args[0])
 
+    def test_grok_summarizes_in_background_using_telephone_profile_and_separate_asr(self):
+        self.store.run['profile']['model']='grok-4.7'
+        self.agent.grok=Mock();self.agent.grok.complete.return_value=self.client.complete.return_value
+        self.worker.credentials=lambda job:{'yandex':'asr-key','grok':'grok-key','folder':'folder'}
+        self.finish()
+        self.assertEqual(self.store.run['phase'],'complete');self.assertEqual(self.client.recognize.call_count,4)
+        self.agent.grok.complete.assert_called_once();options=self.agent.grok.complete.call_args.kwargs
+        self.assertEqual(options['model'],'grok-4.7');self.assertEqual(options['api_key'],'grok-key')
+        self.assertIn(self.store.run['profile']['fixed_rules'],options['prompt'])
+        self.client.complete.assert_not_called();self.agent.mimo.complete.assert_not_called()
+        self.assertGreater(self.store.records['summary:final:00000']['cost'],0)
+
+    def test_grok_key_change_invalidates_background_gateway_snapshot(self):
+        from center_messenger.auth_security import AuthError
+        self.store.run['profile']['model']='grok-4.7'
+        row={'folder_id':'folder','key_ciphertext':'asr-cipher','gateway_config':{'grok':{'key_ciphertext':'first'}}}
+        self.agent._settings=lambda *_:row
+        self.agent._credentials=lambda *_args,**_kwargs:{'grok':'grok-key','yandex':'asr-key','folder':'folder'}
+        job=self.store.claim()
+        TelephoneWorker.credentials(self.worker,job)
+        row['gateway_config']['grok']['checks']={'text':{'ok':True}}
+        TelephoneWorker.credentials(self.worker,job)  # a connectivity check does not change credentials
+        row['gateway_config']['grok']['key_ciphertext']='replacement'
+        with self.assertRaises(AuthError) as failure:TelephoneWorker.credentials(self.worker,job)
+        self.assertEqual(failure.exception.status,409)
+
     def test_recording_wait_is_limited_to_twenty_four_hours_without_paid_requests(self):
         self.store.call['recording_ciphertext']=None
         self.worker.run_next();self.assertEqual(self.store.run['phase'],'waiting_recording')

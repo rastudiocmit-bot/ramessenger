@@ -33,6 +33,10 @@ CASES = (
     'test_telephony_archive_import',
     'test_telephony_media',
     'test_telephony_ai_worker',
+    'test_ai_grok',
+    'test_ai_voice',
+    'test_ai_yandex',
+    'test_ai_mimo',
     'test_phone_care',
     'test_tasks',
 )

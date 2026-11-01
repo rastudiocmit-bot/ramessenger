@@ -117,6 +117,25 @@ class TelephonyAgentTests(unittest.TestCase):
         self.assertFalse(params['rules']); self.assertFalse(result['saved_to_call'])
         self.assertEqual(self.db.usage[0]['a'],defaults(self.workspace)['id'])
         self.vault.open.assert_called_once_with(self.workspace,SECRET_ID,'synthetic-cipher',purpose=PURPOSE)
+
+    def test_grok_is_available_to_telephone_agent_with_separate_recognizer(self):
+        from center_messenger import ai_grok
+        self.save(model='grok-4.6')
+        row=self.db.rows[self.workspace]
+        row.update(key_ciphertext=None,deepseek_key_ciphertext=None)
+        row['gateway_config']['grok']={'key_ciphertext':'grok-sealed'}
+        self.vault.open.return_value={'api_key':'grok-synthetic-key','provider':'grok'}
+        self.service.grok=Mock();self.service.grok.complete.side_effect=self.answer
+        public=self.service.settings(self.actor,self.workspace)
+        self.assertIn('grok-4.6',[m['id'] for m in public['models']])
+        self.assertNotIn('grok',[m['id'] for m in public['recognizers']])
+        result=self.service.test(self.actor,self.workspace,{'expected_version':1,'text':'Перенос занятия.'})
+        options=self.service.grok.complete.call_args.kwargs
+        self.assertEqual(options['model'],'grok-4.6');self.assertEqual(options['api_key'],'grok-synthetic-key')
+        self.assertIn(FIXED_RULES,options['prompt']);self.assertFalse(options['rules'])
+        self.assertGreater(result['cost_rub'],0);self.client.complete.assert_not_called()
+        self.service.deepseek.complete.assert_not_called();self.service.mimo.complete.assert_not_called()
+        self.vault.open.assert_called_once_with(self.workspace,ai_grok.SECRET_ID,'grok-sealed',purpose=ai_grok.PURPOSE)
     def test_budget_and_missing_key_prevent_provider_requests(self):
         self.ready(); row=self.db.rows[self.workspace]; row['monthly_limit_rub']=1; self.db.spent=1
         with self.assertRaises(AuthError) as error: self.service.test(self.actor,self.workspace,{'expected_version':1,'text':'sample'})

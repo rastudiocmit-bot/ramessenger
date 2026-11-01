@@ -20,10 +20,53 @@ and capability checks remain separate; navigation never saves a draft implicitly
 
 - Yandex: Russian SpeechKit recognition and AI Studio text models.
 - DeepSeek: text models only. Selecting DeepSeek for an agent does not send audio to a text endpoint.
+- Grok / xAI: a separate API key and balance, using `https://api.x.ai/v1/responses`.
+  Supported text models: `grok-4.7` and `grok-4.6`. The explicit connection check
+  reads `/language-models`, intersects the accessible IDs/aliases with this
+  supported catalogue, then makes one bounded paid text request. Saving a key
+  or opening a tab makes no provider request. A successful check verifies the
+  tested model; the card lists the supported models exposed to that key.
 - MiMo ordinary API: `https://api.xiaomimimo.com/v1`, separate pay-as-you-go key and balance.
 - MiMo Token Plan: `https://token-plan-sgp.xiaomimimo.com/v1`, separate subscription key and quota. Quota consumption is not presented as free usage; there is no automatic switch to the ordinary API.
 
 All secrets use the existing AES-GCM vault, with workspace, purpose and gateway identity bound as authenticated data. Public settings return only the last four characters. Configure keys in the owner/admin interface; never put keys in git, deployment environment examples or command-line arguments. Replacing a key/address/protocol resets its capability checks. Deleting the selected recognition key disables recording; deleting the selected synthesis key disables synthesis. Other providers' credentials stay intact.
+
+Grok credentials live as ciphertext in `gateway_config.grok`, under the existing
+generic connection envelope and the distinct `center-messenger:grok-ai` UUID.
+The payload also requires a `provider=grok` marker. Public settings explicitly
+project safe metadata and never return the cipher or key. No schema migration,
+new dependency or change to the pinned connector vault is needed.
+
+Grok is selectable for **every agent task**: voice-input text polishing, general
+text processing, tasks from messages, and the separate telephone-conversation
+agent. Agent instructions, defaults and existing selections remain unchanged.
+Telephone ASR remains independently configured with Yandex/MiMo; Grok receives
+the transcript and the telephone agent's instruction for summarization. The
+telephone worker must be updated together with API for this release; see
+[the exact release procedure](operations/grok-gateway-release.md).
+
+Grok uses Bearer authorization at the fixed official origin, rejects redirects,
+disables Responses storage with `store:false`, sends no tools and makes no
+automatic retry or paid-provider switch. Dictation keeps its existing short
+timeout and raw-text fallback. General and telephone agents keep their own
+instructions and usage records. The telephone credential snapshot includes the
+Grok ciphertext, so replacing a key invalidates an unfinished job; updating a
+connection check alone does not invalidate it.
+
+Budget estimates for the supported Grok text models use $2/$6 per million
+input/output tokens at the existing fixed 90 ₽/USD estimate, for the bounded
+short prompts used here. Reasoning tokens are included using the Responses
+usage totals. As with other gateways, the local budget is not a provider-side
+hard spending cap. Verification counts against that budget. It never enables
+automatic processing, changes another agent's model or sends a client message.
+
+Official xAI references (reviewed 2026-11-01):
+- https://docs.x.ai/developers/rest-api-reference/inference
+- https://docs.x.ai/developers/rest-api-reference/inference/responses
+- https://docs.x.ai/developers/rest-api-reference/inference/models
+- https://docs.x.ai/developers/models/grok-4.7
+- https://docs.x.ai/developers/models/grok-4.6
+- https://console.x.ai/
 
 ## Actions
 

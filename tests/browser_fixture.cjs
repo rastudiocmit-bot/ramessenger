@@ -22,9 +22,9 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
         { id: 'deepseek-flash', title: 'DeepSeek V4.1 Flash', provider: 'deepseek', provider_title: 'DeepSeek' },
         { id: 'deepseek-v4-pro', title: 'DeepSeek V4 Pro', provider: 'deepseek', provider_title: 'DeepSeek' },
         { id: 'mimo-v2.6-flash', title: 'MiMo V2.6 Flash', provider: 'mimo', provider_title: 'MiMo' },
-        { id: 'mimo-plan-v2.6-pro', title: 'MiMo V2.6 Pro · Token Plan', provider: 'mimo_plan', provider_title: 'MiMo Token Plan' }],
+        { id: 'mimo-plan-v2.6-pro', title: 'MiMo V2.6 Pro · Token Plan', provider: 'mimo_plan', provider_title: 'MiMo Token Plan' },{id:'grok-4.7',title:'Grok 4.7',provider:'grok',provider_title:'Grok · xAI'},{id:'grok-4.6',title:'Grok 4.6',provider:'grok',provider_title:'Grok · xAI'}],
       deepseek: { configured: false, key_hint: '', status: 'not_configured', error: null },
-      gateways: {recognition_provider:'yandex',recognition_language:'ru',synthesis_provider:'disabled',synthesis_voice:'Mia',synthesis_voices:['Mia','Chloe'],mimo:{configured:false},mimo_plan:{configured:false}},
+      gateways: {recognition_provider:'yandex',recognition_language:'ru',synthesis_provider:'disabled',synthesis_voice:'Mia',synthesis_voices:['Mia','Chloe'],mimo:{configured:false},mimo_plan:{configured:false},grok:{configured:false}},
       tasks: [{ id: 'voice_input', title: 'Голосовой ввод' },{ id:'text_processing', title:'Обработка текста' }], default_model: 'yandexgpt-5.1', default_prompt: 'Нормализуй текст, убери слова-паразиты.' },
     agents: [], transcribe: [], failNext: 0, fallbackNext: 0 };
   context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
@@ -157,9 +157,9 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
     else if (p.endsWith('/ai/settings/verify')) { ai.settings.status = 'active'; payload = { ...ai.settings, ok: true }; }
     else if (p.endsWith('/ai/gateways/yandex/verify')) { ai.settings.gateways.yandex={configured:ai.settings.configured,checks:{synthesis:{ok:true,checked_at:'2026-10-26T12:00:00Z'}}};payload={...ai.settings,ok:true}; }
     else if (p.endsWith('/ai/gateways/routes')) { ai.settings.gateways={...ai.settings.gateways,...entry.body};payload=ai.settings; }
-    else if (/\/ai\/gateways\/(mimo|mimo_plan)(\/verify)?$/.test(p)) {
-      const provider=p.includes('mimo_plan')?'mimo_plan':'mimo',old=ai.settings.gateways[provider];
-      if(p.endsWith('/verify'))old.checks={...old.checks,[entry.body.capability]:{ok:true,checked_at:'2026-10-26T12:00:00Z'}};
+    else if (/\/ai\/gateways\/(mimo|mimo_plan|grok)(\/verify)?$/.test(p)) {
+      const provider=p.split('/gateways/')[1].split('/')[0],old=ai.settings.gateways[provider];
+      if(p.endsWith('/verify')){old.checks={...old.checks,[entry.body.capability]:{ok:true,checked_at:'2026-10-26T12:00:00Z'}};if(provider==='grok')old.models=['grok-4.7','grok-4.6'];}
       else ai.settings.gateways[provider]={...old,configured:!entry.body.clear_key,key_hint:entry.body.api_key?.slice(-4)||'',base_url:entry.body.base_url||old.base_url,protocol:entry.body.protocol||old.protocol};
       payload=ai.settings;
     }

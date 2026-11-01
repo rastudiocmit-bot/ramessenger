@@ -10,7 +10,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   const verifying = new Map();
   const gatewayCards = [...document.querySelectorAll("[data-gateway]")];
   let audioUrl = null, synthesisRoute = null;
-  const providerNames = { yandex: "Yandex Cloud", deepseek: "DeepSeek", mimo: "MiMo", mimo_plan: "MiMo Token Plan" };
+  const providerNames = { yandex: "Yandex Cloud", deepseek: "DeepSeek", mimo: "MiMo", mimo_plan: "MiMo Token Plan", grok: "Grok · xAI" };
   const providerReady = provider => provider === "yandex" ? settings.configured : provider === "deepseek" ? settings.deepseek?.configured : settings.gateways?.[provider]?.configured;
   const money = value => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(Number(value || 0));
   const statusText = { active: "Работает", error: "Ошибка", not_configured: "Не проверено" };
@@ -259,26 +259,31 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   const checkNames = { text: "Обработка текста", recognition: "Распознавание речи", synthesis: "Синтез речи" };
   const checkErrors = { no_balance: "Недостаточно средств", unauthorized: "Ключ отклонён", rate_limited: "Лимит запросов — повторите позже",
     unavailable: "Сервис временно недоступен", network: "Нет связи с сервисом", bad_response: "Сервис вернул некорректный ответ",
-    bad_request: "Сервис не принял запрос", not_connected: "Добавьте ключ", speech_language: "Язык не поддерживается" };
+    bad_request: "Сервис не принял запрос", not_connected: "Добавьте ключ", speech_language: "Язык не поддерживается",
+    model_unknown: "Поддерживаемая модель недоступна для этого ключа" };
   function renderGatewayStatus(card, item) {
     const provider = card.dataset.gateway, checks = item.checks || {}, pending = verifying.get(provider)?.capability;
-    const passed = Object.keys(checkNames).filter(key => checks[key]?.ok === true).length;
-    const failed = Object.keys(checkNames).filter(key => checks[key]?.ok === false);
+    const capabilities = [...card.querySelectorAll('[data-check]')].map(output => output.dataset.check), total = capabilities.length;
+    const passed = capabilities.filter(key => checks[key]?.ok === true).length;
+    const failed = capabilities.filter(key => checks[key]?.ok === false);
     const badge = card.querySelector(".gateway-status"), count = card.querySelector(".gateway-check-count");
     badge.textContent = pending ? "Проверяем…" : !item.configured ? "Не подключено" : failed.length ? "Есть ошибки"
-      : passed === 3 ? "Работает" : passed ? `Проверено ${passed} из 3` : "Не проверено";
-    badge.dataset.state = pending ? "pending" : !item.configured ? "" : failed.length ? "error" : passed === 3 ? "active" : passed ? "partial" : "";
+      : passed === total ? "Работает" : passed ? `Проверено ${passed} из ${total}` : "Не проверено";
+    badge.dataset.state = pending ? "pending" : !item.configured ? "" : failed.length ? "error" : passed === total ? "active" : passed ? "partial" : "";
     badge.title = pending ? `Проверяется: ${checkNames[pending] || "возможности сервиса"}` : !item.configured ? "Сначала сохраните API-ключ."
       : failed.length ? failed.map(key => `${checkNames[key]}: ${checkErrors[checks[key].error_code] || "Проверка не прошла"}`).join(". ")
-      : `Успешно проверено возможностей: ${passed} из 3.`;
-    if (count) count.textContent = pending ? `Проверяем: ${checkNames[pending]}` : item.configured ? `Доступно ${passed} из 3 возможностей` : "Добавьте ключ для проверки";
+      : `Успешно проверено возможностей: ${passed} из ${total}.`;
+    if (count) count.textContent = pending ? `Проверяем: ${checkNames[pending]}` : item.configured ? `Доступно ${passed} из ${total} возможностей` : "Добавьте ключ для проверки";
+    const models = card.querySelector('[data-grok-models]');
+    if (models) models.textContent = item.models?.length ? `Доступные поддерживаемые модели: ${item.models.join(', ')}` : "Поддерживаются Grok 4.7 и Grok 4.6. Доступность для ключа уточняется при проверке.";
     card.querySelector(".gateway-clear").disabled = !item.configured || Boolean(pending);
-    card.querySelector(".gateway-verify-all").disabled = !item.configured || Boolean(pending);
+    const verifyAll = card.querySelector(".gateway-verify-all");
+    if (verifyAll) verifyAll.disabled = !item.configured || Boolean(pending);
     card.querySelector('button[type="submit"]').disabled = Boolean(pending);
     for (const button of card.querySelectorAll("[data-verify]")) {
       const capability = button.dataset.verify, check = item.configured ? checks[capability] : null;
       button.disabled = !item.configured || Boolean(pending);
-      button.textContent = pending === capability ? "Проверяем…" : "Проверить";
+      button.textContent = pending === capability ? "Проверяем…" : provider === "grok" ? "Проверить подключение" : "Проверить";
       const output = card.querySelector(`[data-check="${capability}"]`);
       output.dataset.state = !check ? "" : check.ok ? "active" : "error";
       output.textContent = !check ? "Не проверено" : (check.ok ? "Работает" : checkErrors[check.error_code] || "Проверка не прошла");
@@ -310,7 +315,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       const item = gateways[card.dataset.gateway] || {}, f = card.querySelector("form").elements;
       f.api_key.value = ""; f.api_key.placeholder = item.key_hint ? `Сохранён ключ …${item.key_hint}` : "Вставьте ключ";
       if (item.base_url) f.base_url.value = item.base_url;
-      f.protocol.value = item.protocol || "chat";
+      f.protocol.value = item.protocol || (card.dataset.gateway === "grok" ? "responses" : "chat");
       const details = card.querySelector(".gateway-credentials"); if (details) details.open = !item.configured;
       renderGatewayStatus(card, item);
     }
@@ -351,7 +356,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       }
     }
     for (const button of card.querySelectorAll("[data-verify]")) button.addEventListener("click", () => verifyCapabilities([button.dataset.verify]));
-    card.querySelector(".gateway-verify-all").addEventListener("click", () => verifyCapabilities(Object.keys(checkNames)));
+    card.querySelector(".gateway-verify-all")?.addEventListener("click", () => verifyCapabilities(Object.keys(checkNames)));
   }
   routesForm?.addEventListener("submit", event => {
     event.preventDefault();

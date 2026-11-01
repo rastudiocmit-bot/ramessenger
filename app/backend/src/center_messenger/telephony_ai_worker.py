@@ -5,7 +5,7 @@ import json
 import logging
 
 from sqlalchemy import text
-from center_messenger import ai_gateways, ai_mimo, telephony_archive
+from center_messenger import ai_gateways, ai_mimo, ai_grok, telephony_archive
 from center_messenger.ai_voice import CATALOG, provider_of, model_cost, visible
 from center_messenger.ai_yandex import YandexError, audio_cost
 from center_messenger.auth_security import AuthError
@@ -101,6 +101,7 @@ class TelephoneWorker:
             if any(not creds.get(key) for key in selected):raise AuthError(409,'Подключите выбранные ИИ-шлюзы.')
             config=ai_gateways.config(row)
             keys={p:row.get('key_ciphertext' if p=='yandex' else p+'_key_ciphertext') for p in selected}
+            if 'grok' in selected:keys['grok']=ai_grok.stored(row).get('key_ciphertext')
             stamp=digest(json.dumps({'keys':keys,'folder':row.get('folder_id'),
                 'routes':{p:config.get(p,{}) | {'checks':None} for p in selected if p in ai_gateways.PROVIDERS}},sort_keys=True))
         if job['run']['gateway_hash'] and job['run']['gateway_hash']!=stamp:
@@ -183,7 +184,7 @@ class TelephoneWorker:
         receipt=self.store.receipt(job,operation,input_hash,estimate)
         if receipt is None or not receipt.get('new'):return
         options={'api_key':creds[provider],'folder_id':creds['folder']}
-        client=self.agent.client if provider=='yandex' else self.agent.deepseek if provider=='deepseek' else self.agent.mimo
+        client=self.agent.grok if provider=='grok' else self.agent.client if provider=='yandex' else self.agent.deepseek if provider=='deepseek' else self.agent.mimo
         if provider in ai_gateways.PROVIDERS:
             options|=ai_gateways.options(creds,provider)
             options['protocol']=creds['gateways'].get(provider,{}).get('protocol','chat')

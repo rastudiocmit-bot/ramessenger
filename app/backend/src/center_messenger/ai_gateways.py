@@ -5,7 +5,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import text
 
-from center_messenger import ai_mimo
+from center_messenger import ai_mimo, ai_grok
 from center_messenger.accounts import audit
 from center_messenger.ai_yandex import YandexError, key_hint, silence, TTS_VOICES, tts_cost
 from center_messenger.auth_security import AuthError
@@ -48,6 +48,7 @@ def public(row):
             'base_url': item.get('base_url', ai_mimo.PLAN_URL if provider == 'mimo_plan' else ai_mimo.PAYG_URL),
             'billing': 'subscription' if provider == 'mimo_plan' else 'pay_as_you_go',
         }
+    result['grok'] = ai_grok.public(row)
     result['yandex'] = {'configured': bool(row and row.get('key_ciphertext') and row.get('folder_id')),
                         'checks': saved.get('yandex', {}).get('checks', {})}
     result['synthesis_voices'] = list(ai_mimo.VOICES)
@@ -58,7 +59,7 @@ def public(row):
 
 
 def credentials(service, row, workspace, selected=None):
-    result = {'gateways': config(row)}
+    result = {'gateways': config(row), 'grok': ai_grok.credentials(service, row, workspace, selected)}
     for provider in PROVIDERS:
         cipher = row.get(provider + '_key_ciphertext') if row else None
         result[provider] = service.vault.open(workspace, uuid5(NAMESPACE_URL, 'center-messenger:' + provider),
@@ -75,6 +76,7 @@ def options(creds, provider):
 class Gateways:
     def __init__(self, service):
         self.service = service
+        self.grok = ai_grok.GrokGateway(self)
 
     def _write(self, db, actor, workspace, value):
         db.execute(text("INSERT INTO ai_settings(workspace_id,gateway_config,updated_by) "
@@ -84,6 +86,8 @@ class Gateways:
                    {'w': workspace, 'g': json.dumps(value), 'u': actor.user_id})
 
     def save(self, actor, workspace, provider, data):
+        if provider == 'grok':
+            return self.grok.save(actor, workspace, data)
         if provider not in PROVIDERS:
             raise AuthError(422, 'Неизвестный шлюз.')
         service = self.service
@@ -160,6 +164,8 @@ class Gateways:
             return service._public(db, workspace)
 
     def verify(self, actor, workspace, provider, capability):
+        if provider == 'grok':
+            return self.grok.verify(actor, workspace, capability)
         if provider == 'yandex' and capability == 'synthesis':
             return self.verify_yandex_synthesis(actor, workspace)
         if provider not in PROVIDERS or capability not in ('text', 'recognition', 'synthesis'):

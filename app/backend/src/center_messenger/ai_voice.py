@@ -15,7 +15,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import text
 
-from center_messenger import ai_deepseek, ai_mimo, ai_gateways
+from center_messenger import ai_deepseek, ai_mimo, ai_gateways, ai_grok
 from center_messenger.accounts import audit
 from center_messenger.ai_deepseek import DeepSeekClient
 from center_messenger.ai_yandex import (
@@ -28,7 +28,7 @@ SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:yandex-ai")
 PURPOSE = "yandex-ai"
 DEEPSEEK_SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:deepseek-ai")
 DEEPSEEK_PURPOSE = "deepseek-ai"
-PROVIDERS = {"yandex": "Yandex Cloud", "deepseek": "DeepSeek", "mimo": "MiMo", "mimo_plan": "MiMo Token Plan"}
+PROVIDERS = {"yandex": "Yandex Cloud", "deepseek": "DeepSeek", "mimo": "MiMo", "mimo_plan": "MiMo Token Plan", "grok": "Grok · xAI"}
 
 # Every model an agent may use: provider, title and price in roubles per 1000 tokens.
 CATALOG = {key: {"provider": "yandex", "title": value["title"], "input": value["input"], "output": value["output"]}
@@ -41,6 +41,9 @@ CATALOG.update({key: {"provider": "mimo", "title": value["title"],
     for key, value in ai_mimo.MODELS.items()})
 CATALOG.update({key: {"provider": "mimo_plan", "title": value["title"], "input": 0, "output": 0}
     for key, value in ai_mimo.PLAN_MODELS.items()})
+
+# Shared by generic agents and the explicitly updated telephone worker.
+CATALOG.update({key: {"provider": "grok", **value} for key, value in ai_grok.MODELS.items()})
 
 
 def provider_of(model):
@@ -142,11 +145,12 @@ def _clean_agent(data):
 
 
 class AiVoice:
-    def __init__(self, alfa, client=None, deepseek=None, mimo=None):
+    def __init__(self, alfa, client=None, deepseek=None, mimo=None, grok=None):
         self.accounts, self.vault = alfa.accounts, alfa.vault
         self.client = client or YandexClient()
         self.deepseek = deepseek or DeepSeekClient()
         self.mimo = mimo or ai_mimo.MimoClient()
+        self.grok = grok or ai_grok.GrokClient()
         self.gateways = ai_gateways.Gateways(self)
         from center_messenger.voice_jobs import VoiceJobs
         self.jobs = VoiceJobs(self)
@@ -527,7 +531,7 @@ class AiVoice:
         if not raw:
             return raw, (0, 0), 0.0, False, None
         provider = provider_of(agent["model"])
-        client = self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == "deepseek" else self.client
+        client = self.grok if provider == "grok" else self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == "deepseek" else self.client
         key = creds.get(provider)
         extra = {}
         if provider in ai_gateways.PROVIDERS:
@@ -598,7 +602,7 @@ class AiVoice:
             self.accounts.throttle(f"ai-task:{workspace}:{actor.user_id}", limit=120, minutes=60)
         except AuthError:
             return None
-        client = self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == "deepseek" else self.client
+        client = self.grok if provider == "grok" else self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == "deepseek" else self.client
         extra = {"rules": False, "timeout": timeout}
         if provider in ai_gateways.PROVIDERS:
             extra |= ai_gateways.options(creds, provider)

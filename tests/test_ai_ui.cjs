@@ -5,12 +5,12 @@ async function setup(t){
  const dom=new JSDOM(fs.readFileSync(web+'/index.html','utf8'),{runScripts:'outside-only',url:'https://cabinet.example.test'}),w=dom.window,$=s=>w.document.querySelector(s),calls=[];
  w.HTMLElement.prototype.scrollIntoView=()=>{};
  let settings={folder_id:'folder',configured:true,voice_enabled:true,voice_max_seconds:180,vault_ready:true,status:'active',deepseek:{configured:true,status:'active'},
-  gateways:{recognition_provider:'yandex',recognition_language:'ru',synthesis_provider:'disabled',synthesis_voice:'Mia',synthesis_voices:['Mia'],mimo:{configured:false},mimo_plan:{configured:false}},tasks:[{id:'voice_input',title:'Голосовой ввод'},{id:'text_processing',title:'Обработка текста'}],default_model:'yandexgpt-5.1',default_prompt:'Исправь текст',models:[
-   {id:'yandexgpt-5.1',title:'Yandex Pro',provider:'yandex'},{id:'deepseek-flash',title:'DeepSeek Flash',provider:'deepseek'},{id:'deepseek-v4-pro',title:'DeepSeek Pro',provider:'deepseek'},{id:'mimo-v2.6-flash',title:'MiMo Flash',provider:'mimo'},{id:'mimo-plan-v2.6-pro',title:'MiMo Pro Plan',provider:'mimo_plan'}]};
+  gateways:{recognition_provider:'yandex',recognition_language:'ru',synthesis_provider:'disabled',synthesis_voice:'Mia',synthesis_voices:['Mia'],mimo:{configured:false},mimo_plan:{configured:false},grok:{configured:false}},tasks:[{id:'voice_input',title:'Голосовой ввод'},{id:'text_processing',title:'Обработка текста'},{id:'tasks',title:'Задачи из сообщений'}],default_model:'yandexgpt-5.1',default_prompt:'Исправь текст',models:[
+   {id:'yandexgpt-5.1',title:'Yandex Pro',provider:'yandex'},{id:'deepseek-flash',title:'DeepSeek Flash',provider:'deepseek'},{id:'deepseek-v4-pro',title:'DeepSeek Pro',provider:'deepseek'},{id:'mimo-v2.6-flash',title:'MiMo Flash',provider:'mimo'},{id:'mimo-plan-v2.6-pro',title:'MiMo Pro Plan',provider:'mimo_plan'},{id:'grok-4.7',title:'Grok 4.7',provider:'grok'},{id:'grok-4.6',title:'Grok 4.6',provider:'grok'}]};
  let agents=[],failures=new Map(),checkGate=null;
  const api=async(url,args={})=>{calls.push({url,...args});if(url.endsWith('/settings')){if(args.data)settings={...settings,...args.data};return settings;}
   if(url.endsWith('/gateways/routes')){settings.gateways={...settings.gateways,...args.data};return settings;}
-  if(/\/gateways\/(mimo|mimo_plan)(\/verify)?$/.test(url)){if(url.endsWith('/verify')&&checkGate)await checkGate;const provider=url.includes('mimo_plan')?'mimo_plan':'mimo';if(url.endsWith('/verify'))settings.gateways[provider].checks={...settings.gateways[provider].checks,[args.data.capability]:{ok:!failures.has(provider+':'+args.data.capability),error_code:failures.get(provider+':'+args.data.capability)||null}};else settings.gateways[provider]={...settings.gateways[provider],configured:!args.data.clear_key,key_hint:args.data.api_key?.slice(-4)||'',...args.data,api_key:undefined};return settings;}
+  if(/\/gateways\/(mimo|mimo_plan|grok)(\/verify)?$/.test(url)){if(url.endsWith('/verify')&&checkGate)await checkGate;const provider=url.split('/gateways/')[1].split('/')[0];if(url.endsWith('/verify'))settings.gateways[provider].checks={...settings.gateways[provider].checks,[args.data.capability]:{ok:!failures.has(provider+':'+args.data.capability),error_code:failures.get(provider+':'+args.data.capability)||null}};else settings.gateways[provider]={...settings.gateways[provider],configured:!args.data.clear_key,key_hint:args.data.api_key?.slice(-4)||'',...args.data,api_key:undefined};return settings;}
   if(url.endsWith('/agents/test'))return {text:'Готово',cost_rub:.01};
   if(url.endsWith('/agents')){if(args.data){agents=[{id:'agent',...args.data,task_title:'Голосовой ввод',model_title:'DeepSeek Flash',version:1}];return agents[0];}return {agents};}
   throw Error(url);};
@@ -49,6 +49,39 @@ test('recording duration is submitted and restored from saved settings',async t=
  form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
  assert.equal(s.calls.find(c=>c.method==='PUT'&&c.url.endsWith('/settings')).data.voice_max_seconds,90);
  await s.app.load();assert.equal(form.elements.voice_max_seconds.value,'90');
+});
+
+test('Grok key is saved separately and its single text check becomes active',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway="grok"]'),form=card.querySelector('form');
+ assert.equal(card.closest('[role=tabpanel]').id,'connections-voice-view');
+ assert.equal(card.querySelector('[data-verify=text]').disabled,true);
+ form.elements.api_key.value='xai-synthetic-test-only';form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ const saved=s.calls.find(c=>c.url.endsWith('/gateways/grok'));
+ assert.equal(saved.data.protocol,'responses');assert.equal(saved.data.base_url,'https://api.x.ai/v1');
+ assert.equal(form.elements.api_key.value,'');assert.equal(s.calls.filter(c=>c.url.endsWith('/verify')).length,0);
+ card.querySelector('[data-verify=text]').click();await s.flush();
+ assert.equal(s.calls.find(c=>c.url.endsWith('/grok/verify')).data.capability,'text');
+ assert.equal(card.querySelector('.gateway-status').dataset.state,'active');
+ assert.match(card.querySelector('.gateway-status').title,/1 из 1/);
+ assert.equal(s.$('#ai-routes-form').elements.recognition_provider.querySelector('[value=grok]'),null);
+ assert.equal(s.$('#ai-routes-form').elements.synthesis_provider.querySelector('[value=grok]'),null);
+ card.querySelector('.gateway-clear').click();await s.flush();
+ assert.equal(card.querySelector('[data-verify=text]').disabled,true);
+ assert.equal(card.querySelector('.gateway-status').textContent,'Не подключено');
+});
+
+test('every generic agent task can select and test the exact Grok model',async t=>{
+ const s=await setup(t);s.$('#ai-agent-new').click();const form=s.$('#ai-agent-form');
+ for(const task of ['voice_input','text_processing','tasks']){
+  form.elements.task.value=task;form.querySelector('[name=provider][value=grok]').click();
+  assert.deepEqual([...form.elements.model.options].map(o=>o.value),['grok-4.7','grok-4.6']);
+  form.elements.model.value='grok-4.6';s.$('#ai-agent-sample').value='Пример текста';
+  s.$('#ai-agent-test').click();await s.flush();
+  const call=s.calls.filter(c=>c.url.endsWith('/agents/test')).at(-1);
+  assert.equal(call.data.task,task);assert.equal(call.data.model,'grok-4.6');
+ }
+ form.dispatchEvent(new s.w.Event('submit',{bubbles:true,cancelable:true}));await s.flush();
+ assert.equal(s.calls.find(c=>c.method==='POST'&&c.url.endsWith('/agents')).data.model,'grok-4.6');
 });
 
 test('MiMo accounts expose separate cards and tests for each capability',async t=>{

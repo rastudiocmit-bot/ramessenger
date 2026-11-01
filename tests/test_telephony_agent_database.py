@@ -57,6 +57,28 @@ class TelephonyAgentDatabaseTests(unittest.TestCase):
         value=self.service.settings(self.actor,self.workspace)
         self.assertEqual((value['version'],value['prompt']),(2,'Актуальная инструкция'))
 
+    def test_grok_cipher_and_phone_profile_survive_each_others_json_updates(self):
+        from center_messenger import ai_gateways, ai_grok
+        from center_messenger.connector_vault import ConnectorVault
+        self.save(model='grok-4.7')
+        vault=ConnectorVault(None);vault._key=lambda:b'g'*32
+        gateway_service=SimpleNamespace(accounts=self.service.accounts,_settings=self.service._settings,
+            vault=vault,_public=lambda db,w:{'gateways':ai_gateways.public(self.service._settings(db,w))})
+        gateways=ai_gateways.Gateways(gateway_service)
+        key='xai-'+'synthetic-database-key'*2
+        public=gateways.save(self.actor,self.workspace,'grok',{'api_key':key})
+        self.assertTrue(public['gateways']['grok']['configured'])
+        self.assertNotIn(key,str(public));self.assertNotIn('key_ciphertext',str(public))
+        self.save(1,model='grok-4.7',prompt='Сохрани отрицания и договорённости.')
+        row=self.service._settings(self.db,self.workspace)
+        self.assertEqual(ai_grok.credentials(gateway_service,row,self.workspace,{'grok'}),key)
+        self.assertEqual(row['gateway_config']['telephony_agent']['version'],2)
+        self.assertNotIn(key,str(row['gateway_config']))
+        gateways.save(self.actor,self.workspace,'grok',{'clear_key':True})
+        value=TelephonyAgent(self.service.accounts,Mock()).settings(self.actor,self.workspace)
+        self.assertEqual(value['model'],'grok-4.7');self.assertEqual(value['version'],2)
+        self.assertFalse(ai_grok.public(self.service._settings(self.db,self.workspace))['configured'])
+
     def test_foreign_workspace_cannot_read_the_dedicated_agent_namespace(self):
         self.save(); self.db.execute(text('GRANT USAGE ON SCHEMA "'+self.schema+'" TO cm_app'))
         self.db.execute(text('SET LOCAL ROLE cm_app'))
