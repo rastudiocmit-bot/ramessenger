@@ -2089,6 +2089,23 @@ body:has(#cabinet[hidden]){overflow:auto}
 #pane-connections :is(input,select,textarea){max-width:100%;min-width:0}
 #pane-connections .fld{min-width:0}
 #pane-connections .fld>small{font-size:11.5px;line-height:1.55;color:var(--muted)}
+#pane-connections #ai-grok-card .card-b{display:grid;gap:14px}
+#pane-connections #ai-grok-card :is(.gateway-provider-caption,.form-note){margin:0}
+#pane-connections #ai-grok-card :is(.gateway-credentials,.grok-proxy-check,.grok-diagnostics){margin:0;padding:0;border:0;border-top:1px solid var(--line)}
+#pane-connections #ai-grok-card summary{padding:10px 0;font-size:12px;font-weight:600;line-height:1.5;color:var(--primary-ink);cursor:pointer;overflow-wrap:anywhere}
+#pane-connections #ai-grok-card summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+#pane-connections #ai-grok-card details[open]>summary{margin-bottom:4px}
+#pane-connections #ai-grok-card :is(.gateway-form,.grok-proxy-form,.grok-proxy-advanced[open],.grok-diagnostics[open]){display:grid;gap:12px}
+#pane-connections #ai-grok-card :is(.fld,.btn-row){margin:0}
+#pane-connections #ai-grok-card .grok-proxy-saved{display:grid;gap:8px}
+#pane-connections #ai-grok-card .grok-proxy-saved>p:first-child{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:6px;margin:0;font-size:12px}
+#pane-connections #ai-grok-card .grok-proxy-saved-state{color:var(--muted);font-size:11px}
+#pane-connections #ai-grok-card .grok-proxy-saved-state[data-state=active]{color:var(--primary-ink)}
+#pane-connections #ai-grok-card .grok-proxy-saved-address{font-size:12px;padding:9px 12px}
+#pane-connections #ai-grok-card .gateway-capabilities{margin:0}
+#pane-connections #ai-grok-card .gateway-capability{padding:0 0 10px;border:0}
+#pane-connections #ai-grok-card .grok-connection-check{border-top:1px solid var(--line);padding-top:14px}
+#pane-connections #ai-grok-card :is(.gateway-diagnostic-result,.grok-proxy-result) p{margin:6px 0}
 #pane-connections .small-tag{background:var(--surface-2);color:var(--muted)}
 #pane-connections .btn-row{flex-wrap:wrap}
 #pane-connections .connection-inline-tip{margin:0 0 10px;font-size:12px;line-height:1.6;color:var(--muted)}

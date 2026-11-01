@@ -43,6 +43,9 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   await page.waitForFunction(()=>!document.querySelector('[data-gateway=grok] [data-verify=text]').disabled);
   assert.equal(await card.locator('[name=api_key]').inputValue(),'');
   assert.equal(data.mutations.filter(c=>c.path.endsWith('/grok/verify')).length,0);
+  assert.equal(await card.locator('.grok-diagnostics').getAttribute('open'),null);
+  assert.equal(await card.locator('.gateway-diagnostic').isVisible(),false);
+  await card.locator('.grok-diagnostics > summary').click();
   await card.locator('.gateway-diagnostic').click();await card.locator('.gateway-diagnostic-result strong').first().waitFor();
   assert.match(await card.locator('.gateway-diagnostic-result').textContent(),/HTTP 403/);
   assert.match(await card.locator('.gateway-diagnostic-result').textContent(),/Состояние ключа: HTTP 200/);
@@ -52,6 +55,7 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   assert.equal(diagnostics,1);assert.equal(data.mutations.filter(c=>c.path.endsWith('/grok/verify')).length,0);
   await card.locator('.grok-proxy-check > summary').click();
   await card.locator('.grok-proxy-form [name=proxy]').fill('8.8.4.4:8080:synthetic:synthetic-password-only');
+  await card.locator('.grok-proxy-advanced > summary').click();
   await card.locator('.grok-proxy-submit').click();await card.locator('.grok-proxy-result strong').waitFor();
   assert.equal(await card.locator('.grok-proxy-form [name=proxy]').inputValue(),'');
   assert.match(await card.locator('.grok-proxy-result').textContent(),/HTTP 200/);assert.match(await card.locator('.grok-proxy-result').textContent(),/SOCKS5/);
@@ -68,6 +72,12 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   await card.locator('[data-verify=text]').click();await page.waitForFunction(()=>document.querySelector('[data-gateway=grok] .gateway-status').dataset.state==='active');
   assert.match(await card.locator('[data-grok-models]').textContent(),/grok-4.7/);
   assert.ok(await card.evaluate(e=>e.scrollWidth<=e.clientWidth+1),'gateway card overflow at '+width);
+  await card.locator('.grok-proxy-check > summary').click();
+  await card.locator('.grok-diagnostics > summary').click();
+  assert.equal(await card.locator('.grok-proxy-saved-address').isVisible(),true);
+  assert.equal(await card.locator('.grok-proxy-form').isVisible(),false);
+  assert.equal(await card.locator('.gateway-diagnostic-result').isVisible(),false);
+  assert.equal(await card.locator('[data-verify=text]').isVisible(),true);
   if(width===1440||width===390)await card.screenshot({path:'/tmp/cm-grok-card-'+width+'.png'});
   await page.locator('#connections-agents-tab').click();
   const choose=async task=>{if(width<700&&!await page.locator(`[data-agent-purpose="${task}"]`).isVisible())await page.locator('#agents-back').click();await page.locator(`[data-agent-purpose="${task}"]`).click();await page.locator('[data-agent-section=settings]').click();};

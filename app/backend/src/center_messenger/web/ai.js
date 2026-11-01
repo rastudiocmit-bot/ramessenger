@@ -344,6 +344,8 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       if (item.base_url) f.base_url.value = item.base_url;
       f.protocol.value = item.protocol || (card.dataset.gateway === "grok" ? "responses" : "chat");
       const details = card.querySelector(".gateway-credentials"); if (details) details.open = !item.configured;
+      if (details && card.dataset.gateway === 'grok') details.querySelector('summary').textContent = item.configured
+        ? `API-ключ · ${item.key_hint ? '…' + item.key_hint : 'сохранён'}` : 'API-ключ';
       const diagnostic = card.querySelector(".gateway-diagnostic-result");
       if (diagnostic) { diagnostic.replaceChildren(); show(diagnostic, false); }
       card.querySelector('.grok-proxy-form')?.reset();
@@ -356,12 +358,13 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         card.querySelector('.grok-route-note').textContent = proxy.enabled ? `Все агенты Grok используют ${proxy.protocol === 'http' ? 'HTTP CONNECT' : 'SOCKS5'} · ${proxy.endpoint}` : 'Все агенты Grok используют прямое подключение.';
         const stored = proxy.configured === true, enabled = stored && proxy.enabled === true;
         card.querySelector('.grok-proxy-saved-address').value = stored ? proxy.endpoint || '' : '';
+        show(card.querySelector('.grok-proxy-address'), stored);
         const status = card.querySelector('.grok-proxy-saved-state');
         status.textContent = stored ? enabled ? 'Сохранён · включён' : 'Сохранён · выключен' : 'Не сохранён';
         status.dataset.state = enabled ? 'active' : '';
         card.querySelector('.grok-proxy-saved-description').textContent = stored
-          ? `${proxy.protocol === 'http' ? 'HTTP CONNECT' : 'SOCKS5'} · пароль сохранён зашифрованным и скрыт. Пустое поле ниже сохраняет прежние данные.`
-          : 'Сохраните прокси в настройках ниже. После обновления страницы он останется здесь.';
+          ? `${proxy.protocol === 'http' ? 'HTTP CONNECT' : 'SOCKS5'} · пароль сохранён и скрыт.`
+          : 'Прямое подключение. Прокси можно добавить ниже.';
       }
       const proxyResult = card.querySelector('.grok-proxy-result');
       if (proxyResult) { proxyResult.replaceChildren(); show(proxyResult, false); }
