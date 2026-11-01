@@ -87,24 +87,22 @@ Both reads use the same saved key, seven-second request timeouts, no redirects
 and no retries. An unavailable second read preserves the original HTTP 403;
 two forbidden responses do not establish a bad key or a regional block.
 Explicit JSON origin/region denials are distinguished without another read.
-The ordinary pinned checker historically combined 401/403 as `unauthorized`,
-so the Grok card now describes that stored code neutrally rather than asserting
-that the key was rejected. This does not alter the protected checker or its
-saved checks. Account information: https://docs.x.ai/developers/rest-api-reference/inference/other
+Older checks combined 401/403 as `unauthorized`; the card describes that stored
+code neutrally. The persistent-proxy client now records HTTP 403 separately as
+`forbidden`. Account information: https://docs.x.ai/developers/rest-api-reference/inference/other
 
 A non-empty unsaved Grok key now blocks both inference verification and the
 access report until it is saved. Verification never silently uses the old key
 while a replacement is sitting in the form. Access reports are transient and
 are discarded on settings reload or workspace/account change.
 
-This follow-up is API/UI only. All 136 protected hashes and the installed
-Grok telephone contract remain unchanged. The existing deployment owner may
-publish it through the normal timer/service; no guard installation or worker
-pin update is required. Publication is not proof that the VPS has installed it.
+The original access-report releases were API/UI-only. The persistent proxy
+route below changes the protected AI/telephone transport and requires a paired
+release with explicit server admission. Publication is not proof of installation.
 
 ### One-off Grok proxy access test
 
-The Grok card also offers «Проверить доступ через прокси». An owner/admin
+Inside «Прокси для всех агентов Grok», «Проверить без сохранения» lets an owner/admin
 enters a public IPv4, port, username and password as a single password field,
 and chooses SOCKS5, HTTP CONNECT or protocol detection. The authenticated,
 CSRF-protected POST uses the saved Grok key for the same two bounded read-only
@@ -126,6 +124,34 @@ not a deployed proxy route for every agent. A production transport change is
 a separate protected API/telephone-worker release and still requires the
 existing exact-SHA server admission; do not bypass that guard to make the
 diagnostic route behave like a production transport.
+
+### Persistent route for all Grok agents
+
+«Сохранить подключение» stores an optional HTTP CONNECT or SOCKS5 proxy. Its
+own vault identity (`center-messenger:grok-proxy`) and provider marker isolate
+the sealed payload from the API key. The existing generic vault envelope uses
+its `api_key` string field for the proxy credential string; the vault's purpose
+allowlist and validation are unchanged. Public settings expose endpoint,
+protocol and configured/enabled flags only. The password is never returned.
+Blank input preserves the existing password; replacing the API key preserves
+the proxy. Deleting the Grok key deletes this connection's proxy too.
+
+The route is passed explicitly per request for connection verification, voice
+text polishing, general text, task assistance, telephone-agent tests and
+background call summaries. No process-wide proxy is installed. A proxy or TLS
+failure is reported without direct fallback or another paid request. ASR and
+other providers keep their own independent routes. The permanent route requires
+an explicit protocol; automatic detection is available only for the one-off test.
+
+Changing the active route invalidates the saved connection check. Late checks
+cannot verify a replaced key or route. The telephone gateway snapshot includes
+the active proxy ciphertext, so an unfinished job detects a proxy change before
+another paid call. Existing direct-mode jobs retain their original hash format.
+The diagnostic button uses the saved active route; a one-off proxy input affects
+only that particular diagnostic request. Saving performs no provider calls.
+
+The protected release updates API and telephony together with the existing
+deploy owner; see [the admission procedure](operations/grok-proxy-release.md).
 
 Protocol references:
 - https://docs.python.org/3.12/library/http.client.html

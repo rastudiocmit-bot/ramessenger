@@ -69,9 +69,16 @@ class TelephonyAgentDatabaseTests(unittest.TestCase):
         public=gateways.save(self.actor,self.workspace,'grok',{'api_key':key})
         self.assertTrue(public['gateways']['grok']['configured'])
         self.assertNotIn(key,str(public));self.assertNotIn('key_ciphertext',str(public))
+        proxy_value='8.8.4.4:8080:synthetic-user:synthetic-database-proxy-password'
+        proxy_public=gateways.grok.save_proxy(self.actor,self.workspace,
+            {'proxy':proxy_value,'protocol':'socks5','enabled':True})
+        self.assertTrue(proxy_public['gateways']['grok']['proxy']['enabled'])
+        self.assertNotIn('synthetic-database-proxy-password',str(proxy_public))
         self.save(1,model='grok-4.7',prompt='Сохрани отрицания и договорённости.')
         row=self.service._settings(self.db,self.workspace)
         self.assertEqual(ai_grok.credentials(gateway_service,row,self.workspace,{'grok'}),key)
+        self.assertEqual(ai_grok.proxy_credentials(gateway_service,row,self.workspace,{'grok'}).protocol,'socks5')
+        self.assertNotIn(proxy_value,str(row['gateway_config']))
         self.assertEqual(row['gateway_config']['telephony_agent']['version'],2)
         self.assertNotIn(key,str(row['gateway_config']))
         gateways.save(self.actor,self.workspace,'grok',{'clear_key':True})

@@ -169,5 +169,21 @@ class GrokAccessTests(unittest.TestCase):
         identity.assert_called_once_with(request,mutation=True)
         self.assertEqual(result['http_status'],403)
 
+    def test_saved_proxy_is_used_for_diagnostics_and_a_route_switch_invalidates_the_result(self):
+        from center_messenger import grok_proxy_probe as proxy
+        self.setup.save_proxy(proxy='8.8.4.4:8080:u:synthetic-password',enabled=True)
+        transport=proxy.ProxyOpener(proxy.parse('8.8.4.4:8080:u:synthetic-password','socks5'))
+        transport.open=self.opener;transport.protocol='socks5';transport.tunnel=transport.tls=True
+        before=deepcopy(self.db.settings)
+        with patch.object(proxy,'ProxyOpener',return_value=transport):result=g.diagnose(self.ai,ACTOR,WS)
+        self.assertTrue(result['ok']);self.assertEqual(result['route'],'proxy')
+        self.assertIn('сохранённый прокси',result['message']);self.assertEqual(before,self.db.settings)
+        def switched(request,timeout):
+            self.setup.save_proxy(enabled=False)
+            return self.opener(request,timeout)
+        transport.open=switched
+        with patch.object(proxy,'ProxyOpener',return_value=transport):result=g.diagnose(self.ai,ACTOR,WS)
+        self.assertEqual(result['code'],'stale');self.assertNotIn('proxy',result)
+
 
 if __name__=='__main__':unittest.main()

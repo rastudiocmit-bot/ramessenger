@@ -3,6 +3,7 @@ import json
 import unittest
 from copy import deepcopy
 from uuid import uuid4
+from unittest.mock import Mock, patch
 
 # Installs the existing minimal account/SQL stand-ins in a bare local runtime.
 from test_ai_voice import service, blank_settings, ACTOR, WS, FakeDB, Result
@@ -65,7 +66,7 @@ class TransportTests(unittest.TestCase):
                 g.GrokClient(FakeOpener(payload)).models(api_key=KEY)
 
     def test_http_failures_are_sanitized_and_never_retried_or_redirected(self):
-        for status, code in ((401, 'unauthorized'), (403, 'unauthorized'), (402, 'no_balance'),
+        for status, code in ((401, 'unauthorized'), (403, 'forbidden'), (402, 'no_balance'),
                              (429, 'rate_limited'), (404, 'model_unknown'), (400, 'bad_request'),
                              (503, 'unavailable'), (302, 'unavailable')):
             with self.subTest(status=status):
@@ -101,6 +102,28 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(YandexError):
             g.GrokClient(wire).complete('x', prompt='x', model='grok-imagine-image', temperature=0, api_key=KEY)
         self.assertEqual(wire.requests, [])
+
+    def test_proxy_is_scoped_to_one_request_and_never_falls_back_to_direct(self):
+        from center_messenger import grok_proxy_probe as proxy
+        config=proxy.parse('8.8.4.4:8080:synthetic-user:synthetic-password','socks5')
+        direct,wire=FakeOpener(response()),FakeOpener(response())
+        transport=Mock(open=wire)
+        with patch.object(proxy,'ProxyOpener',return_value=transport) as factory:
+            result=complete(g.GrokClient(direct),proxy=config,rules=False)
+        factory.assert_called_once_with(config,allow_inference=True)
+        self.assertEqual(result['text'],'Готово.');self.assertEqual(direct.requests,[])
+        self.assertEqual(json.loads(wire.requests[0][0].data)['model'],'grok-4.7')
+        transport=Mock();transport.open.side_effect=proxy.ProxyFailure('proxy_auth')
+        with patch.object(proxy,'ProxyOpener',return_value=transport):
+            with self.assertRaises(YandexError) as error:complete(g.GrokClient(direct),proxy=config)
+        self.assertEqual(error.exception.code,'proxy_auth');transport.open.assert_called_once()
+        self.assertEqual(direct.requests,[])
+
+    def test_proxy_http_status_is_checked_even_when_transport_does_not_raise_http_error(self):
+        from test_ai_yandex import FakeResponse
+        reply=FakeResponse(b'{"error":"private-provider-text"}');reply.status=403
+        with self.assertRaises(YandexError) as error:complete(g.GrokClient(lambda *_args,**_kw:reply))
+        self.assertEqual(error.exception.code,'forbidden');self.assertNotIn('private',str(error.exception))
 
 
 class GatewayDB(FakeDB):
@@ -139,6 +162,8 @@ class GatewayTests(unittest.TestCase):
 
     def save(self, **data): return self.ai.gateways.save(ACTOR, WS, 'grok', data)
     def verify(self): return self.ai.gateways.verify(ACTOR, WS, 'grok', 'text')
+    def save_proxy(self,**data):
+        return self.ai.gateways.grok.save_proxy(ACTOR,WS,{'protocol':'socks5','enabled':True,**data})
 
     def test_save_is_encrypted_private_and_has_no_provider_requests(self):
         self.db.settings['gateway_config'] = {'telephony_agent': {'model': 'yandexgpt-5.1'}, 'mimo': {'key_hint': 'other'}}
@@ -252,6 +277,73 @@ class GatewayTests(unittest.TestCase):
         params=self.ai.grok.calls[-1][1]
         self.assertEqual(params['model'],'grok-4.7');self.assertEqual(params['api_key'],KEY)
         self.assertIn('Studio rules',params['prompt']);self.assertFalse(params['rules'])
+
+    def test_proxy_is_encrypted_and_isolated_from_other_keys_and_phone_profile(self):
+        self.save(api_key=KEY)
+        self.db.settings['gateway_config']['telephony_agent']={'model':'grok-4.7','version':4}
+        result=self.save_proxy(proxy='8.8.4.4:8080:synthetic-user:synthetic-password')
+        item=g.stored(self.db.settings);public=result['gateways']['grok']['proxy']
+        self.assertTrue(public['enabled']);self.assertEqual(public['endpoint'],'8.8.4.4:8080')
+        for value in (str(result),json.dumps(self.db.settings['gateway_config'])):
+            self.assertNotIn('synthetic-password',value);self.assertNotIn('synthetic-user',value)
+        self.assertNotIn('proxy_ciphertext',str(result))
+        creds=self.ai._credentials(self.db,WS,yandex=False,selected={'grok'})
+        self.assertEqual(creds['grok_proxy'].protocol,'socks5');self.assertEqual(creds['grok_proxy'].password,'synthetic-password')
+        self.assertEqual(self.db.settings['gateway_config']['telephony_agent']['version'],4)
+        self.assertEqual(self.ai.grok.calls,[]);self.assertEqual(self.db.usage,[])
+        cipher=item['proxy_ciphertext']
+        for workspace,identity in ((uuid4(),g.PROXY_SECRET_ID),(WS,g.SECRET_ID)):
+            with self.assertRaises(AuthError):self.ai.vault.open(workspace,identity,cipher,purpose=g.PURPOSE)
+
+    def test_proxy_changes_invalidate_checks_blank_preserves_and_key_replacement_keeps_proxy(self):
+        self.save(api_key=KEY);self.save_proxy(proxy='8.8.4.4:8080:u:synthetic-password');self.verify()
+        item=deepcopy(g.stored(self.db.settings));self.assertTrue(item['checks']['text']['ok'])
+        self.save_proxy(proxy=None);self.assertEqual(g.stored(self.db.settings),item)
+        self.save_proxy(enabled=False);self.assertNotIn('checks',g.stored(self.db.settings))
+        self.assertIsNone(g.proxy_credentials(self.ai,self.db.settings,WS,{'grok'}))
+        self.save_proxy(enabled=True);self.verify()
+        proxy_cipher=g.stored(self.db.settings)['proxy_ciphertext']
+        self.save(api_key=KEY+'b');self.assertEqual(g.stored(self.db.settings)['proxy_ciphertext'],proxy_cipher)
+        self.assertNotIn('checks',g.stored(self.db.settings))
+        self.save_proxy(enabled=False,clear_proxy=True)
+        self.assertFalse(g.public(self.db.settings)['proxy']['configured'])
+        self.assertEqual(g.credentials(self.ai,self.db.settings,WS),KEY+'b')
+
+    def test_broken_proxy_is_fail_closed_only_for_selected_grok(self):
+        self.save(api_key=KEY);self.save_proxy(proxy='8.8.4.4:8080:u:synthetic-password')
+        self.db.settings['gateway_config']['grok']['proxy_ciphertext']='broken'
+        with self.assertRaises(AuthError):self.ai._credentials(self.db,WS,yandex=False,selected={'grok'})
+        self.assertIsNone(g.proxy_credentials(self.ai,self.db.settings,WS,{'yandex'}))
+        self.assertEqual(self.ai.grok.calls,[])
+
+    def test_proxy_settings_require_admin_and_reject_unsafe_targets_and_conflicting_actions(self):
+        self.save(api_key=KEY)
+        for options in ({'proxy':'127.0.0.1:8080:u:p'},{'proxy':'8.8.4.4:8080:u:p','protocol':'auto'},
+                {'proxy':'8.8.4.4:8080:u:p','clear_proxy':True},{'proxy':None}):
+            before=deepcopy(self.db.settings)
+            with self.assertRaises(AuthError):self.save_proxy(**options)
+            self.assertEqual(self.db.settings,before)
+        self.ai.accounts.role='operator'
+        with self.assertRaises(AuthError) as error:self.save_proxy(proxy='8.8.4.4:8080:u:p')
+        self.assertEqual(error.exception.status,403)
+
+    def test_generic_text_and_task_agents_use_the_saved_proxy_without_other_provider_calls(self):
+        self.save(api_key=KEY);self.save_proxy(proxy='8.8.4.4:8080:u:synthetic-password')
+        creds=self.ai._credentials(self.db,WS,yandex=False,selected={'grok'})
+        for task in ai_voice.TASKS:
+            self.ai._normalize('Пример',{'model':'grok-4.7','task':task,'prompt':'Инструкция','temperature':.1},creds)
+            self.assertEqual(self.ai.grok.calls[-1][1]['proxy'],creds['grok_proxy'])
+        self.db.agents=[{'id':uuid4(),'name':'Tasks','task':'tasks','prompt':'Rules','model':'grok-4.7','temperature':.1}]
+        self.ai.assist(ACTOR,WS,'Task instruction','Conversation')
+        self.assertEqual(self.ai.grok.calls[-1][1]['proxy'],creds['grok_proxy'])
+        self.assertEqual(self.ai.client.calls,[]);self.assertEqual(self.ai.deepseek.calls,[])
+
+    def test_late_check_cannot_verify_a_switched_proxy_route(self):
+        self.save(api_key=KEY);self.save_proxy(proxy='8.8.4.4:8080:u:synthetic-password')
+        self.ai.grok.callback=lambda:self.save_proxy(enabled=False)
+        result=self.verify()
+        self.assertTrue(result['stale']);self.assertNotIn('checks',g.stored(self.db.settings))
+        self.assertEqual(len(self.ai.grok.calls),2)
 
 
 if __name__ == '__main__': unittest.main()

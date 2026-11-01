@@ -148,8 +148,9 @@ def diagnose(service, actor, workspace, *, opener=None, proxy_data=None):
     with service.accounts.transaction(actor, snapshot=True) as db:
         service.accounts._workspace(db, actor, workspace, manage=True)
         row = service._settings(db, workspace)
-        original = ai_grok.stored(row).get('key_ciphertext')
+        original = ai_grok.connection_stamp(row)
         key = ai_grok.credentials(service, row, workspace, {'grok'})
+        saved_proxy = ai_grok.proxy_credentials(service, row, workspace, {'grok'}) if proxy_data is None else None
     if not key:
         raise AuthError(409, 'Сначала сохраните API-ключ Grok.')
     service.accounts.throttle(f'grok-access:{workspace}:{actor.user_id}', limit=5, minutes=1)
@@ -158,17 +159,22 @@ def diagnose(service, actor, workspace, *, opener=None, proxy_data=None):
         from center_messenger.grok_proxy_probe import ProxyOpener, parse
         proxy = ProxyOpener(parse(proxy_data['proxy'], proxy_data.get('protocol', 'auto')))
         opener = proxy.open
+    elif saved_proxy is not None:
+        from center_messenger.grok_proxy_probe import ProxyOpener
+        proxy = ProxyOpener(saved_proxy)
+        opener = proxy.open
     result = probe(key, opener)
     if proxy is not None:
         result.update(route='proxy', proxy=proxy.public())
         if result['ok']:
-            result['message'] = 'Через прокси получен каталог моделей xAI. Для рабочих запросов агентов прокси пока не включён.'
+            result['message'] = ('Через прокси получен каталог моделей xAI. Разовая проверка не меняет настройки агентов.'
+                if proxy_data is not None else 'Каталог моделей xAI доступен через сохранённый прокси Grok.')
         elif result['http_status'] == 403:
             result['message'] = 'xAI вернул HTTP 403 и через прокси. Точная причина запрета этим ответом не раскрыта.'
         elif result['http_status'] is None:
             result['message'] = 'Не удалось выполнить проверку xAI через прокси.'
     with service.accounts.transaction(actor, snapshot=True) as db:
         service.accounts._workspace(db, actor, workspace, manage=True)
-        if ai_grok.stored(service._settings(db, workspace)).get('key_ciphertext') != original:
+        if ai_grok.connection_stamp(service._settings(db, workspace)) != original:
             return report('stale')
     return result

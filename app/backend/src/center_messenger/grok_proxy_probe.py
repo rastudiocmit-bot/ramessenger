@@ -1,4 +1,4 @@
-"""One-off proxy access test. Never configures application transports or stores secrets."""
+"""Fixed-origin xAI tunnel. Read-only by default; Responses requires explicit opt-in."""
 import base64
 from dataclasses import dataclass, field
 import http.client
@@ -64,8 +64,9 @@ class Reply:
 
 
 class ProxyOpener:
-    def __init__(self, config):
+    def __init__(self, config, *, allow_inference=False):
         self.config = config
+        self.allow_inference = allow_inference
         self.protocol = None if config.protocol == 'auto' else config.protocol
         self.tunnel = self.tls = False
         self.failure = None
@@ -139,7 +140,10 @@ class ProxyOpener:
             raise
 
     def open(self, request, timeout=7):
-        if request.full_url not in URLS or request.get_method() != 'GET' or request.data is not None:
+        readonly = request.full_url in URLS and request.get_method() == 'GET' and request.data is None
+        inference = (self.allow_inference and request.full_url == f'https://{HOST}/v1/responses'
+                     and request.get_method() == 'POST' and isinstance(request.data, bytes))
+        if not (readonly or inference):
             raise ValueError('Unsupported proxy diagnostic destination')
         sock = connection = None
         try:
@@ -147,7 +151,7 @@ class ProxyOpener:
             choices = [self.protocol] if self.protocol else ['socks5', 'http']
             for index, protocol in enumerate(choices):
                 try:
-                    sock, deadline = self.connect(protocol, min(float(timeout), 7))
+                    sock, deadline = self.connect(protocol, min(float(timeout), 30 if self.allow_inference else 7))
                     self.protocol, self.tunnel = protocol, True
                     break
                 except (ProxyFailure, TimeoutError) as error:
@@ -161,8 +165,9 @@ class ProxyOpener:
             self.tls = True
             connection = http.client.HTTPSConnection(HOST, 443, timeout=self.remaining(deadline), context=context)
             connection.sock = sock
-            connection.request('GET', request.selector,
-                headers={'Authorization': request.get_header('Authorization'), 'Accept': 'application/json'})
+            connection.request(request.get_method(), request.selector, body=request.data,
+                headers={'Authorization': request.get_header('Authorization'), 'Accept': 'application/json',
+                         'Content-Type': 'application/json'})
             return Reply(connection.getresponse(), connection)
         except (OSError, http.client.HTTPException) as error:
             self.failure = (error.code if isinstance(error, ProxyFailure) else 'proxy_tls'

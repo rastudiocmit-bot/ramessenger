@@ -113,6 +113,18 @@ class ProxyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):opener.open(req)
             dial.assert_not_called()
 
+    def test_explicit_production_opt_in_allows_only_fixed_responses_post_with_original_body(self):
+        sock=Socket(b'HTTP/1.1 200 OK\r\n\r\n');dial,tls,factory,context,connection=self.mocks(sock)
+        config=p.parse(ADDRESS,'http');opener=p.ProxyOpener(config,allow_inference=True)
+        req=urllib.request.Request('https://api.x.ai/v1/responses',data=b'{"store":false}',headers={'Authorization':'Bearer '+KEY})
+        with dial,tls,factory:
+            with opener.open(req,timeout=25):pass
+        self.assertEqual(connection.request.call_args.args,('POST','/v1/responses'))
+        self.assertEqual(connection.request.call_args.kwargs['body'],b'{"store":false}')
+        self.assertEqual(connection.request.call_args.kwargs['headers']['Content-Type'],'application/json')
+        self.assertNotIn(KEY.encode(),b''.join(sock.sent))
+        with self.assertRaises(ValueError):opener.open(urllib.request.Request('https://other.test/v1/responses',data=b'{}'))
+
     def test_http_refusal_is_returned_without_following_redirects_or_paid_calls(self):
         sock=Socket(b'HTTP/1.1 200 OK\r\n\r\n');dial,tls,factory,context,connection=self.mocks(sock)
         connection.getresponse.return_value.status=302
@@ -146,6 +158,17 @@ class ProxyTests(unittest.TestCase):
             grok_proxy_diagnostic(WS,model,req)
         identity.assert_called_once_with(req,mutation=True)
         self.assertEqual(diagnose.call_args.kwargs['proxy_data']['proxy'],ADDRESS)
+
+    def test_persistent_settings_route_masks_secrets_and_requires_csrf_identity(self):
+        from types import SimpleNamespace
+        from center_messenger.ai_api import GrokProxySettings,save_grok_proxy
+        model=GrokProxySettings(proxy=ADDRESS,protocol='socks5',enabled=True)
+        self.assertNotIn(SECRET,repr(model));self.assertNotIn(SECRET,model.model_dump_json())
+        service=MagicMock();req=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ai_voice=service)))
+        with patch('center_messenger.ai_api.identity',return_value=ACTOR) as identity:save_grok_proxy(WS,model,req)
+        identity.assert_called_once_with(req,mutation=True)
+        service.gateways.grok.save_proxy.assert_called_once_with(ACTOR,WS,
+            {'proxy':ADDRESS,'protocol':'socks5','enabled':True,'clear_proxy':False})
 
 
 if __name__=='__main__':unittest.main()

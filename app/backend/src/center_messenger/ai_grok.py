@@ -1,5 +1,6 @@
 """xAI text gateway. Fixed HTTPS origin, sealed key, no automatic paid retries."""
 import json
+import http.client
 import re
 import urllib.error
 import urllib.request
@@ -10,6 +11,7 @@ from center_messenger.ai_yandex import FIXED_RULES, YandexError, key_hint
 
 BASE_URL = "https://api.x.ai/v1"
 SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:grok-ai")
+PROXY_SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:grok-proxy")
 # The vault's existing generic connection envelope binds workspace + connection
 # identity. A distinct Grok identity and payload marker isolate this account
 # without changing the pinned vault contract or the database schema.
@@ -35,7 +37,31 @@ def public(row):
     return {"configured": configured, "key_hint": item.get("key_hint", "") if configured else "",
             "status": "active" if check.get("ok") is True else "error" if check.get("ok") is False else "not_configured",
             "checks": checks, "models": item.get("models", []) if configured else [],
-            "base_url": BASE_URL, "protocol": "responses", "billing": "pay_as_you_go"}
+            "base_url": BASE_URL, "protocol": "responses", "billing": "pay_as_you_go",
+            "proxy": {"configured": bool(item.get("proxy_ciphertext")), "enabled": item.get("proxy_enabled") is True,
+                      "endpoint": item.get("proxy_endpoint", ""), "protocol": item.get("proxy_protocol", "socks5")}}
+
+
+def connection_stamp(row):
+    item = stored(row)
+    if item.get("proxy_enabled") is True:
+        return {"key": item.get("key_ciphertext"), "proxy": item.get("proxy_ciphertext"),
+                "protocol": item.get("proxy_protocol")}
+    return item.get("key_ciphertext")
+
+
+def proxy_credentials(service, row, workspace, selected=None):
+    item = stored(row)
+    if item.get("proxy_enabled") is not True or selected is not None and "grok" not in selected:
+        return None
+    from center_messenger.auth_security import AuthError
+    from center_messenger.grok_proxy_probe import parse
+    if not item.get("proxy_ciphertext"):
+        raise AuthError(503, "Не удалось прочитать сохранённый прокси Grok.")
+    payload = service.vault.open(workspace, PROXY_SECRET_ID, item["proxy_ciphertext"], purpose=PURPOSE)
+    if payload.get("provider") != "grok_proxy" or payload.get("protocol") not in ("http", "socks5"):
+        raise AuthError(503, "Не удалось прочитать сохранённый прокси Grok.")
+    return parse(payload.get("api_key"), payload["protocol"])
 
 
 def credentials(service, row, workspace, selected=None):
@@ -58,21 +84,30 @@ class GrokClient:
     def __init__(self, opener=None):
         self.opener = opener or urllib.request.build_opener(NoRedirect()).open
 
-    def _request(self, path, *, api_key, body=None, timeout=25):
+    def _request(self, path, *, api_key, body=None, timeout=25, proxy=None):
         request = urllib.request.Request(BASE_URL + path,
             data=json.dumps(body, ensure_ascii=False).encode() if body is not None else None,
             method="POST" if body is not None else "GET",
             headers={"Authorization": "Bearer " + api_key.strip(), "Content-Type": "application/json"})
+        def failure(status):
+            return ("unauthorized" if status == 401 else "forbidden" if status == 403 else "no_balance" if status == 402
+                    else "rate_limited" if status == 429 else "model_unknown" if status == 404
+                    else "bad_request" if status in (400, 413, 422) else "unavailable")
+        opener = self.opener
+        if proxy is not None:
+            from center_messenger.grok_proxy_probe import ProxyOpener
+            opener = ProxyOpener(proxy, allow_inference=True).open
         try:
-            with self.opener(request, timeout=timeout) as response:
+            with opener(request, timeout=timeout) as response:
                 raw = response.read(2_000_001)
+                status = getattr(response, "status", 200)
+                if status != 200:
+                    raise YandexError(failure(status), status)
         except urllib.error.HTTPError as error:
-            code = ("unauthorized" if error.code in (401, 403) else "no_balance" if error.code == 402
-                    else "rate_limited" if error.code == 429 else "model_unknown" if error.code == 404
-                    else "bad_request" if error.code in (400, 413, 422) else "unavailable")
-            raise YandexError(code, error.code) from None
-        except (urllib.error.URLError, TimeoutError, OSError):
-            raise YandexError("network") from None
+            raise YandexError(failure(error.code), error.code) from None
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
+            from center_messenger.grok_proxy_probe import ProxyFailure
+            raise YandexError(error.code if isinstance(error, ProxyFailure) else "network") from None
         try:
             if len(raw) > 2_000_000:
                 raise ValueError()
@@ -83,8 +118,8 @@ class GrokClient:
         except (ValueError, TypeError):
             raise YandexError("bad_response") from None
 
-    def models(self, *, api_key):
-        payload = self._request("/language-models", api_key=api_key, timeout=10)
+    def models(self, *, api_key, proxy=None):
+        payload = self._request("/language-models", api_key=api_key, timeout=10, proxy=proxy)
         try:
             models = payload["models"]
             if not isinstance(models, list):
@@ -99,7 +134,7 @@ class GrokClient:
             raise YandexError("bad_response") from None
 
     def complete(self, text, *, prompt, model, temperature, api_key, max_tokens=1500,
-                 rules=True, timeout=25, **_):
+                 rules=True, timeout=25, proxy=None, **_):
         if model not in MODELS:
             raise YandexError("model_unknown")
         body = {"model": model, "input": [
@@ -107,7 +142,7 @@ class GrokClient:
             {"role": "user", "content": text}],
             "temperature": float(temperature), "max_output_tokens": int(max_tokens),
             "reasoning": {"effort": "low"}, "stream": False, "store": False}
-        payload = self._request("/responses", api_key=api_key, body=body, timeout=timeout)
+        payload = self._request("/responses", api_key=api_key, body=body, timeout=timeout, proxy=proxy)
         try:
             usage = payload["usage"]
             # xAI Responses exposes prompt/completion token counters. Accept the
@@ -152,13 +187,55 @@ class GrokGateway:
             row = service._settings(db, workspace, lock=True)
             saved, item = dict(row.get("gateway_config") or {}), stored(row)
             if key:
-                item = {"key_ciphertext": service.vault.seal(workspace, SECRET_ID, {"api_key": key, "provider": "grok"}, purpose=PURPOSE),
+                item = {k: v for k, v in item.items() if k.startswith("proxy_")} | {"key_ciphertext": service.vault.seal(workspace, SECRET_ID, {"api_key": key, "provider": "grok"}, purpose=PURPOSE),
                         "key_hint": key_hint(key)}
             if clear:
                 item = {}
             saved["grok"] = item
             self.gateways._write(db, actor, workspace, saved)
             audit(db, "ai_gateway_updated", user_id=actor.user_id, workspace_id=workspace)
+            return service._public(db, workspace)
+
+    def save_proxy(self, actor, workspace, data):
+        from center_messenger.accounts import audit
+        from center_messenger.auth_security import AuthError
+        from center_messenger.grok_proxy_probe import parse
+        enabled, clear = data['enabled'], data.get('clear_proxy', False)
+        value, protocol = (data.get('proxy') or '').strip(), data['protocol']
+        if protocol not in ('http', 'socks5'):
+            raise AuthError(422, 'Для постоянного подключения выберите HTTP CONNECT или SOCKS5.')
+        if clear and (value or enabled):
+            raise AuthError(422, 'Сохранение и удаление прокси — разные действия.')
+        parsed = parse(value, protocol) if value else None
+        with self.service.accounts.transaction(actor) as db:
+            service = self.service
+            service.accounts._workspace(db, actor, workspace, manage=True)
+            row = service._settings(db, workspace, lock=True)
+            item = stored(row)
+            if not item.get('key_ciphertext'):
+                raise AuthError(409, 'Сначала сохраните API-ключ Grok.')
+            original = connection_stamp(row)
+            if clear:
+                item = {k: v for k, v in item.items() if not k.startswith('proxy_')}
+            else:
+                if not value and item.get('proxy_ciphertext') and item.get('proxy_protocol') != protocol:
+                    payload = service.vault.open(workspace, PROXY_SECRET_ID, item['proxy_ciphertext'], purpose=PURPOSE)
+                    if payload.get('provider') != 'grok_proxy':
+                        raise AuthError(503, 'Не удалось прочитать сохранённый прокси Grok.')
+                    value = payload.get('api_key')
+                    parsed = parse(value, protocol)
+                if value:
+                    item.update(proxy_ciphertext=service.vault.seal(workspace, PROXY_SECRET_ID,
+                        {'provider': 'grok_proxy', 'api_key': value, 'protocol': protocol}, purpose=PURPOSE),
+                        proxy_protocol=protocol, proxy_endpoint=f'{parsed.host}:{parsed.port}')
+                if enabled and not item.get('proxy_ciphertext'):
+                    raise AuthError(422, 'Введите данные прокси перед включением.')
+                item['proxy_enabled'] = enabled
+            if connection_stamp({'gateway_config': {'grok': item}}) != original:
+                item.pop('checks', None); item.pop('models', None)
+            saved = dict(row.get('gateway_config') or {}); saved['grok'] = item
+            self.gateways._write(db, actor, workspace, saved)
+            audit(db, 'ai_grok_proxy_updated', user_id=actor.user_id, workspace_id=workspace)
             return service._public(db, workspace)
 
     def verify(self, actor, workspace, capability):
@@ -171,18 +248,19 @@ class GrokGateway:
             row = service._settings(db, workspace)
             if row and row["monthly_limit_rub"] is not None and service._month_spent(db, workspace) >= float(row["monthly_limit_rub"]):
                 raise AuthError(429, "Месячный лимит исчерпан.")
-            original_cipher = stored(row).get("key_ciphertext")
+            original_connection = connection_stamp(row)
             key = credentials(service, row, workspace, {"grok"})
+            proxy = proxy_credentials(service, row, workspace, {"grok"})
         if not key:
             raise AuthError(409, "Сначала сохраните API-ключ Grok.")
         service.accounts.throttle(f"ai-grok-check:{workspace}:{actor.user_id}", limit=5, minutes=1)
         error, models, tokens, cost = None, [], (0, 0), 0.0
         try:
-            models = service.grok.models(api_key=key)
+            models = service.grok.models(api_key=key, proxy=proxy)
             if not models:
                 raise YandexError("model_unknown")
             answer = service.grok.complete("Ready?", prompt="Reply only: OK.", model=models[0],
-                temperature=0, api_key=key, max_tokens=256, rules=False)
+                temperature=0, api_key=key, max_tokens=256, rules=False, proxy=proxy)
             tokens = answer["input_tokens"], answer["output_tokens"]
             price = MODELS[models[0]]
             cost = (tokens[0] * price["input"] + tokens[1] * price["output"]) / 1000
@@ -195,7 +273,7 @@ class GrokGateway:
         with service.accounts.transaction(actor) as db:
             service.accounts._workspace(db, actor, workspace, manage=True)
             row = service._settings(db, workspace, lock=True)
-            if stored(row).get("key_ciphertext") != original_cipher:
+            if connection_stamp(row) != original_connection:
                 return service._public(db, workspace) | {"ok": False, "stale": True}
             saved, item = dict(row.get("gateway_config") or {}), stored(row)
             item.update(models=models, checks={"text": {"ok": error is None, "error_code": error,

@@ -59,7 +59,8 @@ def public(row):
 
 
 def credentials(service, row, workspace, selected=None):
-    result = {'gateways': config(row), 'grok': ai_grok.credentials(service, row, workspace, selected)}
+    result = {'gateways': config(row), 'grok': ai_grok.credentials(service, row, workspace, selected),
+              'grok_proxy': ai_grok.proxy_credentials(service, row, workspace, selected)}
     for provider in PROVIDERS:
         cipher = row.get(provider + '_key_ciphertext') if row else None
         result[provider] = service.vault.open(workspace, uuid5(NAMESPACE_URL, 'center-messenger:' + provider),

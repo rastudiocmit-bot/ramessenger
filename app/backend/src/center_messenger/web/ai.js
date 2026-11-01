@@ -263,11 +263,13 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
 
   const checkNames = { text: "Обработка текста", recognition: "Распознавание речи", synthesis: "Синтез речи" };
   const checkErrors = { no_balance: "Недостаточно средств", unauthorized: "Ключ отклонён", rate_limited: "Лимит запросов — повторите позже",
+    forbidden: "xAI запретил доступ", proxy_auth: "Прокси не принял логин или пароль", proxy_network: "Нет связи через прокси",
+    proxy_protocol: "Не удалось согласовать протокол прокси", proxy_denied: "Прокси запретил соединение с xAI", proxy_tls: "Ошибка защищённого соединения через прокси",
     unavailable: "Сервис временно недоступен", network: "Нет связи с сервисом", bad_response: "Сервис вернул некорректный ответ",
     bad_request: "Сервис не принял запрос", not_connected: "Добавьте ключ", speech_language: "Язык не поддерживается",
     model_unknown: "Поддерживаемая модель недоступна для этого ключа" };
   function gatewayCheckError(provider, code) {
-    // The installed Grok checker records both HTTP 401 and 403 as unauthorized.
+    // Older Grok checks recorded both HTTP 401 and 403 as unauthorized.
     // That legacy code alone cannot establish that a saved key is invalid.
     if (provider === "grok" && code === "unauthorized") return "Доступ к xAI не подтверждён — уточните причину ошибки";
     return checkErrors[code] || "Проверка не прошла";
@@ -279,7 +281,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     const passed = capabilities.filter(key => checks[key]?.ok === true).length;
     const failed = capabilities.filter(key => checks[key]?.ok === false);
     const badge = card.querySelector(".gateway-status"), count = card.querySelector(".gateway-check-count");
-    badge.textContent = pending ? "Проверяем…" : !item.configured ? "Не подключено" : failed.length ? "Есть ошибки"
+    badge.textContent = verifying.get(provider)?.saving ? "Сохраняем…" : pending ? "Проверяем…" : !item.configured ? "Не подключено" : failed.length ? "Есть ошибки"
       : passed === total ? "Работает" : passed ? `Проверено ${passed} из ${total}` : "Не проверено";
     badge.dataset.state = pending ? "pending" : !item.configured ? "" : failed.length ? "error" : passed === total ? "active" : passed ? "partial" : "";
     badge.title = pending ? `Проверяется: ${pendingName || "возможности сервиса"}` : !item.configured ? "Сначала сохраните API-ключ."
@@ -297,6 +299,8 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     if (proxyForm) {
       proxyForm.querySelector('[type=submit]').disabled = !item.configured || Boolean(pending);
       for (const field of proxyForm.querySelectorAll('input,select')) field.disabled = Boolean(pending);
+      for (const button of proxyForm.querySelectorAll('button')) button.disabled = !item.configured || Boolean(pending);
+      proxyForm.querySelector('.grok-proxy-remove').disabled = !item.proxy?.configured || Boolean(pending);
     }
     card.querySelector('button[type="submit"]').disabled = Boolean(pending);
     for (const button of card.querySelectorAll("[data-verify]")) {
@@ -339,6 +343,14 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       const diagnostic = card.querySelector(".gateway-diagnostic-result");
       if (diagnostic) { diagnostic.replaceChildren(); show(diagnostic, false); }
       card.querySelector('.grok-proxy-form')?.reset();
+      const proxyForm = card.querySelector('.grok-proxy-form');
+      if (proxyForm) {
+        const proxy = item.proxy || {};
+        proxyForm.elements.enabled.checked = proxy.enabled === true;
+        proxyForm.elements.protocol.value = proxy.protocol || 'socks5';
+        proxyForm.elements.proxy.placeholder = proxy.configured ? 'Прокси сохранён; пустое поле сохраняет пароль' : 'IPv4:порт:логин:пароль';
+        card.querySelector('.grok-route-note').textContent = proxy.enabled ? `Все агенты Grok используют ${proxy.protocol === 'http' ? 'HTTP CONNECT' : 'SOCKS5'} · ${proxy.endpoint}` : 'Все агенты Grok используют прямое подключение.';
+      }
       const proxyResult = card.querySelector('.grok-proxy-result');
       if (proxyResult) { proxyResult.replaceChildren(); show(proxyResult, false); }
       renderGatewayStatus(card, item);
@@ -445,6 +457,28 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         if (mine === seq && owner === who()) renderGatewayStatus(card, settings.gateways[provider]);
       }
     });
+    async function saveProxy(clear = false) {
+      const form = card.querySelector('.grok-proxy-form'), provider = card.dataset.gateway, mine = seq, owner = who(), token = {};
+      if (verifying.has(provider) || !settings?.gateways?.[provider]?.configured || !savedKeyReady()) return;
+      const proxy = form.elements.proxy.value.trim(), protocol = form.elements.protocol.value;
+      if (!clear && protocol === 'auto') { notice('Для постоянного подключения выберите HTTP CONNECT или SOCKS5.', errorTarget); return; }
+      const data = clear ? {enabled:false,clear_proxy:true,protocol:settings.gateways[provider].proxy?.protocol || 'socks5'}
+        : {enabled:form.elements.enabled.checked,protocol,proxy:proxy || null};
+      form.elements.proxy.value = '';
+      notice('', errorTarget);verifying.set(provider,{capability:'text',proxy:true,saving:true,token});renderGatewayStatus(card,settings.gateways[provider]);
+      try {
+        const loaded = await api(path() + '/proxy',{method:'PUT',data});
+        if (mine !== seq || owner !== who()) return;
+        settings.gateways[provider] = loaded.gateways[provider];renderSettings();
+        toast(clear ? 'Прокси Grok удалён.' : 'Настройки подключения Grok сохранены. Проверьте подключение.');
+      } catch (error) { if (mine === seq && owner === who() && error.name !== 'AbortError') notice(error.message,errorTarget); }
+      finally {
+        if (verifying.get(provider)?.token === token) verifying.delete(provider);
+        if (mine === seq && owner === who()) renderGatewayStatus(card,settings.gateways[provider]);
+      }
+    }
+    card.querySelector('.grok-proxy-save')?.addEventListener('click',()=>saveProxy());
+    card.querySelector('.grok-proxy-remove')?.addEventListener('click',()=>saveProxy(true));
   }
   routesForm?.addEventListener("submit", event => {
     event.preventDefault();

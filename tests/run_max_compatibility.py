@@ -34,6 +34,8 @@ CASES = (
     'test_telephony_media',
     'test_telephony_ai_worker',
     'test_ai_grok',
+    'test_grok_access',
+    'test_grok_proxy_probe',
     'test_ai_voice',
     'test_ai_yandex',
     'test_ai_mimo',

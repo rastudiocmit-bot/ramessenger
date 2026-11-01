@@ -10,6 +10,9 @@ async function setup(t){
  let agents=[],failures=new Map(),checkGate=null,diagnostic={ok:false,http_status:403,code:'forbidden',message:'xAI запретил доступ с сервера.',models:[],checked_at:'2026-11-01T08:26:56Z'};
  const api=async(url,args={})=>{calls.push({url,...args});if(url.endsWith('/settings')){if(args.data)settings={...settings,...args.data};return settings;}
   if(url.endsWith('/gateways/grok/diagnostic')||url.endsWith('/gateways/grok/proxy-diagnostic')){if(checkGate)await checkGate;return diagnostic;}
+  if(url.endsWith('/gateways/grok/proxy')){if(checkGate)await checkGate;const item=settings.gateways.grok;
+   item.proxy=args.data.clear_proxy?{configured:false,enabled:false,protocol:'socks5',endpoint:''}:{configured:!!args.data.proxy||item.proxy?.configured,enabled:args.data.enabled,protocol:args.data.protocol,endpoint:'8.8.4.4:8080'};
+   delete item.checks;delete item.models;return settings;}
   if(url.endsWith('/gateways/routes')){settings.gateways={...settings.gateways,...args.data};return settings;}
   if(/\/gateways\/(mimo|mimo_plan|grok)(\/verify)?$/.test(url)){if(url.endsWith('/verify')&&checkGate)await checkGate;const provider=url.split('/gateways/')[1].split('/')[0];if(url.endsWith('/verify'))settings.gateways[provider].checks={...settings.gateways[provider].checks,[args.data.capability]:{ok:!failures.has(provider+':'+args.data.capability),error_code:failures.get(provider+':'+args.data.capability)||null}};else settings.gateways[provider]={...settings.gateways[provider],configured:!args.data.clear_key,key_hint:args.data.api_key?.slice(-4)||'',...args.data,api_key:undefined};return settings;}
   if(url.endsWith('/agents/test'))return {text:'Готово',cost_rub:.01};
@@ -167,6 +170,31 @@ test('late proxy response is discarded and an unsaved Grok key blocks the proxy 
  keyForm.elements.api_key.value='';const release=s.holdChecks();form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));
  s.state.workspace.id='other';await s.app.load();release();await s.flush();
  assert.equal(card.querySelector('.grok-proxy-result').hidden,true);assert.equal(form.elements.proxy.value,'');
+});
+
+test('saving Grok proxy changes the shared route without an inference request and removal restores direct mode',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),keyForm=card.querySelector('.gateway-form'),form=card.querySelector('.grok-proxy-form');
+ keyForm.elements.api_key.value='xai-synthetic-key-only';keyForm.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ form.elements.proxy.value='8.8.4.4:8080:u:synthetic-password';form.elements.enabled.checked=true;form.elements.protocol.value='socks5';
+ card.querySelector('.grok-proxy-save').click();await s.flush();
+ const request=s.calls.find(c=>c.url.endsWith('/grok/proxy'));assert.equal(request.method,'PUT');assert.equal(request.data.enabled,true);
+ assert.equal(form.elements.proxy.value,'');assert.match(card.querySelector('.grok-route-note').textContent,/SOCKS5.*8.8.4.4:8080/);
+ assert.equal(card.querySelector('.gateway-status').textContent,'Не проверено');assert.equal(s.calls.filter(c=>c.url.endsWith('/verify')).length,0);
+ assert.doesNotMatch(card.textContent,/synthetic-password/);assert.equal(card.querySelector('.grok-proxy-remove').disabled,false);
+ card.querySelector('.grok-proxy-remove').click();await s.flush();
+ assert.equal(s.calls.filter(c=>c.url.endsWith('/grok/proxy')).at(-1).data.clear_proxy,true);
+ assert.match(card.querySelector('.grok-route-note').textContent,/прямое подключение/);assert.equal(form.elements.enabled.checked,false);
+ assert.equal(card.querySelector('.grok-proxy-remove').disabled,true);
+});
+
+test('Grok proxy protocol detection cannot become a permanent route and late saves cannot enter another workspace',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),keyForm=card.querySelector('.gateway-form'),form=card.querySelector('.grok-proxy-form');
+ keyForm.elements.api_key.value='xai-synthetic-key-only';keyForm.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ form.elements.protocol.value='auto';form.elements.proxy.value='8.8.4.4:8080:u:synthetic-password';card.querySelector('.grok-proxy-save').click();await s.flush();
+ assert.equal(s.calls.filter(c=>c.url.endsWith('/grok/proxy')).length,0);assert.match(s.notices.at(-1),/выберите HTTP CONNECT или SOCKS5/);
+ form.elements.protocol.value='socks5';form.elements.enabled.checked=true;const release=s.holdChecks();card.querySelector('.grok-proxy-save').click();
+ s.state.workspace.id='other';await s.app.load();release();await s.flush();
+ assert.equal(form.elements.proxy.value,'');assert.doesNotMatch(card.querySelector('.grok-route-note').textContent,/8.8.4.4/);
 });
 
 test('MiMo accounts expose separate cards and tests for each capability',async t=>{

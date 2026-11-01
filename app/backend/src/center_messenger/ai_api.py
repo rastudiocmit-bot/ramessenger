@@ -45,6 +45,13 @@ class GrokProxyCheck(InputModel):
     protocol: Literal["auto", "http", "socks5"] = "auto"
 
 
+class GrokProxySettings(InputModel):
+    proxy: SecretStr | None = None
+    protocol: Literal["http", "socks5"] = "socks5"
+    enabled: bool = Field(strict=True)
+    clear_proxy: bool = Field(default=False, strict=True)
+
+
 class ActionRoutes(InputModel):
     recognition_provider: Literal["yandex", "mimo", "mimo_plan"]
     recognition_language: Literal["ru", "auto", "en", "zh"]
@@ -225,6 +232,13 @@ def grok_proxy_diagnostic(workspace_id: UUID, model: GrokProxyCheck, request: Re
     from center_messenger.grok_access import diagnose
     return diagnose(voice(request), identity(request, mutation=True), workspace_id,
         proxy_data={"proxy": model.proxy.get_secret_value(), "protocol": model.protocol})
+
+
+@router.put("/ai/gateways/grok/proxy")
+def save_grok_proxy(workspace_id: UUID, model: GrokProxySettings, request: Request):
+    data = model.model_dump(exclude={'proxy'})
+    data['proxy'] = model.proxy.get_secret_value() if model.proxy else None
+    return voice(request).gateways.grok.save_proxy(identity(request, mutation=True), workspace_id, data)
 
 
 @router.post("/ai/synthesize")

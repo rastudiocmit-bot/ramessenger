@@ -140,6 +140,8 @@ class TelephonyAgent:
         self.accounts.throttle(f'telephony-agent-test:{workspace}:{actor.user_id}', limit=5, minutes=1)
         client = self.grok if provider == 'grok' else self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == 'deepseek' else self.client
         options = {'api_key': creds[provider], 'folder_id': creds['folder']}
+        if provider == 'grok':
+            options['proxy'] = creds.get('grok_proxy')
         if provider in ai_gateways.PROVIDERS:
             options |= ai_gateways.options(creds, provider)
             options['protocol'] = creds['gateways'].get(provider, {}).get('protocol', 'chat')

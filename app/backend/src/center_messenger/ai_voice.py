@@ -534,6 +534,8 @@ class AiVoice:
         client = self.grok if provider == "grok" else self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == "deepseek" else self.client
         key = creds.get(provider)
         extra = {}
+        if provider == "grok":
+            extra["proxy"] = creds.get("grok_proxy")
         if provider in ai_gateways.PROVIDERS:
             extra = ai_gateways.options(creds, provider)
             extra.pop("api_key")
@@ -604,6 +606,8 @@ class AiVoice:
             return None
         client = self.grok if provider == "grok" else self.mimo if provider in ai_gateways.PROVIDERS else self.deepseek if provider == "deepseek" else self.client
         extra = {"rules": False, "timeout": timeout}
+        if provider == "grok":
+            extra["proxy"] = creds.get("grok_proxy")
         if provider in ai_gateways.PROVIDERS:
             extra |= ai_gateways.options(creds, provider)
             extra.pop("api_key")

@@ -143,6 +143,21 @@ class TelephonyAgentTests(unittest.TestCase):
         self.db.spent=0; self.db.rows[self.workspace]['key_ciphertext']=None
         with self.assertRaises(AuthError): self.service.test(self.actor,self.workspace,{'expected_version':1,'text':'sample'})
         self.client.complete.assert_not_called()
+
+    def test_telephone_grok_test_passes_the_saved_proxy_separately_from_asr(self):
+        from center_messenger import ai_grok
+        self.save(model='grok-4.7');row=self.db.rows[self.workspace]
+        row.update(key_ciphertext=None,deepseek_key_ciphertext=None)
+        row['gateway_config']['grok']={'key_ciphertext':'key-cipher','proxy_ciphertext':'proxy-cipher',
+            'proxy_enabled':True,'proxy_protocol':'socks5'}
+        def opened(workspace,identity,cipher,**kwargs):
+            return ({'api_key':'grok-key','provider':'grok'} if identity==ai_grok.SECRET_ID else
+                {'provider':'grok_proxy','api_key':'8.8.4.4:8080:u:synthetic-password','protocol':'socks5'})
+        self.vault.open.side_effect=opened
+        self.service.grok=Mock();self.service.grok.complete.side_effect=self.answer
+        self.service.test(self.actor,self.workspace,{'expected_version':1,'text':'Перенос занятия.'})
+        self.assertEqual(self.service.grok.complete.call_args.kwargs['proxy'].protocol,'socks5')
+        self.client.complete.assert_not_called()
     def test_provider_failure_does_not_fallback_retry_or_return_raw_sample(self):
         self.ready(); self.client.complete.side_effect=YandexError('network')
         with self.assertRaises(AuthError) as error: self.service.test(self.actor,self.workspace,{'expected_version':1,'text':'private conversation sample'})
