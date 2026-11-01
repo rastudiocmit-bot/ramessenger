@@ -2170,6 +2170,27 @@ body:has(#cabinet[hidden]){overflow:auto}
 @media(max-width:1000px){
  #pane-connections .gateway-account-grid{grid-template-columns:minmax(0,1fr)}
 }
+/* Yandex and DeepSeek use the same open controls in their own equal-height row. */
+#pane-connections .gateway-primary-grid{display:grid;grid-column:1/-1;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:1fr;gap:16px;align-items:stretch;min-width:0}
+#pane-connections .gateway-primary-grid>.gateway-flat{align-self:stretch;margin:0!important;min-width:0}
+#pane-connections .gateway-primary-grid>.gateway-flat>.card-b{display:flex;flex-direction:column;flex:1;min-height:0}
+#pane-connections .gateway-primary-grid .gateway-inline-form{display:grid;gap:12px;margin:0}
+#pane-connections .gateway-primary-grid .gateway-provider-caption{margin:0;font-size:11px;line-height:1.5}
+#pane-connections .gateway-primary-grid .form-note{overflow-wrap:anywhere}
+#pane-connections .gateway-primary-grid .gateway-field-label{margin-bottom:6px}
+#pane-connections .gateway-primary-checks{display:grid;gap:0;margin-top:auto;padding-top:12px;border-top:1px solid var(--line)}
+#pane-connections .gateway-primary-check{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line)}
+#pane-connections .gateway-primary-check:last-child{padding-bottom:0;border-bottom:0}
+#pane-connections .gateway-primary-check>span{font-size:12px;min-width:0}
+#pane-connections .gateway-primary-check :is(small,.connection-status){display:block;min-height:0;margin:4px 0 0;padding:0;background:transparent;font-size:11px;line-height:1.5;font-weight:400;color:var(--muted)}
+#pane-connections .gateway-primary-check [data-state=active]{color:var(--primary-ink)}
+#pane-connections .gateway-primary-check .btn{min-width:120px}
+@media(max-width:1000px){
+ #pane-connections .gateway-primary-grid{grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:700px){
+ #pane-connections .gateway-primary-check .btn{min-width:86px}
+}
 #pane-connections .small-tag{background:var(--surface-2);color:var(--muted)}
 #pane-connections .btn-row{flex-wrap:wrap}
 #pane-connections .connection-inline-tip{margin:0 0 10px;font-size:12px;line-height:1.6;color:var(--muted)}

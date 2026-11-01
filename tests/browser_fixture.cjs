@@ -138,6 +138,12 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
       listing:{version:'1:2026-10-26',conversations:conversations.slice(0,90),total:conversations.length,unread:3,page:0,has_more:conversations.length>90},
       history:conversations.length?{conversation:conversations[0],messages,next_seq:messages.length,total:messages.length,has_more:false,more_changes:false}:null};
     else if (p.endsWith('/chats/preferences')) { Object.assign(preferences, entry.body); payload=preferences; }
+    else if (method === 'GET' && p.endsWith('/integrations/novofon/agent')) payload = {
+      name:'Телефонные разговоры',version:0,model:'yandexgpt-5.1',recognition_provider:'yandex',
+      temperature:.1,prompt:'Кратко опиши факты разговора.',history:[],models:ai.settings.models,
+      recognizers:[{id:'yandex',title:'Yandex Cloud',configured:ai.settings.configured}]};
+    else if (method === 'GET' && p.endsWith('/integrations/novofon/processing')) payload = {
+      version:0,auto_new:false,counts:{},archive:{enabled:false,version:0,imported:0}};
     else if (p.endsWith('/ai/settings')) {
       if (method === 'PUT') {
         const oldFolder=ai.settings.folder_id;

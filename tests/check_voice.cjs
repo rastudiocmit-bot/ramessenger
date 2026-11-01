@@ -62,7 +62,7 @@ const shots = process.env.CM_TEST_SCREENSHOTS;
     await page.waitForSelector('#ai-cloud-card'); await page.locator('#ai-cloud-card').scrollIntoViewIfNeeded();
     assert.equal(await page.locator('#ai-status').textContent(), 'Работает');
     assert.match(await page.locator('#ai-settings-form [name=api_key]').getAttribute('placeholder'), /k3y9/);
-    await page.locator('#ai-cloud-card .gateway-credentials summary').click();
+    assert.equal(await page.locator('#ai-cloud-card details').count(),0);
     await page.locator('#ai-settings-form [name=api_key]').fill('AQVN' + 'x'.repeat(36));
     await page.locator('#ai-settings-form button[type=submit]').click();
     // Let the key save and the card redraw first, or the redraw resets the limit typed below.

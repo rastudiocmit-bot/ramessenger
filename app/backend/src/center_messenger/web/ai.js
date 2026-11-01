@@ -45,6 +45,8 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     const badge = $("#ai-status"), configured = settings.configured;
     badge.textContent = !configured ? "Не подключено" : statusText[settings.status] || "Не проверено";
     badge.dataset.state = !configured ? "" : settings.status === "active" ? "active" : settings.status === "error" ? "error" : "";
+    $("#ai-yandex-stt-status").textContent = badge.textContent;
+    $("#ai-yandex-stt-status").dataset.state = badge.dataset.state;
     show($("#ai-clear"), Boolean(settings.key_hint));
     $("#ai-verify").disabled = !configured;
     notice(settings.error || (!settings.vault_ready ? "Хранилище ключей на сервере недоступно: ключ нельзя сохранить." : ""), $("#ai-error"));
@@ -54,6 +56,8 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     const dsBadge = $("#ai-deepseek-status");
     dsBadge.textContent = !ds.configured ? "Не подключено" : statusText[ds.status] || "Не проверено";
     dsBadge.dataset.state = !ds.configured ? "" : ds.status === "active" ? "active" : ds.status === "error" ? "error" : "";
+    $("#ai-deepseek-check-status").textContent = dsBadge.textContent;
+    $("#ai-deepseek-check-status").dataset.state = dsBadge.dataset.state;
     show($("#ai-deepseek-clear"), Boolean(ds.configured)); $("#ai-deepseek-verify").disabled = !ds.configured;
     notice(ds.error || "", $("#ai-deepseek-error"));
     const fill = (select, items) => {
@@ -74,9 +78,6 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       });
     }
     if(!dirty())renderModels(agentForm.elements.model.value || editing?.model || settings.default_model);
-    for (const [selector, configured] of [["#ai-cloud-card", settings.configured], ["#ai-deepseek-card", ds.configured]]) {
-      const details = $(selector).querySelector(".gateway-credentials"); if (details) details.open = !configured;
-    }
     renderGateways();
     const selectedSynthesis = settings.gateways?.synthesis_provider || "disabled";
     const nextRoute = selectedSynthesis + ":" + (settings.gateways?.synthesis_voice || "Mia");
