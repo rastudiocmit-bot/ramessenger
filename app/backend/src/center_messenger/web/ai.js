@@ -143,6 +143,10 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         card.querySelector('.grok-proxy-form')?.reset();
         const address = card.querySelector('.grok-proxy-saved-address'), saved = card.querySelector('.grok-proxy-saved-state'), description = card.querySelector('.grok-proxy-saved-description');
         if (address) address.value = '';
+        if (card.dataset.gateway === 'grok') {
+          card.querySelector('.gateway-credentials > summary').textContent = 'API-ключ';
+          show(card.querySelector('.grok-proxy-address'), false);
+        }
         if (saved) { saved.textContent = 'Не сохранён'; saved.dataset.state = ''; }
         if (description) description.textContent = '';
         const result = card.querySelector('.grok-proxy-result');

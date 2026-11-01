@@ -210,6 +210,8 @@ test('saved disabled proxy remains visible after reload and a failed save keeps 
  s.state.workspace.id='other';const loaded=s.app.load();
  assert.equal(card.querySelector('.grok-proxy-saved-address').value,'');
  assert.equal(card.querySelector('.grok-proxy-saved-description').textContent,'');
+ assert.equal(card.querySelector('.gateway-credentials > summary').textContent,'API-ключ');
+ assert.equal(card.querySelector('.grok-proxy-address').hidden,true);
  await loaded;assert.equal(form.elements.proxy.value,'');
 });
 
