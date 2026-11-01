@@ -4,6 +4,80 @@
   const state = { user: null, csrf: null, workspaces: [], workspace: null, pane: "messages", chatView: "all", invite: null, alfa: null, alfaBusy: false, alfaMax: null, alfaMaxBusy: false, epoch: 0 };
   const roles = { owner: "Владелец", admin: "Администратор", branch_manager: "Руководитель филиала", operator: "Оператор", observer: "Наблюдатель" };
 
+  // Short, local-only startup trace. No request bodies, keys, IDs or client text.
+  const startup = (() => {
+    const start = performance.now(), end = start + 45000, phases = [], long = [], frames = [], clicks = [];
+    const observations = [], observers = []; let last = start, lag = 0, finished = false;
+    const number = value => Math.round(Number(value) || 0);
+    const phase = name => { if (!finished && phases.length < 12) phases.push({stage:name,at_ms:number(performance.now())}); };
+    const keep = (list, entry) => { list.push(entry); list.sort((a,b)=>b.duration_ms-a.duration_ms); list.splice(8); };
+    for (const type of ['longtask','long-animation-frame']) {
+      if (!window.PerformanceObserver?.supportedEntryTypes?.includes(type)) continue;
+      try {
+        const observer = new PerformanceObserver(list => {
+          for (const entry of list.getEntries()) if (entry.startTime <= end) keep(type === 'longtask' ? long : frames,
+            {at_ms:number(entry.startTime),duration_ms:number(entry.duration),...(type === 'long-animation-frame' ? {
+              blocking_ms:number(entry.blockingDuration),scripts:[...(entry.scripts||[])].sort((a,b)=>b.duration-a.duration).slice(0,3).map(script=>{
+                const file=category(script.sourceURL), own=/^[a-z0-9._-]+\.js$/i.test(file);
+                return {script:own?file:'external',function:own&&/^[$\w]{1,80}$/.test(script.sourceFunctionName||'')?script.sourceFunctionName:'',
+                  position:own?number(script.sourceCharPosition):0,duration_ms:number(script.duration),layout_ms:number(script.forcedStyleAndLayoutDuration)};
+              })} : {})});
+        });
+        observer.observe({type,buffered:true}); observers.push(observer);
+      } catch (_) { /* Older browsers still provide request and heartbeat timings. */ }
+    }
+    const heartbeat = setInterval(() => { const now=performance.now();lag=Math.max(lag,now-last-100);last=now; },100);
+    const pointer = event => { if (clicks.length < 8) clicks.push(number(Math.max(0,performance.now()-event.timeStamp))); };
+    document.addEventListener('pointerdown',pointer,{capture:true,passive:true});
+    function snapshot() {
+      if (finished) return;
+      const button=$('#connections-tab')||$('#messages-tab'),box=button?.getBoundingClientRect();
+      const hit=box?.width&&box?.height ? document.elementFromPoint(box.left+box.width/2,box.top+box.height/2) : null;
+      observations.push({at_ms:number(performance.now()),cabinet_visible:!$('#cabinet').hidden,dialogs:document.querySelectorAll('dialog[open]').length,
+        navigation_hit:!button||!hit ? 'absent' : button===hit||button.contains(hit) ? 'button' : hit.tagName.toLowerCase()});
+    }
+    const samples=[1000,5000,12000,25000].map(delay=>setTimeout(snapshot,delay));
+    for (const [selector,child,name] of [['#chat-list','.chat-row','chat-list'],['#chat-history','.chat-bubble','chat-history']]) {
+      const target=$(selector); if (!target) continue;
+      const observer=new MutationObserver(()=>{if(target.querySelector(child)){phase(name);observer.disconnect();}});
+      observer.observe(target,{childList:true}); observers.push(observer);
+    }
+    setTimeout(()=>{snapshot();finished=true;clearInterval(heartbeat);samples.forEach(clearTimeout);observers.forEach(observer=>observer.disconnect());document.removeEventListener('pointerdown',pointer,true);},45000);
+    const category = raw => {
+      try {
+        const url=new URL(raw,location.href);if(url.origin!==location.origin)return 'external';
+        const path=url.pathname;
+        if (/^\/assets\/[a-z0-9._-]+\.(js|css|woff2|png|webp)$/i.test(path)) return path.slice(8);
+        if (path==='/api/auth/session'||path==='/api/auth/status')return path.slice(5);
+        if (/\/chats\/bootstrap$/.test(path))return 'chats/bootstrap';
+        if (/\/chats\/context$/.test(path))return 'chats/context';
+        if (/\/chats\/[^/]+\/messages$/.test(path))return 'chats/messages';
+        if (/\/chats$/.test(path))return 'chats/list';
+        if (/\/chat-events$/.test(path))return 'chat-events';
+        if (/\/tasks\/(summary|options)$/.test(path))return 'tasks';
+        if (/\/notification-(status|preferences)$/.test(path))return 'notifications';
+        return path.startsWith('/api/')?'other-api':'other-asset';
+      } catch (_) { return 'other'; }
+    };
+    function report() {
+      const navigation=performance.getEntriesByType('navigation')[0],metrics={};
+      for(const key of ['responseStart','responseEnd','domInteractive','domContentLoadedEventEnd','loadEventEnd'])metrics[key]=number(navigation?.[key]);
+      const requests=performance.getEntriesByType('resource').filter(entry=>entry.startTime<=end).sort((a,b)=>b.duration-a.duration).slice(0,12)
+        .map(entry=>({resource:category(entry.name),at_ms:number(entry.startTime),duration_ms:number(entry.duration),wait_ms:number(entry.responseStart-entry.requestStart),queue_ms:number(Math.max(0,entry.requestStart-entry.startTime)),bytes:number(entry.transferSize)}));
+      return JSON.stringify({version:'startup-1',at_ms:number(Math.min(performance.now(),end)),embedded:window.self!==window.top,
+        viewport:{width:innerWidth,height:innerHeight},navigation:metrics,phases,heartbeat_gap_ms:number(lag),pointer_delays_ms:clicks,
+        long_tasks:long,long_frames:frames,observations,requests,dom_nodes:document.querySelectorAll('*').length,
+        forms:document.forms.length,password_inputs:document.querySelectorAll('input[type=password]').length,iframes:document.querySelectorAll('iframe').length},null,2);
+    }
+    $('#startup-copy')?.addEventListener('click',async()=>{
+      const output=$('#startup-report'),status=$('#startup-report-status');output.value=report();output.hidden=false;
+      try { if(!navigator.clipboard?.writeText)throw Error();await navigator.clipboard.writeText(output.value);status.textContent='Диагностика скопирована. Пришлите её в чат поддержки.'; }
+      catch (_) { output.focus();output.select();status.textContent='Отчёт показан ниже. Нажмите Ctrl+C и пришлите его в чат поддержки.'; }
+      status.hidden=false;
+    });
+    phase('app-script');return {phase};
+  })();
+
   function node(tag, text, className) {
     const result = document.createElement(tag);
     if (text !== undefined) result.textContent = text;
@@ -148,10 +222,12 @@
     if (previousWorkspace !== state.workspace?.id) { phoneDevices?.reset(); phoneCare?.reset(); team.reset(); resetAlfa(); resetAlfaMax(); novofon.reset(); cardLoader.reset(); directory.reset(); chat.reset(); }
   }
   async function enter(payload) {
+    startup.phase("session");
     setSession(payload);
     clearPasswords();
     if (state.invite) return showInvitation();
     show($("#loading"), false); show($("#auth"), false); show($("#cabinet"));
+    startup.phase("cabinet-visible");
     $("#user-name").textContent = state.user.display_name;
     $("#user-email").textContent = state.user.email;
     $("#user-avatar").textContent = initials(state.user.display_name);
@@ -666,5 +742,6 @@
     connectionSummary("#alfa-history-summary", view.title, view.mode === "complete" ? "active" : ["error", "offline", "attention"].includes(view.mode) ? "error" : "waiting");
     if (payload && state.alfaMax && payload.state !== state.alfaMax.state) loadAlfaMax().catch(error => { if (error.name !== "AbortError") notice(error.message, $("#alfa-max-error")); });
   } });
+  startup.phase("controllers-ready");
   start();
 })();
