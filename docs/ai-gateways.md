@@ -68,6 +68,27 @@ Official xAI references (reviewed 2026-11-01):
 - https://docs.x.ai/developers/models/grok-4.6
 - https://console.x.ai/
 
+### Grok access report in the gateway card
+
+«Уточнить причину ошибки» makes an explicit catalogue-only GET from the API
+container using the saved workspace credential. It displays the actual HTTP
+status (401 and 403 remain distinct), a fixed safe explanation and accessible
+supported models. It does not generate text, verify inference, change saved
+check status, launch telephone work or expose the provider's raw response.
+Owner/admin permission and the credential snapshot are checked both before
+and after the request, outside of which no database transaction remains open.
+The existing account throttle limits this action to five checks per minute.
+
+A non-empty unsaved Grok key now blocks both inference verification and the
+access report until it is saved. Verification never silently uses the old key
+while a replacement is sitting in the form. Access reports are transient and
+are discarded on settings reload or workspace/account change.
+
+This follow-up is API/UI only. All 136 protected hashes and the installed
+Grok telephone contract remain unchanged. The existing deployment owner may
+publish it through the normal timer/service; no guard installation or worker
+pin update is required. Publication is not proof that the VPS has installed it.
+
 ## Actions
 
 1. **Recognition:** Yandex by default; MiMo/Token Plan are explicit alternatives. Russian can be selected for MiMo, but the server passes the documented `auto` language tag because MiMo's ASR API lists only Chinese and English. Russian quality is therefore experimental and must be tested on a real recording before operational use; a successful connectivity check with silence does not prove it works. Yandex accepts `ru`; MiMo accepts `auto`, `en` or `zh` at its API boundary. An incompatible language is rejected before a provider call. Browser PCM is wrapped losslessly as a mono 16 kHz WAV; the full three-minute base64 payload stays below MiMo's 10 MB limit. Existing authenticated, cancellable background jobs handle recording requests. DeepSeek receives only already transcribed text as an AI agent model, not audio; its public API does not advertise audio input.

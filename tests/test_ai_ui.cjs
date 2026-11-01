@@ -7,18 +7,20 @@ async function setup(t){
  let settings={folder_id:'folder',configured:true,voice_enabled:true,voice_max_seconds:180,vault_ready:true,status:'active',deepseek:{configured:true,status:'active'},
   gateways:{recognition_provider:'yandex',recognition_language:'ru',synthesis_provider:'disabled',synthesis_voice:'Mia',synthesis_voices:['Mia'],mimo:{configured:false},mimo_plan:{configured:false},grok:{configured:false}},tasks:[{id:'voice_input',title:'Голосовой ввод'},{id:'text_processing',title:'Обработка текста'},{id:'tasks',title:'Задачи из сообщений'}],default_model:'yandexgpt-5.1',default_prompt:'Исправь текст',models:[
    {id:'yandexgpt-5.1',title:'Yandex Pro',provider:'yandex'},{id:'deepseek-flash',title:'DeepSeek Flash',provider:'deepseek'},{id:'deepseek-v4-pro',title:'DeepSeek Pro',provider:'deepseek'},{id:'mimo-v2.6-flash',title:'MiMo Flash',provider:'mimo'},{id:'mimo-plan-v2.6-pro',title:'MiMo Pro Plan',provider:'mimo_plan'},{id:'grok-4.7',title:'Grok 4.7',provider:'grok'},{id:'grok-4.6',title:'Grok 4.6',provider:'grok'}]};
- let agents=[],failures=new Map(),checkGate=null;
+ let agents=[],failures=new Map(),checkGate=null,diagnostic={ok:false,http_status:403,code:'forbidden',message:'xAI запретил доступ с сервера.',models:[],checked_at:'2026-11-01T08:26:56Z'};
  const api=async(url,args={})=>{calls.push({url,...args});if(url.endsWith('/settings')){if(args.data)settings={...settings,...args.data};return settings;}
+  if(url.endsWith('/gateways/grok/diagnostic')){if(checkGate)await checkGate;return diagnostic;}
   if(url.endsWith('/gateways/routes')){settings.gateways={...settings.gateways,...args.data};return settings;}
   if(/\/gateways\/(mimo|mimo_plan|grok)(\/verify)?$/.test(url)){if(url.endsWith('/verify')&&checkGate)await checkGate;const provider=url.split('/gateways/')[1].split('/')[0];if(url.endsWith('/verify'))settings.gateways[provider].checks={...settings.gateways[provider].checks,[args.data.capability]:{ok:!failures.has(provider+':'+args.data.capability),error_code:failures.get(provider+':'+args.data.capability)||null}};else settings.gateways[provider]={...settings.gateways[provider],configured:!args.data.clear_key,key_hint:args.data.api_key?.slice(-4)||'',...args.data,api_key:undefined};return settings;}
   if(url.endsWith('/agents/test'))return {text:'Готово',cost_rub:.01};
   if(url.endsWith('/agents')){if(args.data){agents=[{id:'agent',...args.data,task_title:'Голосовой ввод',model_title:'DeepSeek Flash',version:1}];return agents[0];}return {agents};}
   throw Error(url);};
  w.eval(fs.readFileSync(web+'/ai.js','utf8'));
- const app=w.CenterAi({$,state:{workspace:{id:'w',role:'owner'}},api,node:(tag,text,cls)=>{const el=w.document.createElement(tag);if(text!=null)el.textContent=text;if(cls)el.className=cls;return el;},show:(el,on=true)=>el.hidden=!on,notice:()=>{},toast:()=>{},confirm:async()=>true});
+ const state={workspace:{id:'w',role:'owner'}};const notices=[];
+ const app=w.CenterAi({$,state,api,node:(tag,text,cls)=>{const el=w.document.createElement(tag);if(text!=null)el.textContent=text;if(cls)el.className=cls;return el;},show:(el,on=true)=>el.hidden=!on,notice:(text,target)=>{notices.push(text);if(target)target.textContent=text;},toast:()=>{},confirm:async()=>true});
  t.after(()=>w.close());await app.load();
  const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
- return {w,$,calls,app,flush,holdChecks:()=>{let release;checkGate=new Promise(resolve=>release=resolve);return ()=>{checkGate=null;release();};},fail:(provider,capability,code)=>{if(code)failures.set(provider+':'+capability,code);else failures.delete(provider+':'+capability);}};
+ return {w,$,calls,app,flush,state,notices,setDiagnostic:value=>{diagnostic=value;},holdChecks:()=>{let release;checkGate=new Promise(resolve=>release=resolve);return ()=>{checkGate=null;release();};},fail:(provider,capability,code)=>{if(code)failures.set(provider+':'+capability,code);else failures.delete(provider+':'+capability);}};
 }
 test('voice providers and agent editor occupy separate connection tabs',async t=>{
  const s=await setup(t);
@@ -82,6 +84,38 @@ test('every generic agent task can select and test the exact Grok model',async t
  }
  form.dispatchEvent(new s.w.Event('submit',{bubbles:true,cancelable:true}));await s.flush();
  assert.equal(s.calls.find(c=>c.method==='POST'&&c.url.endsWith('/agents')).data.model,'grok-4.6');
+});
+
+test('Grok access report shows exact HTTP refusal without an inference request',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),form=card.querySelector('form'),button=card.querySelector('.gateway-diagnostic');
+ assert.equal(button.disabled,true);
+ form.elements.api_key.value='xai-synthetic-test-only';form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ button.click();await s.flush();const result=card.querySelector('.gateway-diagnostic-result');
+ assert.match(result.textContent,/HTTP 403/);assert.match(result.textContent,/генерация текста не запускалась/);
+ assert.equal(result.dataset.state,'error');assert.equal(s.calls.filter(c=>c.url.endsWith('/verify')).length,0);
+ const request=s.calls.find(c=>c.url.endsWith('/grok/diagnostic'));
+ assert.equal(request.method,'POST');assert.equal(request.data,undefined);
+ s.setDiagnostic({ok:true,http_status:200,message:'Доступен каталог.',models:['grok-4.7'],checked_at:'2026-11-01T08:30:00Z'});
+ button.click();await s.flush();assert.match(result.textContent,/HTTP 200/);assert.match(result.textContent,/grok-4.7/);
+ assert.equal(card.querySelector('.gateway-status').dataset.state,'','catalogue access never marks inference as verified');
+});
+
+test('an unsaved Grok key cannot accidentally test the previously saved key',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),form=card.querySelector('form');
+ form.elements.api_key.value='xai-original-test-only';form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ form.elements.api_key.value='xai-new-unsaved-test-only';
+ card.querySelector('[data-verify=text]').click();card.querySelector('.gateway-diagnostic').click();await s.flush();
+ assert.equal(s.calls.filter(c=>c.url.endsWith('/verify')||c.url.endsWith('/diagnostic')).length,0);
+ assert.match(s.notices.at(-1),/Сначала сохраните/);assert.equal(form.elements.api_key.value,'xai-new-unsaved-test-only');
+});
+
+test('a late Grok access report cannot enter a different workspace',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),form=card.querySelector('form');
+ form.elements.api_key.value='xai-synthetic-test-only';form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ const release=s.holdChecks();card.querySelector('.gateway-diagnostic').click();await s.flush();
+ s.state.workspace.id='other';await s.app.load();release();await s.flush();
+ assert.equal(card.querySelector('.gateway-diagnostic-result').hidden,true);
+ assert.doesNotMatch(card.querySelector('.gateway-diagnostic-result').textContent,/403/);
 });
 
 test('MiMo accounts expose separate cards and tests for each capability',async t=>{

@@ -209,6 +209,12 @@ def verify_gateway(workspace_id: UUID, provider: str, model: GatewayCheck, reque
     return voice(request).gateways.verify(identity(request, mutation=True), workspace_id, provider, model.capability)
 
 
+@router.post("/ai/gateways/grok/diagnostic")
+def grok_access_diagnostic(workspace_id: UUID, request: Request):
+    from center_messenger.grok_access import diagnose
+    return diagnose(voice(request), identity(request, mutation=True), workspace_id)
+
+
 @router.post("/ai/synthesize")
 def synthesize(workspace_id: UUID, model: SynthesisInput, request: Request):
     return voice(request).gateways.synthesize(identity(request, mutation=True), workspace_id, model.text)

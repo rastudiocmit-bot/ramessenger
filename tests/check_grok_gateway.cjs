@@ -6,6 +6,11 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
  const browser=await chromium.launch({executablePath:process.env.CM_TEST_CHROMIUM_EXECUTABLE||undefined,args:['--no-sandbox','--disable-dev-shm-usage',...JSON.parse(process.env.CM_TEST_CHROMIUM_ARGS||'[]')]});
  try{
   const context=await browser.newContext({viewport:{width,height:1000},reducedMotion:'reduce'}),data=await fixture(context,'owner',['messages','connections'],{voice:true});
+  let diagnostics=0;
+  await context.route('**/api/workspaces/*/ai/gateways/grok/diagnostic',route=>{
+   diagnostics++;assert.equal(route.request().method(),'POST');assert.deepEqual(route.request().postDataJSON(),{});
+   return route.fulfill({contentType:'application/json',body:JSON.stringify({ok:false,http_status:403,code:'forbidden',message:'xAI запретил доступ с сервера.',models:[],checked_at:'2026-11-01T08:26:56Z',inference_requested:false})});
+  });
   data.ai.settings.tasks.push({id:'tasks',title:'Задачи из сообщений'});
   for(const task of ['voice_input','text_processing','tasks'])data.ai.agents.push({id:'agent-'+task,name:'Synthetic '+task,task,task_title:task,model:'yandexgpt-5.1',model_title:'Yandex',prompt:'Сохраняй факты.',temperature:.1,enabled:true,is_default:true,version:1});
   const phone={name:'Телефонные разговоры',version:1,model:'yandexgpt-5.1',recognition_provider:'yandex',temperature:.1,prompt:'Кратко опиши разговор.',history:[],models:data.ai.settings.models,recognizers:[{id:'yandex',title:'Yandex Cloud',configured:true}]},phoneWrites=[];
@@ -24,6 +29,9 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   await page.waitForFunction(()=>!document.querySelector('[data-gateway=grok] [data-verify=text]').disabled);
   assert.equal(await card.locator('[name=api_key]').inputValue(),'');
   assert.equal(data.mutations.filter(c=>c.path.endsWith('/grok/verify')).length,0);
+  await card.locator('.gateway-diagnostic').click();await card.locator('.gateway-diagnostic-result strong').waitFor();
+  assert.match(await card.locator('.gateway-diagnostic-result').textContent(),/HTTP 403/);
+  assert.equal(diagnostics,1);assert.equal(data.mutations.filter(c=>c.path.endsWith('/grok/verify')).length,0);
   await card.locator('[data-verify=text]').click();await page.waitForFunction(()=>document.querySelector('[data-gateway=grok] .gateway-status').dataset.state==='active');
   assert.match(await card.locator('[data-grok-models]').textContent(),/grok-4.7/);
   assert.ok(await card.evaluate(e=>e.scrollWidth<=e.clientWidth+1),'gateway card overflow at '+width);
@@ -46,7 +54,7 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   assert.equal(phoneWrites.length,2);assert.equal(phoneWrites[0].body.model,'grok-4.7');assert.equal(phoneWrites[1].body.expected_version,2);
   assert.deepEqual(data.errors,[]);assert.deepEqual(data.unexpected,[]);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'page overflow');
-  reports.push({width,savedKey:true,textVerified:true,genericTasks:3,phoneModelSaved:true,phoneTested:true,noOverflow:true});await context.close();
+  reports.push({width,savedKey:true,exactDiagnosticStatus:true,textVerified:true,genericTasks:3,phoneModelSaved:true,phoneTested:true,noOverflow:true});await context.close();
  }finally{await browser.close();}
  }
  console.log(JSON.stringify({reports}));

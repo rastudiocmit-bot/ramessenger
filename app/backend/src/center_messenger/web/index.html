@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/assets/app.css?v=0.8.36">
   <link rel="stylesheet" href="/assets/cabinet.css?v=phone-care-1.0.0">
   <script src="/assets/icons.js?v=1.6" defer=""></script><script src="/assets/call-history.js?v=devices-1.4.0" defer=""></script><script src="/assets/directory-card.js?v=1.0.0" defer=""></script><script src="/assets/directory.js?v=0.12.0-calls" defer=""></script>
-  <script src="/assets/chat.js?v=0.19.0-calls" defer=""></script><script src="/assets/voice.js?v=1.7.0" defer=""></script><script src="/assets/agents-workspace.js?v=1.0.0" defer=""></script><script src="/assets/telephony-processing.js?v=2.0.0" defer=""></script><script src="/assets/telephony-agent.js?v=3.0.0" defer=""></script><script src="/assets/ai.js?v=grok-1" defer=""></script>
+  <script src="/assets/chat.js?v=0.19.0-calls" defer=""></script><script src="/assets/voice.js?v=1.7.0" defer=""></script><script src="/assets/agents-workspace.js?v=1.0.0" defer=""></script><script src="/assets/telephony-processing.js?v=2.0.0" defer=""></script><script src="/assets/telephony-agent.js?v=3.0.0" defer=""></script><script src="/assets/ai.js?v=grok-access-1" defer=""></script>
   <script src="/assets/alfa-progress.js?v=sip-nav-1" defer=""></script><script src="/assets/card-loader.js?v=1.3.0-editable" defer=""></script><script src="/assets/sync-master.js?v=1.0.0" defer=""></script>
   <script src="/assets/cabinet.js?v=phone-care-1.0.0" defer=""></script><script src="/assets/notices.js?v=2.0.1-restore" defer=""></script>
 <script src="/assets/phone-devices.js?v=sip-lines-1.1.0" defer=""></script><script src="/assets/telephony-loader.js?v=1.1.0-quota" defer=""></script><script src="/assets/phone-care.js?v=1.1.0" defer=""></script><script src="/assets/sip-lines.js?v=sip-nav-1" defer=""></script><script src="/assets/novofon.js?v=sip-nav-1" defer=""></script><script src="/assets/team.js?v=1.1.0" defer=""></script><script src="/assets/tasks.js?v=phone-care-1.0.0" defer=""></script><script src="/assets/app.js?v=sip-nav-1" defer=""></script>
@@ -219,6 +219,7 @@
 <div class="card-h"><h2>Grok · xAI</h2><span class="connection-status gateway-status" role="status">Не подключено</span></div>
 <div class="card-b"><p class="gateway-provider-caption">Обработка текста, подготовка ответов и задач. Модель и инструкция выбираются во вкладке «AI-агенты».</p>
 <p class="form-note">Проверка использует баланс API xAI и общий месячный лимит.</p>
+<div class="gateway-provider-actions"><button class="secondary btn sec gateway-diagnostic" type="button">Уточнить причину ошибки</button><small>Бесплатная проверка доступа к API с сервера.</small></div><div class="gateway-diagnostic-result form-note" role="status" hidden></div>
 <div class="gateway-capabilities" aria-label="Проверка Grok"><div class="gateway-capability"><span>Обработка текста<small data-check="text">Не проверено</small></span><button class="secondary btn sec" data-verify="text" type="button">Проверить подключение</button></div></div>
 <p class="form-note" data-grok-models="" role="status">Поддерживаются Grok 4.7 и Grok 4.6. Доступность для ключа уточняется при проверке.</p>
 <details class="gateway-credentials"><summary>Ключ и настройки подключения</summary><form autocomplete="off" class="gateway-form">
