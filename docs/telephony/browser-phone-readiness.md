@@ -43,6 +43,20 @@ Official references checked:
 
 ## Required connection work
 
+### Why there is no “Позвонить” action on a client card
+
+The client-card contact row currently exposes a `tel:` link and a copy action.
+It has no in-messenger dial handler or outgoing-call API. The SIP registry
+explicitly returns `browser_call_ready: false`; saving employee profiles does
+not register a telephone or establish a media session. The family-care release
+adds post-call work, not this missing dial path. A healthy deployment and passing
+history/task tests do not confirm the ability to speak to a client in the browser.
+
+Delivering the real card action requires an authorized employee SIP selection,
+a verified browser media connection, outgoing/incoming call lifecycle controls,
+and acceptance on a designated test call. Keep this separate from the existing
+number link; do not label opening a default external app as an embedded call.
+
 There are two viable directions to verify: a supported embeddable Novofon
 WebRTC interface, or an isolated WebRTC↔SIP media gateway registered to the
 confirmed SIP service. Native SIP port 5060 is not a browser WebSocket URL.

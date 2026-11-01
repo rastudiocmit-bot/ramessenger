@@ -49,3 +49,30 @@ test('full transcript loads once per page even after repeated clicks',async t=>{
 test('unavailable worker remains an error, not an empty successful queue',async t=>{
  const u=setup(t,()=>{throw Error('Контейнер телефонии ещё не обновлён.');});await u.ui.enter();assert.match(u.$('#phone-care-error').textContent,/не обновлён/);assert.equal(u.$('#phone-care-stats').textContent,'');
 });
+test('background processing toggle follows current settings without discarding a campaign draft',async t=>{
+ let enabled=true,version=0;const u=setup(t,(url,opt)=>{if(url.endsWith('/board'))return {...board(),settings:{enabled,version}};if(url.endsWith('/settings')){assert.equal(opt.data.expected_version,version);enabled=opt.data.enabled;version++;return {enabled,version};}});
+ await u.ui.enter();clickText(u,'Обзвон');await flush();const field=u.$('#phone-care-content input[name=name]');field.value='Несохранённая очередь';
+ clickText(u,'Приостановить фоновый разбор');await flush();await flush();assert.ok([...u.$('#phone-care-content').querySelectorAll('button')].some(b=>b.textContent==='Включить фоновый разбор'));assert.equal(field.value,'Несохранённая очередь');
+ clickText(u,'Включить фоновый разбор');await flush();await flush();assert.equal(enabled,true);
+});
+test('a delayed case cannot take the user back from another selected tab',async t=>{
+ let finish;const u=setup(t,url=>url.endsWith('/cases/'+id)?new Promise(r=>finish=r):url.includes('/library')?{examples:[],next_offset:null}:undefined);
+ await u.ui.enter();const pending=u.ui.openCase(id);clickText(u,'Примеры разговоров');await flush();finish(detail());await pending;
+ assert.equal(u.$('#phone-care-tabs [aria-selected=true]').textContent,'Примеры разговоров');assert.equal(u.$('#phone-care-detail'),null);
+});
+test('cancelling a pending case selection preserves the previously displayed case',async t=>{
+ const other='00000000-0000-4000-8000-000000000099';let finish;const u=setup(t,url=>url.endsWith('/cases/'+other)?new Promise(r=>finish=r):undefined);
+ await u.ui.enter();await u.ui.openCase(id);const pending=u.ui.openCase(other);clickText(u,'Результаты');await flush();clickText(u,'Обращения');await flush();finish({...detail(),id:other,display_name:'Отменённый выбор'});await pending;
+ assert.equal(u.$('.care-case-row[aria-pressed=true]')?.querySelector('strong').textContent,'Синтетическая семья');assert.doesNotMatch(u.$('#phone-care-detail').textContent,/Отменённый выбор/);
+});
+test('an older library response cannot overwrite a later visit to the same tab',async t=>{
+ const pending=[];const u=setup(t,url=>url.includes('/library')?new Promise((resolve,reject)=>pending.push({resolve,reject})):undefined);
+ await u.ui.enter();clickText(u,'Примеры разговоров');await flush();clickText(u,'Результаты');await flush();clickText(u,'Примеры разговоров');await flush();assert.equal(pending.length,2);
+ pending[1].resolve({examples:[{title:'Актуальная страница',case_id:id,evidence:{quote:'Новая цитата'}}],next_offset:null});await flush();pending[0].resolve({examples:[{title:'Старая страница',case_id:id,evidence:{quote:'Старая цитата'}}],next_offset:null});await flush();
+ assert.match(u.$('#phone-care-content').textContent,/Актуальная страница/);assert.doesNotMatch(u.$('#phone-care-content').textContent,/Старая страница/);
+});
+test('repeated history pagination click reads and appends one page',async t=>{
+ let finish;const u=setup(t,url=>url.endsWith('/calls')?{calls:[],next:{before_time:'2026-11-01T09:00:00Z',before_id:call}}:url.includes('/calls?')?new Promise(r=>finish=r):undefined);
+ await u.ui.enter();await u.ui.openCase(id);await flush();const more=clickText(u,'Ещё звонки');more.click();await flush();assert.equal(u.calls.filter(c=>c.url.includes('/calls?')).length,1);
+ finish({calls:[{id:call,direction:'in',started_at:'2026-10-30T09:00:00Z',missed:false,talk_seconds:38}],next:null});await flush();assert.equal(u.$('#phone-care-history').querySelectorAll('.care-call-row').length,1);
+});

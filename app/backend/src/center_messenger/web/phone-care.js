@@ -2,7 +2,8 @@
 window.CenterPhoneCare = ({ $, state, api, renderPane, openTask, confirm=async()=>true }) => {
   const root = $("#phone-care-root"); if (!root) return { enter() {}, leave() {}, reset() {}, openCase() {} };
   const filters = $("#phone-care-filters"), content = $("#phone-care-content"), error = $("#phone-care-error"), message = $("#phone-care-message");
-  let board = null, selected = null, detail = null, tab = "queue", generation = 0, boardSeq = 0, detailSeq = 0;
+  let board = null, selected = null, detail = null, tab = "queue", generation = 0, boardSeq = 0, detailSeq = 0, reportSeq = 0;
+  const historyLoads = new Set();
   let scope = null, timer = null, busy = false, dirty = false, rows = [], listScope = null, casePanel = null;
   const views = [["queue","Обращения"],["campaigns","Обзвон"],["analytics","Результаты"],["library","Примеры разговоров"],["digest","Сводка руководителя"]];
   const node = (tag, text, cls) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; };
@@ -49,7 +50,7 @@ window.CenterPhoneCare = ({ $, state, api, renderPane, openTask, confirm=async()
   }
   function pausePlayers() { root.querySelectorAll("audio").forEach(a=>{a.pause();a.removeAttribute("src");a.load();}); }
   function reset() {
-    generation++; boardSeq++; detailSeq++;clearTimeout(timer);timer=null;pausePlayers();board=null;selected=null;detail=null;rows=[];listScope=null;busy=false;dirty=false;casePanel=null;scope=scopeKey();tab="queue";
+    generation++; boardSeq++; detailSeq++;reportSeq++;historyLoads.clear();clearTimeout(timer);timer=null;pausePlayers();board=null;selected=null;detail=null;rows=[];listScope=null;busy=false;dirty=false;casePanel=null;scope=scopeKey();tab="queue";
     content.replaceChildren();$("#phone-care-tabs").replaceChildren();$("#phone-care-view-select").replaceChildren();$("#phone-care-stats").replaceChildren();$("#phone-care-coverage").textContent="";filters.reset();note("",error);note("");controls();
   }
   function leave() { clearTimeout(timer);timer=null;pausePlayers(); }
@@ -90,7 +91,7 @@ window.CenterPhoneCare = ({ $, state, api, renderPane, openTask, confirm=async()
     }catch(e){if(current(ctx)&&seq===boardSeq)note(e.message||"Не удалось получить обращения.",error);}
   }
   async function switchTab(next) {
-    if(busy)return;const ctx=capture();if(dirty&&!await confirm("Открыть другой раздел?","Несохранённые изменения обращения будут очищены.","Продолжить"))return;if(!current(ctx))return;dirty=false;leave();tab=next;pausePlayers();content.replaceChildren();casePanel=null;
+    if(busy)return;const ctx=capture();if(dirty&&!await confirm("Открыть другой раздел?","Несохранённые изменения обращения будут очищены.","Продолжить"))return;if(!current(ctx))return;dirty=false;leave();boardSeq++;detailSeq++;reportSeq++;tab=next;pausePlayers();content.replaceChildren();casePanel=null;
     await loadBoard();schedule();
   }
   function paintQueue() {
@@ -107,10 +108,12 @@ window.CenterPhoneCare = ({ $, state, api, renderPane, openTask, confirm=async()
     for(const row of rows){const b=button("",()=>openCase(row.id),"care-case-row");b.setAttribute("aria-pressed",String(row.id===selected));b.append(node("strong",row.label||row.phone||"Скрытый номер"),node("span",board.labels.statuses[row.status]||row.status),node("small",`${row.pending} предложений · срок: ${date(row.due_at)}`));if(row.reasons?.length)b.append(node("small",row.reasons.map(x=>board.labels.kinds[x]||x).join(" · ")));left.append(b);}
     if(board.has_more)left.append(button("Показать ещё обращения",()=>loadBoard(true)));
     if(selected)content.querySelector(".phone-care-grid").classList.add("has-case");
+    const settings=content.querySelector('[data-care-settings]');
+    if(settings)settings.textContent=board.settings.enabled?"Приостановить фоновый разбор":"Включить фоновый разбор";
     if(detail&&rows.some(r=>r.id===selected&&r.version!==detail.version))note("Обращение изменилось. Обновите его перед сохранением; введённые поля оставлены в форме.");
   }
   async function openCase(id) {
-    if(!active())return;const ctx=capture();if(dirty&&!await confirm("Открыть обращение?","Несохранённые изменения будут очищены.","Продолжить"))return;if(!current(ctx))return;pausePlayers();const seq=++detailSeq;selected=id;dirty=false;
+    if(!active())return;const ctx=capture();if(dirty&&!await confirm("Открыть обращение?","Несохранённые изменения будут очищены.","Продолжить"))return;if(!current(ctx))return;pausePlayers();const seq=++detailSeq;dirty=false;
     try{const value=await api(endpoint()+`/cases/${id}`,{timeoutMs:12000});if(!current(ctx)||seq!==detailSeq||!active())return;detail=value;selected=value.id;
       if(!["queue","campaigns"].includes(tab)){tab="queue";content.replaceChildren();casePanel=null;paintTabs();paintQueue();}
       else paintDetail();paintQueue();
@@ -119,7 +122,7 @@ window.CenterPhoneCare = ({ $, state, api, renderPane, openTask, confirm=async()
   function mutationButton(label, fn, allowed=true, cls="btn sec") { const b=button(label,fn,cls);b.dataset.careMutation="";b.dataset.forbidden=String(!allowed);b.disabled=busy||!allowed||board.read_only;return b; }
   function paintDetail() {
     if(!detail||!casePanel)return;pausePlayers();casePanel.replaceChildren();
-    casePanel.append(button("← К списку",async()=>{const ctx=capture();if(dirty&&!await confirm("Вернуться к списку?","Несохранённые изменения будут очищены.","Продолжить"))return;if(!current(ctx))return;selected=null;detail=null;dirty=false;pausePlayers();content.querySelector(".phone-care-grid")?.classList.remove("has-case");casePanel.replaceChildren();},"text-button care-back"));
+    casePanel.append(button("← К списку",async()=>{const ctx=capture();if(dirty&&!await confirm("Вернуться к списку?","Несохранённые изменения будут очищены.","Продолжить"))return;if(!current(ctx))return;detailSeq++;selected=null;detail=null;dirty=false;pausePlayers();content.querySelector(".phone-care-grid")?.classList.remove("has-case");casePanel.replaceChildren();},"text-button care-back"));
     const head=node("div",undefined,"care-detail-head");head.append(node("h3",detail.display_name));head.append(button("Обновить обращение",()=>openCase(selected),"text-button"));casePanel.append(head);
     casePanel.append(node("p",`${detail.phone||"Номер скрыт"} · ${board.labels.statuses[detail.status]||detail.status}`,"form-note"));
     casePanel.append(node("p","Предложения требуют проверки смысла цитаты и роли говорящего. Назначение задачи не подтверждает запись в CRM или отправку сообщения.","form-note"));
@@ -192,12 +195,13 @@ window.CenterPhoneCare = ({ $, state, api, renderPane, openTask, confirm=async()
   }
   async function loadHistory(next=null) {
     if(!detail)return;const id=detail.id,ctx=capture(),seq=detailSeq,box=$("#phone-care-history");if(!box)return;
+    const key=`${generation}:${seq}:${id}:${JSON.stringify(next)}`;if(historyLoads.has(key))return;historyLoads.add(key);
     try{const query=next?"?"+new URLSearchParams(next):"",value=await api(endpoint()+`/cases/${id}/calls`+query,{timeoutMs:10000});if(!current(ctx)||seq!==detailSeq||detail?.id!==id||!box.isConnected)return;
       if(!next)box.replaceChildren(node("h3","Звонки и результаты контактов"));box.querySelector(".care-history-more")?.remove();
       for(const call of value.calls){const row=node("div",undefined,"care-call-row");row.append(node("strong",`${call.direction==="in"?"Входящий":"Исходящий"} звонок`),node("small",`${date(call.started_at)} · ${call.missed?"Пропущен":`${Math.floor((call.talk_seconds||0)/60)}:${String((call.talk_seconds||0)%60).padStart(2,"0")}`}`),button("Открыть запись и текст",()=>showCall(call.id),"text-button"));box.append(row);}
       if(!value.calls.length&&!next)box.append(node("p","Зарегистрированных звонков пока нет. Добавление семьи в обзвон не создаёт телефонный вызов.","form-note"));
       if(value.next)box.append(button("Ещё звонки",()=>loadHistory(value.next),"btn sec care-history-more"));
-    }catch(e){if(current(ctx)&&seq===detailSeq)note(e.message,error);}
+    }catch(e){if(current(ctx)&&seq===detailSeq)note(e.message,error);}finally{historyLoads.delete(key);}
   }
   async function showCall(callId,reference={}) {
     if(!detail||!active())return;const id=detail.id,ctx=capture(),seq=detailSeq;
@@ -222,16 +226,17 @@ window.CenterPhoneCare = ({ $, state, api, renderPane, openTask, confirm=async()
     content.append(grid,node("p",`Первое обращение подтверждено для ${m.new_journey_count} семей. Тип пути не уточнён: ${m.unclassified}. Этапы могут пропускаться: это подтверждённые факты, а не оценка эффективности сотрудников по длительности звонка.`,"form-note"));
   }
   async function paintLibrary(offset=0) {
-    const ctx=capture(),view=tab;
-    try{const value=await api(endpoint()+`/library?offset=${offset}`,{timeoutMs:10000});if(!current(ctx)||tab!==view)return;if(!offset){pausePlayers();content.replaceChildren();casePanel=null;}content.querySelector(".care-library-more")?.remove();
+    const ctx=capture(),seq=boardSeq,request=++reportSeq,valid=()=>current(ctx)&&active()&&seq===boardSeq&&request===reportSeq&&tab==="library";
+    try{const value=await api(endpoint()+`/library?offset=${offset}`,{timeoutMs:10000});if(!valid())return;if(!offset){pausePlayers();content.replaceChildren();casePanel=null;}content.querySelector(".care-library-more")?.remove();
       if(!value.examples.length&&!offset)content.append(node("p","Примеров пока нет. Откройте цитату в обращении и сохраните её для обучения.","form-note"));
       for(const item of value.examples){const c=section(item.title);c.append(node("blockquote",item.evidence.quote),node("p",`Что получилось: ${item.good||"Не указано"}`),node("p",`Что улучшить: ${item.improve||"Не указано"}`),button("К исходному обращению",()=>openCase(item.case_id)));content.append(c);}if(value.next_offset!==null)content.append(button("Ещё примеры",()=>paintLibrary(value.next_offset),"btn sec care-library-more"));
-    }catch(e){if(current(ctx))note(e.message,error);}
+    }catch(e){if(valid())note(e.message,error);}
   }
   async function paintDigest() {
-    const ctx=capture();try{const value=await api(endpoint()+"/digest",{timeoutMs:10000});if(!current(ctx)||tab!=="digest")return;pausePlayers();content.replaceChildren();casePanel=null;
+    const ctx=capture(),seq=boardSeq,request=++reportSeq,valid=()=>current(ctx)&&active()&&seq===boardSeq&&request===reportSeq&&tab==="digest";
+    try{const value=await api(endpoint()+"/digest",{timeoutMs:10000});if(!valid())return;pausePlayers();content.replaceChildren();casePanel=null;
       const c=section(value.ready?`Сводка за ${value.date}`:"Сводка готовится");c.append(node("p",value.note,"form-note"));if(value.ready){c.append(node("p",`Нужно довести до результата: ${value.metrics.open}. Срок истёк: ${value.metrics.overdue}. После пропущенного связались: ${value.metrics.recovered_missed}.`));for(const item of value.items)c.append(button(`${item.label||item.phone||"Скрытый номер"} · ${board.labels.statuses[item.status]} · ${date(item.due_at)}`,()=>openCase(item.id),"care-case-row"));c.append(node("p",`Подготовлено ${date(value.generated_at)}${value.report_limited?". Отчёт ограничен объёмом данных.":""}`,"form-note"));}content.append(c);
-    }catch(e){if(current(ctx))note(e.message,error);}
+    }catch(e){if(valid())note(e.message,error);}
   }
   function campaignForms() {
     const wrap=section("Очереди обзвона"),form=node("form",undefined,"care-form");let request_id=crypto.randomUUID();
@@ -239,7 +244,7 @@ window.CenterPhoneCare = ({ $, state, api, renderPane, openTask, confirm=async()
     form.addEventListener("submit",e=>{e.preventDefault();void action(async ctx=>{const result=await api(endpoint()+"/campaigns",{method:"POST",timeoutMs:10000,data:{request_id,name:name.value,kind:kind.value}});if(current(ctx)){request_id=crypto.randomUUID();form.reset();filters.elements.campaign.append(new Option(result.name,result.id));filters.elements.campaign.value=result.id;await loadBoard();note("Очередь создана. Добавьте семью из CRM.");}});});wrap.append(form);
     const search=node("form",undefined,"care-search"),query=input("query","search","",100);query.required=true;query.minLength=3;query.placeholder="Фамилия или телефон из CRM";const submit=node("button","Найти семью","btn sec");submit.type="submit";search.append(field("Добавить семью",query),submit);const results=node("div");wrap.append(search,results);
     search.addEventListener("submit",e=>{e.preventDefault();void action(async ctx=>{const found=await api(endpoint()+"/contacts/search",{method:"POST",timeoutMs:10000,data:{query:query.value}});if(!current(ctx))return;results.replaceChildren();for(const contact of found.contacts)for(const phone of contact.phones){const b=button(`${contact.display_name} · ${phone}`,()=>addContactForm(contact,phone,results),"care-case-row");results.append(b);}if(!found.contacts.length)results.append(node("p","Контакты не найдены в опубликованном справочнике CRM.","form-note"));});});
-    const settings=button(board.settings.enabled?"Приостановить фоновый разбор":"Включить фоновый разбор",()=>action(async ctx=>{await api(endpoint()+"/settings",{method:"PUT",timeoutMs:10000,data:{expected_version:board.settings.version,enabled:!board.settings.enabled}});if(current(ctx))await loadBoard();}),"text-button");settings.dataset.careMutation="";wrap.append(settings);return wrap;
+    const settings=button(board.settings.enabled?"Приостановить фоновый разбор":"Включить фоновый разбор",()=>action(async ctx=>{await api(endpoint()+"/settings",{method:"PUT",timeoutMs:10000,data:{expected_version:board.settings.version,enabled:!board.settings.enabled}});if(current(ctx))await loadBoard();}),"text-button");settings.dataset.careMutation="";settings.dataset.careSettings="";wrap.append(settings);return wrap;
   }
   function addContactForm(contact,phone,parent) {
     parent.querySelector(".care-add-contact")?.remove();const form=node("form",undefined,"care-add-contact care-form"),campaign=select("campaign_id",board.campaigns.map(x=>[x.id,x.name]),filters.elements.campaign.value||board.campaigns[0]?.id),assignee=memberSelect(state.user.id),due=input("due_at","datetime-local",localInput(new Date(Date.now()+2*3600000)));campaign.required=true;due.required=true;
