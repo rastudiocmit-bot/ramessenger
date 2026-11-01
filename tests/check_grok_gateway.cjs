@@ -75,7 +75,16 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   await card.locator('.grok-proxy-form').evaluate(e=>e.scrollIntoView());
   const flatSize=await card.evaluate(e=>({height:e.getBoundingClientRect().height,referenceHeight:document.querySelector('[data-gateway=mimo]').getBoundingClientRect().height,bodyHeight:e.querySelector('.card-b').clientHeight,contentHeight:e.querySelector('.card-b').scrollHeight}));
   assert.equal(flatSize.height,flatSize.referenceHeight,'Grok height must exactly match MiMo at '+width);
+  if(width===1440||width===390||width===320)await card.screenshot({path:'/tmp/cm-grok-harmony-'+width+'.png'});
   assert.ok(flatSize.contentHeight<=flatSize.bodyHeight+1,'flat controls should fit without scrolling at '+width+': '+JSON.stringify(flatSize));
+  const alignment=await card.evaluate(e=>['.grok-key-row','.grok-proxy-actions'].map(selector=>{
+   const row=e.querySelector(selector),field=row.querySelector('input:not([type=hidden]),select').getBoundingClientRect();
+   return [...row.querySelectorAll(':scope>button')].map(button=>{const box=button.getBoundingClientRect();return Math.max(Math.abs(box.top-field.top),Math.abs(box.bottom-field.bottom));});
+  }));
+  assert.ok(alignment.flat().every(delta=>delta<1),'field and action baselines match at '+width+': '+JSON.stringify(alignment));
+  assert.equal(await card.locator('[data-verify=text]').textContent(),'Тест текста');
+  await card.locator('.reveal').click();assert.equal(await card.locator('[name=api_key]').getAttribute('type'),'text');
+  await card.locator('.reveal').click();assert.equal(await card.locator('[name=api_key]').getAttribute('type'),'password');
   assert.equal(await card.locator('[data-verify=text]').isVisible(),true);
   if(width===1440||width===390)await card.screenshot({path:'/tmp/cm-grok-card-'+width+'.png'});
   const mimoEditor=page.locator('[data-gateway=mimo] .gateway-credentials > summary');

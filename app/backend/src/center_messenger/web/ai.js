@@ -324,7 +324,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     for (const button of card.querySelectorAll("[data-verify]")) {
       const capability = button.dataset.verify, check = item.configured ? checks[capability] : null;
       button.disabled = !item.configured || Boolean(pending);
-      button.textContent = pending === capability ? "Проверяем…" : "Проверить";
+      button.textContent = pending === capability ? "Проверяем…" : provider === "grok" ? "Тест текста" : "Проверить";
       const output = card.querySelector(`[data-check="${capability}"]`);
       output.dataset.state = !check ? "" : check.ok ? "active" : "error";
       output.textContent = !check ? "Не проверено" : (check.ok ? "Работает" : gatewayCheckError(provider, check.error_code));
