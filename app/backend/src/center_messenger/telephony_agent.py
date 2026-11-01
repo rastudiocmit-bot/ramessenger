@@ -19,6 +19,7 @@ from center_messenger.ai_yandex import DEFAULT_MODEL, YandexClient, YandexError
 from center_messenger.auth_security import AuthError
 
 NAMESPACE = 'telephony_agent'
+RECOGNIZERS = ('yandex', 'grok', *ai_gateways.PROVIDERS)
 DEFAULT_PROMPT = (
     'Ты — отдельный ИИ-агент телефонных разговоров студии «Развивайся». '
     'Подготовь связное краткое описание разговора на русском языке, обычно 2–5 предложений. '
@@ -58,7 +59,7 @@ def clean(data):
         raise AuthError(422, 'Укажите название и инструкцию телефонного агента.')
     if value['model'] not in CATALOG:
         raise AuthError(422, 'Выберите модель из списка.')
-    if value['recognition_provider'] not in ('yandex', *ai_gateways.PROVIDERS):
+    if value['recognition_provider'] not in RECOGNIZERS:
         raise AuthError(422, 'Этот шлюз не поддерживает распознавание аудио.')
     if not 0 <= value['temperature'] <= 1:
         raise AuthError(422, 'Точность должна быть от 0 до 1.')
@@ -88,9 +89,10 @@ class TelephonyAgent:
             'models': [{'id': key, 'title': item['title'], 'provider': item['provider'],
                         'provider_title': PROVIDERS[item['provider']]} for key, item in CATALOG.items()],
             'recognizers': [{'id': p, 'title': PROVIDERS[p],
-                             'configured': bool(row and (row.get(p + '_key_ciphertext') if p != 'yandex'
-                                                        else row.get('key_ciphertext') and row.get('folder_id')))}
-                            for p in ('yandex', *ai_gateways.PROVIDERS)],
+                             'configured': ai_grok.public(row)['configured'] if p == 'grok' else
+                                bool(row and (row.get(p + '_key_ciphertext') if p != 'yandex'
+                                              else row.get('key_ciphertext') and row.get('folder_id')))}
+                            for p in RECOGNIZERS],
         }
 
     def settings(self, actor, workspace):

@@ -28,6 +28,20 @@ test('saving edits uses the known version and never starts a model request',asyn
  done({...defaults,version:2,prompt:'Инструкция только для звонков'});await flush();
  assert.match(s.$('#telephony-agent-message').textContent,/не перерабатываются/);
 });
+test('all audio recognizers are selectable and saved independently of the description model',async t=>{
+ const providers=['yandex','grok','mimo','mimo_plan'];
+ let saved={...defaults,recognizers:providers.map(id=>({id,title:id,configured:id!=='grok'}))};
+ const s=setup(t,(_url,opt)=>opt.method==='PUT'?(saved={...saved,...opt.data,version:saved.version+1}):saved);
+ await s.ui.load();const form=s.$('#telephony-agent-form'),select=form.elements.recognition_provider;
+ assert.deepEqual(Array.from(select.options,o=>o.value),providers);
+ assert.match(select.querySelector('[value=grok]').textContent,/ключ не подключён/);
+ for(const provider of providers){
+  select.value=provider;form.dispatchEvent(new s.w.Event('change',{bubbles:true}));
+  form.dispatchEvent(new s.w.Event('submit',{bubbles:true,cancelable:true}));await flush();
+  assert.equal(saved.recognition_provider,provider);assert.equal(saved.model,defaults.model);
+ }
+ assert.equal(s.calls.filter(c=>c.method==='POST').length,0);
+});
 test('unsaved instruction cannot be tested against the old saved version',async t=>{
  const s=setup(t);await s.ui.load();const form=s.$('#telephony-agent-form');
  s.$('#telephony-agent-sample').value='Обсудили занятие';s.$('#telephony-agent-sample').dispatchEvent(new s.w.Event('input'));

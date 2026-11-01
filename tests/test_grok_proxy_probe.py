@@ -134,6 +134,26 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(result['http_status'],302);self.assertEqual(result['code'],'redirect_refused')
         connection.request.assert_called_once()
 
+    def test_stt_requires_explicit_inference_and_preserves_multipart_content_type(self):
+        body = b'--cm-synthetic\r\nsynthetic-audio\r\n--cm-synthetic--\r\n'
+        req = urllib.request.Request('https://api.x.ai/v1/stt', data=body,
+            headers={'Authorization': 'Bearer ' + KEY, 'Content-Type': 'multipart/form-data; boundary=cm-synthetic'})
+        with patch.object(p.socket, 'create_connection') as dialing:
+            with self.assertRaises(ValueError):p.ProxyOpener(p.parse(ADDRESS, 'http')).open(req)
+            for url in ('https://other.test/v1/stt', 'https://api.x.ai/v1/stt?url=secret',
+                        'https://api.x.ai/v1/audio/transcriptions', 'http://api.x.ai/v1/stt'):
+                with self.assertRaises(ValueError):
+                    p.ProxyOpener(p.parse(ADDRESS, 'http'), allow_inference=True).open(urllib.request.Request(url, data=body))
+            dialing.assert_not_called()
+        sock = Socket(b'HTTP/1.1 200 OK\r\n\r\n')
+        dial, tls, factory, context, connection = self.mocks(sock)
+        with dial, tls, factory:
+            with p.ProxyOpener(p.parse(ADDRESS, 'http'), allow_inference=True).open(req):pass
+        self.assertEqual(connection.request.call_args.args, ('POST', '/v1/stt'))
+        self.assertEqual(connection.request.call_args.kwargs['body'], body)
+        self.assertEqual(connection.request.call_args.kwargs['headers']['Content-Type'], req.get_header('Content-type'))
+        self.assertNotIn(KEY.encode(), b''.join(sock.sent))
+
     def test_authorized_route_uses_saved_key_and_does_not_save_proxy_or_usage(self):
         fixture=access_fixture.GrokAccessTests();fixture.setUp();before=fixture.db.settings.copy()
         fake=p.ProxyOpener(p.parse(ADDRESS,'socks5'))

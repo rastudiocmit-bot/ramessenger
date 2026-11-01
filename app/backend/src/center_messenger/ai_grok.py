@@ -1,11 +1,14 @@
-"""xAI text gateway. Fixed HTTPS origin, sealed key, no automatic paid retries."""
+"""xAI text and telephone ASR. Fixed origin, sealed key, no paid retries."""
+import io
 import json
 import http.client
+import math
 import re
 import urllib.error
 import urllib.request
+import wave
 from datetime import datetime, timezone
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from center_messenger.ai_yandex import FIXED_RULES, YandexError, key_hint
 
@@ -17,8 +20,16 @@ PROXY_SECRET_ID = uuid5(NAMESPACE_URL, "center-messenger:grok-proxy")
 # without changing the pinned vault contract or the database schema.
 PURPOSE = "alfa"
 USD_RUB = 90.0  # conservative budget estimate, not a live exchange rate
+ASR_MODEL = "grok-voice-transcribe-2.0"
+ASR_SAMPLE_RATE = 16000
+ASR_MAX_SECONDS = 25  # one bounded telephone channel fragment
 MODELS = {name: {"title": title, "input": .18, "output": .54} for name, title in (
     ("grok-4.7", "Grok 4.7"), ("grok-4.6", "Grok 4.6"))}
+
+
+def audio_cost(seconds):
+    # REST STT: $0.10/hour. Round up for the budget reservation, not an invoice.
+    return math.ceil(seconds) / 3600 * .10 * USD_RUB
 
 
 def valid_key(value):
@@ -84,11 +95,11 @@ class GrokClient:
     def __init__(self, opener=None):
         self.opener = opener or urllib.request.build_opener(NoRedirect()).open
 
-    def _request(self, path, *, api_key, body=None, timeout=25, proxy=None):
+    def _request(self, path, *, api_key, body=None, timeout=25, proxy=None, content_type="application/json"):
         request = urllib.request.Request(BASE_URL + path,
-            data=json.dumps(body, ensure_ascii=False).encode() if body is not None else None,
+            data=body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode() if body is not None else None,
             method="POST" if body is not None else "GET",
-            headers={"Authorization": "Bearer " + api_key.strip(), "Content-Type": "application/json"})
+            headers={"Authorization": "Bearer " + api_key.strip(), "Content-Type": content_type})
         def failure(status):
             return ("unauthorized" if status == 401 else "forbidden" if status == 403 else "no_balance" if status == 402
                     else "rate_limited" if status == 429 else "model_unknown" if status == 404
@@ -132,6 +143,34 @@ class GrokClient:
             return [name for name in MODELS if name in available]
         except (ValueError, KeyError, TypeError, AttributeError):
             raise YandexError("bad_response") from None
+
+    def recognize(self, audio, *, api_key, proxy=None, language="ru"):
+        # Only decoded mono PCM16/16kHz is accepted, never a recording URL.
+        if not isinstance(audio, bytes) or not 3200 <= len(audio) <= ASR_MAX_SECONDS * ASR_SAMPLE_RATE * 2 or len(audio) % 2:
+            raise YandexError("bad_audio")
+        if language != "ru":
+            raise YandexError("speech_language")
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(ASR_SAMPLE_RATE)
+            wav.writeframes(audio)
+        boundary = "cm-grok-" + uuid4().hex
+        parts = []
+        # xAI requires the file to follow ALL option fields in the form.
+        for name, value in (("model", ASR_MODEL), ("language", language),
+                            ("format", "false"), ("filler_words", "true"), ("diarize", "false")):
+            parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode())
+        parts.extend([(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="call.wav"\r\n'
+                       'Content-Type: audio/wav\r\n\r\n').encode(), output.getvalue(),
+                      f'\r\n--{boundary}--\r\n'.encode()])
+        payload = self._request("/stt", api_key=api_key, body=b"".join(parts), proxy=proxy,
+                                content_type="multipart/form-data; boundary=" + boundary)
+        raw = payload.get("text")
+        if not isinstance(raw, str) or len(raw) > 20000:
+            raise YandexError("bad_response")
+        return {"text": raw}
 
     def complete(self, text, *, prompt, model, temperature, api_key, max_tokens=1500,
                  rules=True, timeout=25, proxy=None, **_):

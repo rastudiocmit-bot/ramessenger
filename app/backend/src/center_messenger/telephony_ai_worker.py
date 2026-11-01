@@ -9,7 +9,7 @@ from center_messenger import ai_gateways, ai_mimo, ai_grok, telephony_archive
 from center_messenger.ai_voice import CATALOG, provider_of, model_cost, visible
 from center_messenger.ai_yandex import YandexError, audio_cost
 from center_messenger.auth_security import AuthError
-from center_messenger.telephony_agent import TelephonyAgent
+from center_messenger.telephony_agent import TelephonyAgent, RECOGNIZERS
 from center_messenger.telephony_ai_store import Store
 from center_messenger.telephony_archive_import import ArchiveImport
 from center_messenger.telephony_media import RecordingCache, MediaError, decode_part, PART_SECONDS, RATE
@@ -92,7 +92,8 @@ class TelephoneWorker:
 
     def credentials(self,job):
         saved=job['run']['profile'];provider=provider_of(saved['model'])
-        if saved.get('contract')!='telephone-ai-v1' or saved['model'] not in CATALOG:
+        if (saved.get('contract')!='telephone-ai-v1' or saved['model'] not in CATALOG
+                or saved.get('recognition_provider') not in RECOGNIZERS):
             raise AuthError(409,'Версия задания требует проверки.')
         selected={provider,saved['recognition_provider']}
         with self.store.tenant(job['workspace']) as db:
@@ -140,13 +141,15 @@ class TelephoneWorker:
             seconds=len(audio)/(RATE*2)
             padded=audio+bytes(max(0,RATE//10*2-len(audio)))
             provider=run['profile']['recognition_provider']
-            estimate=audio_cost(padded) if provider=='yandex' else ai_mimo.audio_cost(len(padded)/(RATE*2),plan=provider=='mimo_plan')
+            estimate=(audio_cost(padded) if provider=='yandex' else ai_grok.audio_cost(len(padded)/(RATE*2))
+                      if provider=='grok' else ai_mimo.audio_cost(len(padded)/(RATE*2),plan=provider=='mimo_plan'))
             silence=not any(audio)
             receipt=self.store.receipt(job,operation,input_hash,0 if silence else estimate,seconds)
             if receipt is None:return
             if receipt.get('new'):
                 if silence:raw=''
                 elif provider=='yandex':raw=self.agent.client.recognize(padded,api_key=creds['yandex'],profanity=False)
+                elif provider=='grok':raw=self.agent.grok.recognize(padded,api_key=creds['grok'],proxy=creds.get('grok_proxy'),language='ru')['text']
                 else:raw=self.agent.mimo.recognize(padded,**ai_gateways.options(creds,provider),plan=provider=='mimo_plan',language='ru')['text']
                 usable=isinstance(raw,str) and len(raw)<=20000
                 self.store.complete(job,operation,raw[:20000] if isinstance(raw,str) else '',cost=0 if silence else estimate,seconds=seconds,usable=usable)

@@ -28,7 +28,7 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   });
   data.ai.settings.tasks.push({id:'tasks',title:'Задачи из сообщений'});
   for(const task of ['voice_input','text_processing','tasks'])data.ai.agents.push({id:'agent-'+task,name:'Synthetic '+task,task,task_title:task,model:'yandexgpt-5.1',model_title:'Yandex',prompt:'Сохраняй факты.',temperature:.1,enabled:true,is_default:true,version:1});
-  const phone={name:'Телефонные разговоры',version:1,model:'yandexgpt-5.1',recognition_provider:'yandex',temperature:.1,prompt:'Кратко опиши разговор.',history:[],models:data.ai.settings.models,recognizers:[{id:'yandex',title:'Yandex Cloud',configured:true}]},phoneWrites=[];
+  const phone={name:'Телефонные разговоры',version:1,model:'yandexgpt-5.1',recognition_provider:'yandex',temperature:.1,prompt:'Кратко опиши разговор.',history:[],models:data.ai.settings.models,recognizers:[{id:'yandex',title:'Yandex Cloud',configured:true},{id:'grok',title:'Grok · xAI',configured:true},{id:'mimo',title:'MiMo · обычный API',configured:true},{id:'mimo_plan',title:'MiMo · Token Plan',configured:true}]},phoneWrites=[];
   await context.route('**/api/workspaces/*/integrations/novofon/**',async route=>{
    const request=route.request(),p=new URL(request.url()).pathname,body=request.method()==='GET'?null:request.postDataJSON();let value;
    if(body)phoneWrites.push({path:p,body});
@@ -95,15 +95,15 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
    const request=data.mutations.filter(c=>c.path.endsWith('/agents/test')).at(-1);
    assert.equal(request.body.task,task);assert.equal(request.body.model,'grok-4.6');
   }
-  await choose('telephone_conversations');await page.locator('#telephony-agent-form [name=model]').selectOption('grok-4.7');await page.locator('#telephony-agent-form [type=submit]').click();
+  await choose('telephone_conversations');assert.deepEqual(await page.locator('#telephony-agent-form [name=recognition_provider] option').evaluateAll(nodes=>nodes.map(n=>n.value)),['yandex','grok','mimo','mimo_plan']);await page.locator('#telephony-agent-form [name=recognition_provider]').selectOption('grok');await page.locator('#telephony-agent-form [name=model]').selectOption('grok-4.7');await page.locator('#telephony-agent-form [type=submit]').click();
   await page.waitForFunction(()=>document.querySelector('#telephony-agent-version').textContent==='Версия 2');
-  assert.equal(phone.model,'grok-4.7');assert.equal(phone.recognition_provider,'yandex');
+  assert.equal(phone.model,'grok-4.7');assert.equal(phone.recognition_provider,'grok');
   await page.locator('[data-agent-section=check]').click();await page.locator('#telephony-agent-sample').fill('Обсудили перенос занятия.');await page.locator('#telephony-agent-test').click();
   await page.waitForFunction(()=>document.querySelector('#telephony-agent-result').textContent==='Обсудили перенос занятия.');
   assert.equal(phoneWrites.length,2);assert.equal(phoneWrites[0].body.model,'grok-4.7');assert.equal(phoneWrites[1].body.expected_version,2);
   assert.deepEqual(data.errors,[]);assert.deepEqual(data.unexpected,[]);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'page overflow');
-  reports.push({width,grokHeight:flatSize.height,mimoHeight:flatSize.referenceHeight,noAccordions:true,controlsFit:true,savedKey:true,exactDiagnosticStatus:true,accountStatus:true,textVerified:true,genericTasks:3,phoneModelSaved:true,phoneTested:true,noOverflow:true});await context.close();
+  reports.push({width,grokHeight:flatSize.height,mimoHeight:flatSize.referenceHeight,noAccordions:true,controlsFit:true,savedKey:true,exactDiagnosticStatus:true,accountStatus:true,textVerified:true,genericTasks:3,phoneModelSaved:true,phoneAsrGateways:4,phoneAsrSaved:true,phoneTested:true,noOverflow:true});await context.close();
  }finally{await browser.close();}
  }
  console.log(JSON.stringify({reports}));

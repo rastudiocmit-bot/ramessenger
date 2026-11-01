@@ -106,6 +106,25 @@ class TelephonyAgentTests(unittest.TestCase):
         for values in ({'recognition_provider':'deepseek'},{'model':'invented-model'},{'prompt':'   '}):
             with self.assertRaises(AuthError): self.save(**values)
         self.assertEqual(self.db.rows,{})
+
+    def test_all_four_audio_gateways_are_available_and_grok_uses_its_sealed_configuration(self):
+        self.db.rows[self.workspace] = {'key_ciphertext':'yandex-cipher', 'folder_id':'folder',
+            'mimo_key_ciphertext':'payg-cipher', 'mimo_plan_key_ciphertext':'plan-cipher',
+            'gateway_config':{'grok':{'key_ciphertext':'grok-cipher'}}}
+        value = self.service.settings(self.actor, self.workspace)
+        recognizers = {p['id']:p for p in value['recognizers']}
+        self.assertEqual(set(recognizers), {'yandex', 'grok', 'mimo', 'mimo_plan'})
+        self.assertTrue(all(p['configured'] for p in recognizers.values()))
+        self.assertNotIn('cipher', str(value))
+        for version, provider in enumerate(recognizers):
+            self.assertEqual(self.save(version=version, recognition_provider=provider)['recognition_provider'], provider)
+        self.client.recognize.assert_not_called()
+        self.client.complete.assert_not_called()
+        self.service.mimo.recognize.assert_not_called()
+        self.assertNotIn('recognition_provider', self.db.rows[self.workspace]['gateway_config'])
+        self.db.rows[self.workspace]['gateway_config']['grok'] = {}
+        value = self.service.settings(self.actor, self.workspace)
+        self.assertFalse(next(p for p in value['recognizers'] if p['id']=='grok')['configured'])
     def test_unsaved_or_changed_version_cannot_trigger_a_paid_test(self):
         for version in (1,2):
             with self.assertRaises(AuthError): self.service.test(self.actor,self.workspace,{'expected_version':version,'text':'sample'})
@@ -128,7 +147,7 @@ class TelephonyAgentTests(unittest.TestCase):
         self.service.grok=Mock();self.service.grok.complete.side_effect=self.answer
         public=self.service.settings(self.actor,self.workspace)
         self.assertIn('grok-4.6',[m['id'] for m in public['models']])
-        self.assertNotIn('grok',[m['id'] for m in public['recognizers']])
+        self.assertIn('grok',[m['id'] for m in public['recognizers']])
         result=self.service.test(self.actor,self.workspace,{'expected_version':1,'text':'Перенос занятия.'})
         options=self.service.grok.complete.call_args.kwargs
         self.assertEqual(options['model'],'grok-4.6');self.assertEqual(options['api_key'],'grok-synthetic-key')

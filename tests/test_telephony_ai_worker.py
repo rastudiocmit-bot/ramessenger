@@ -131,6 +131,93 @@ class TelephoneWorkerTests(unittest.TestCase):
         self.client.complete.assert_not_called();self.agent.mimo.complete.assert_not_called()
         self.assertGreater(self.store.records['summary:final:00000']['cost'],0)
 
+    def test_grok_recognizes_all_parts_through_saved_proxy_and_keeps_summary_independent(self):
+        from center_messenger import ai_grok
+        self.store.run['profile']['recognition_provider']='grok'
+        self.agent.grok=Mock()
+        self.agent.grok.recognize.return_value={'text':'Не записывайте на завтра.'}
+        self.worker.credentials=lambda job:{'grok':'asr-key','grok_proxy':'saved-proxy','yandex':'summary-key','folder':'folder'}
+        self.finish()
+        self.assertEqual(self.store.run['phase'],'complete')
+        self.assertEqual(self.agent.grok.recognize.call_count,4)
+        for call in self.agent.grok.recognize.call_args_list:
+            self.assertEqual(call.kwargs,{'api_key':'asr-key','proxy':'saved-proxy','language':'ru'})
+            self.assertLessEqual(len(call.args[0]),800000)
+        self.assertIn('Не записывайте',self.store.run['transcript'])
+        self.assertIn('Канал 2 (роль не подтверждена)',self.store.run['transcript'])
+        self.client.recognize.assert_not_called();self.agent.mimo.recognize.assert_not_called()
+        self.agent.grok.complete.assert_not_called();self.client.complete.assert_called_once()
+        costs=[r['cost'] for op,r in self.store.records.items() if op.startswith('asr:')]
+        self.assertEqual(costs,[ai_grok.audio_cost(25)]*2+[ai_grok.audio_cost(2)]*2)
+        self.worker=self.new_worker();self.worker.run_next()
+        self.assertEqual(self.agent.grok.recognize.call_count,4)
+
+    def test_grok_asr_uncertain_result_is_never_retried_or_sent_to_another_gateway(self):
+        self.store.run['profile']['recognition_provider']='grok'
+        self.agent.grok=Mock();self.agent.grok.recognize.side_effect=YandexError('rate_limited',429)
+        self.worker.credentials=lambda job:{'grok':'asr-key','yandex':'summary-key','folder':'folder'}
+        self.worker.run_next();self.worker.run_next()
+        self.agent.grok.recognize.assert_called_once()
+        self.assertEqual(self.store.run['phase'],'needs_review')
+        self.client.recognize.assert_not_called();self.agent.mimo.recognize.assert_not_called()
+        self.client.complete.assert_not_called()
+
+    def test_grok_asr_budget_pause_prevents_upload(self):
+        self.store.run['profile']['recognition_provider']='grok'
+        self.store.allow=False;self.agent.grok=Mock()
+        self.worker.credentials=lambda job:{'grok':'asr-key','yandex':'summary-key','folder':'folder'}
+        self.worker.run_next()
+        self.agent.grok.recognize.assert_not_called();self.assertEqual(self.store.records,{})
+
+    def test_grok_asr_silence_does_not_generate_a_paid_request(self):
+        from unittest.mock import patch
+        self.store.run['profile']['recognition_provider']='grok';self.agent.grok=Mock()
+        self.worker.credentials=lambda job:{'grok':'asr-key','yandex':'summary-key','folder':'folder'}
+        with patch('center_messenger.telephony_ai_worker.decode_part',return_value=[bytes(3200)]):
+            self.worker.run_next()
+        self.agent.grok.recognize.assert_not_called()
+        self.assertEqual(self.store.records['asr:00000:0']['cost'],0)
+
+    def test_mimo_accounts_keep_separate_routes_and_budget_modes(self):
+        for provider in ('mimo','mimo_plan'):
+            with self.subTest(provider=provider):
+                self.store=MemoryStore();self.worker=self.new_worker();self.agent.mimo.reset_mock()
+                self.store.run['profile']['recognition_provider']=provider
+                self.agent.mimo.recognize.return_value={'text':'Обсудили занятие.'}
+                self.worker.credentials=lambda job:{provider:'separate-key','gateways':{},'yandex':'summary','folder':'folder'}
+                self.finish()
+                self.assertEqual(self.store.run['phase'],'complete')
+                self.assertEqual(self.agent.mimo.recognize.call_count,4)
+                options=self.agent.mimo.recognize.call_args.kwargs
+                self.assertEqual(options['plan'],provider=='mimo_plan');self.assertEqual(options['api_key'],'separate-key')
+                cost=self.store.records['asr:00000:0']['cost']
+                self.assertEqual(cost==0,provider=='mimo_plan')
+        self.client.recognize.assert_not_called()
+
+    def test_invalid_asr_profile_and_missing_grok_key_fail_before_receipt_or_network(self):
+        from center_messenger.auth_security import AuthError
+        self.agent._settings=Mock(return_value={})
+        self.agent._credentials=Mock(return_value={'yandex':'summary-key','folder':'folder'})
+        for provider in ('deepseek','invented','grok'):
+            self.store.run['profile']['recognition_provider']=provider
+            with self.subTest(provider=provider),self.assertRaises(AuthError):
+                TelephoneWorker.credentials(self.worker,self.store.claim())
+        self.assertEqual(self.store.records,{})
+        self.client.recognize.assert_not_called();self.agent.mimo.recognize.assert_not_called()
+
+    def test_grok_asr_alone_stamps_proxy_and_invalidates_on_connection_change(self):
+        from center_messenger.auth_security import AuthError
+        self.store.run['profile']['recognition_provider']='grok'
+        row={'key_ciphertext':'summary','folder_id':'folder','gateway_config':{'grok':{
+            'key_ciphertext':'asr','proxy_enabled':True,'proxy_ciphertext':'first','proxy_protocol':'socks5'}}}
+        self.agent._settings=lambda *_:row
+        self.agent._credentials=Mock(return_value={'grok':'asr-key','yandex':'summary-key','folder':'folder'})
+        job=self.store.claim();TelephoneWorker.credentials(self.worker,job)
+        self.assertEqual(self.agent._credentials.call_args.kwargs['selected'],{'yandex','grok'})
+        row['gateway_config']['grok']['proxy_ciphertext']='replacement'
+        with self.assertRaises(AuthError):TelephoneWorker.credentials(self.worker,job)
+
+
     def test_grok_key_change_invalidates_background_gateway_snapshot(self):
         from center_messenger.auth_security import AuthError
         self.store.run['profile']['model']='grok-4.7'

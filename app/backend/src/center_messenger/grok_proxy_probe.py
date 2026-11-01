@@ -141,7 +141,7 @@ class ProxyOpener:
 
     def open(self, request, timeout=7):
         readonly = request.full_url in URLS and request.get_method() == 'GET' and request.data is None
-        inference = (self.allow_inference and request.full_url == f'https://{HOST}/v1/responses'
+        inference = (self.allow_inference and request.full_url in (f'https://{HOST}/v1/responses', f'https://{HOST}/v1/stt')
                      and request.get_method() == 'POST' and isinstance(request.data, bytes))
         if not (readonly or inference):
             raise ValueError('Unsupported proxy diagnostic destination')
@@ -167,7 +167,7 @@ class ProxyOpener:
             connection.sock = sock
             connection.request(request.get_method(), request.selector, body=request.data,
                 headers={'Authorization': request.get_header('Authorization'), 'Accept': 'application/json',
-                         'Content-Type': 'application/json'})
+                         'Content-Type': request.get_header('Content-type', 'application/json')})
             return Reply(connection.getresponse(), connection)
         except (OSError, http.client.HTTPException) as error:
             self.failure = (error.code if isinstance(error, ProxyFailure) else 'proxy_tls'

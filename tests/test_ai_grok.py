@@ -1,5 +1,9 @@
 """Synthetic xAI transport, sealed workspace settings and text-agent routing."""
+import io
 import json
+from email import policy
+from email.parser import BytesParser
+import wave
 import unittest
 from copy import deepcopy
 from uuid import uuid4
@@ -29,6 +33,66 @@ def complete(client, **options):
 
 
 class TransportTests(unittest.TestCase):
+    def test_telephone_asr_uploads_bounded_wav_with_options_before_file(self):
+        audio = b'\x01\x00' * 16000
+        wire = FakeOpener({'text': 'Не записывайте на завтра.', 'duration': 1})
+        result = g.GrokClient(wire).recognize(audio, api_key=KEY)
+        request, timeout = wire.requests[0]
+        self.assertEqual(request.full_url, g.BASE_URL + '/stt')
+        self.assertEqual(request.get_method(), 'POST')
+        self.assertEqual(request.get_header('Authorization'), 'Bearer ' + KEY)
+        form = BytesParser(policy=policy.default).parsebytes(
+            ('Content-Type: ' + request.get_header('Content-type') + '\r\n\r\n').encode() + request.data)
+        parts = list(form.iter_parts())
+        self.assertEqual([p.get_param('name', header='content-disposition') for p in parts],
+                         ['model', 'language', 'format', 'filler_words', 'diarize', 'file'])
+        self.assertEqual([p.get_content().strip() for p in parts[:-1]],
+                         [g.ASR_MODEL, 'ru', 'false', 'true', 'false'])
+        with wave.open(io.BytesIO(parts[-1].get_payload(decode=True)), 'rb') as wav:
+            self.assertEqual((wav.getnchannels(), wav.getsampwidth(), wav.getframerate()), (1, 2, 16000))
+            self.assertEqual(wav.readframes(16000), audio)
+        self.assertEqual(result, {'text': 'Не записывайте на завтра.'})
+        self.assertEqual(timeout, 25)
+        self.assertLess(len(request.data), 810000)
+
+    def test_asr_rejects_urls_invalid_pcm_and_language_before_network(self):
+        wire = FakeOpener({'text': 'x'})
+        for audio in ('https://private-recording.test/audio', None, b'', b'0' * 3199,
+                      b'0' * 3201, b'0' * 800002):
+            with self.subTest(kind=type(audio).__name__), self.assertRaises(YandexError):
+                g.GrokClient(wire).recognize(audio, api_key=KEY)
+        with self.assertRaises(YandexError):
+            g.GrokClient(wire).recognize(b'0' * 3200, api_key=KEY, language='invented')
+        self.assertEqual(wire.requests, [])
+
+    def test_asr_accepts_empty_transcript_and_rejects_malformed_output(self):
+        self.assertEqual(g.GrokClient(FakeOpener({'text': ''})).recognize(b'0' * 3200, api_key=KEY), {'text': ''})
+        for payload in ({}, {'text': None}, {'text': 42}, {'text': 'x' * 20001}, b'x' * 2_000_001):
+            wire = FakeOpener(payload)
+            with self.subTest(kind=type(payload).__name__), self.assertRaises(YandexError):
+                g.GrokClient(wire).recognize(b'0' * 3200, api_key=KEY)
+            self.assertEqual(len(wire.requests), 1)
+
+    def test_asr_uses_saved_proxy_without_direct_fallback_or_retry(self):
+        from center_messenger import grok_proxy_probe as proxy
+        config = proxy.parse('8.8.4.4:8080:u:synthetic-password', 'socks5')
+        direct, wire = FakeOpener({}), FakeOpener({'text': 'Распознано'})
+        with patch.object(proxy, 'ProxyOpener', return_value=Mock(open=wire)):
+            self.assertEqual(g.GrokClient(direct).recognize(b'0' * 3200, api_key=KEY, proxy=config)['text'], 'Распознано')
+        self.assertEqual(wire.requests[0][0].full_url, g.BASE_URL + '/stt')
+        for error in (proxy.ProxyFailure('proxy_auth'), http_error(403), http_error(429), TimeoutError('secret')):
+            transport = Mock(open=Mock(side_effect=error))
+            with patch.object(proxy, 'ProxyOpener', return_value=transport):
+                with self.assertRaises(YandexError):
+                    g.GrokClient(direct).recognize(b'0' * 3200, api_key=KEY, proxy=config)
+            transport.open.assert_called_once()
+        self.assertEqual(direct.requests, [])
+
+    def test_asr_budget_estimates_are_nonzero_and_round_short_fragments_up(self):
+        self.assertAlmostEqual(g.audio_cost(3600), 9)
+        self.assertEqual(g.audio_cost(.1), g.audio_cost(1))
+        self.assertGreater(g.audio_cost(25), 0)
+
     def test_responses_uses_bearer_fixed_origin_no_storage_or_tools(self):
         wire = FakeOpener(response()); result = complete(g.GrokClient(wire), rules=False)
         request, timeout = wire.requests[0]; body = json.loads(request.data)
