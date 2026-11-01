@@ -2089,22 +2089,35 @@ body:has(#cabinet[hidden]){overflow:auto}
 #pane-connections :is(input,select,textarea){max-width:100%;min-width:0}
 #pane-connections .fld{min-width:0}
 #pane-connections .fld>small{font-size:11.5px;line-height:1.55;color:var(--muted)}
-#pane-connections #ai-grok-card .card-b{display:grid;gap:14px}
-#pane-connections #ai-grok-card :is(.gateway-provider-caption,.form-note){margin:0}
-#pane-connections #ai-grok-card :is(.gateway-credentials,.grok-proxy-check,.grok-diagnostics){margin:0;padding:0;border:0;border-top:1px solid var(--line)}
-#pane-connections #ai-grok-card summary{padding:10px 0;font-size:12px;font-weight:600;line-height:1.5;color:var(--primary-ink);cursor:pointer;overflow-wrap:anywhere}
-#pane-connections #ai-grok-card summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
-#pane-connections #ai-grok-card details[open]>summary{margin-bottom:4px}
-#pane-connections #ai-grok-card :is(.gateway-form,.grok-proxy-form,.grok-proxy-advanced[open],.grok-diagnostics[open]){display:grid;gap:12px}
-#pane-connections #ai-grok-card :is(.fld,.btn-row){margin:0}
-#pane-connections #ai-grok-card .grok-proxy-saved{display:grid;gap:8px}
-#pane-connections #ai-grok-card .grok-proxy-saved>p:first-child{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:6px;margin:0;font-size:12px}
-#pane-connections #ai-grok-card .grok-proxy-saved-state{color:var(--muted);font-size:11px}
+/* Grok stays one flat form; its height follows the ordinary MiMo card. */
+#pane-connections #ai-grok-card{display:flex;flex-direction:column;min-height:0}
+#pane-connections #ai-grok-card .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+#pane-connections #ai-grok-card .card-h{flex:none}
+#pane-connections #ai-grok-card .card-b{display:grid;align-content:start;gap:8px;flex:1;min-height:0;overflow-y:auto;padding-top:0;padding-bottom:12px;scrollbar-width:thin}
+#pane-connections #ai-grok-card :is(.fld,.password-field,.form-note){margin:0}
+#pane-connections #ai-grok-card .fld>span:not(.sr-only){margin-bottom:4px}
+#pane-connections #ai-grok-card .grok-key-row{display:grid;grid-template-columns:minmax(0,1fr) auto 32px;align-items:end;gap:6px}
+#pane-connections #ai-grok-card .password-field input{padding-right:72px}
+#pane-connections #ai-grok-card :is(.grok-proxy-form,.grok-proxy-saved){display:grid;gap:4px}
+#pane-connections #ai-grok-card .grok-proxy-form{padding-top:10px;border-top:1px solid var(--line)}
+#pane-connections #ai-grok-card .grok-proxy-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;font-size:12px}
+#pane-connections #ai-grok-card .check-label{margin:0;font-weight:600}
+#pane-connections #ai-grok-card .grok-proxy-saved-state{font-size:11px;color:var(--muted)}
 #pane-connections #ai-grok-card .grok-proxy-saved-state[data-state=active]{color:var(--primary-ink)}
-#pane-connections #ai-grok-card .grok-proxy-saved-address{font-size:12px;padding:9px 12px}
+#pane-connections #ai-grok-card .grok-proxy-address{display:flex;flex-direction:row;align-items:baseline;gap:6px;margin:0;font-size:11px;font-weight:400;color:var(--muted)}
+#pane-connections #ai-grok-card .grok-proxy-saved-address{flex:1;width:100%;min-width:0;min-height:0;height:20px;border:0;box-shadow:none;background:transparent;padding:0;color:var(--ink);font-size:12px}
+#pane-connections #ai-grok-card .grok-proxy-actions{display:grid;grid-template-columns:minmax(0,1fr) auto 32px;align-items:center;gap:6px}
+#pane-connections #ai-grok-card .form-note{font-size:11px;line-height:1.4}
+#pane-connections #ai-grok-card .grok-icon{display:grid;place-items:center;width:32px;min-height:40px;height:40px;padding:0}
+#pane-connections #ai-grok-card .grok-icon svg{width:17px;height:17px}
+#pane-connections #ai-grok-card :is(.btn,.fld input,.fld select){height:40px;min-height:40px;font-size:12px}
+#pane-connections #ai-grok-card .btn{padding:0 10px}
 #pane-connections #ai-grok-card .gateway-capabilities{margin:0}
-#pane-connections #ai-grok-card .gateway-capability{padding:0 0 10px;border:0}
-#pane-connections #ai-grok-card .grok-connection-check{border-top:1px solid var(--line);padding-top:14px}
+#pane-connections #ai-grok-card .gateway-capability{padding:0 0 6px;border:0;flex-wrap:wrap;gap:6px}
+#pane-connections #ai-grok-card .gateway-capability>span{flex:1;min-width:110px}
+#pane-connections #ai-grok-card .grok-connection-check{border-top:1px solid var(--line);padding-top:10px}
+#pane-connections #ai-grok-card .gateway-capability time{font-size:10px}
+#pane-connections #ai-grok-card :is(.gateway-diagnostic-result,.grok-proxy-result){max-height:100px;overflow:auto}
 #pane-connections #ai-grok-card :is(.gateway-diagnostic-result,.grok-proxy-result) p{margin:6px 0}
 #pane-connections .small-tag{background:var(--surface-2);color:var(--muted)}
 #pane-connections .btn-row{flex-wrap:wrap}

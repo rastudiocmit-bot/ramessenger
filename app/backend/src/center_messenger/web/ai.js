@@ -9,6 +9,16 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   const dsForm = $("#ai-deepseek-form"), routesForm = $("#ai-routes-form"), voiceForm = $("#ai-voice-options-form");
   const verifying = new Map();
   const gatewayCards = [...document.querySelectorAll("[data-gateway]")];
+  const grokCard = gatewayCards.find(card => card.dataset.gateway === 'grok');
+  const mimoCard = gatewayCards.find(card => card.dataset.gateway === 'mimo');
+  if (grokCard && mimoCard && window.ResizeObserver) {
+    // Use MiMo's rendered size, including responsive wrapping and check results.
+    const size = new ResizeObserver(() => {
+      const height = mimoCard.getBoundingClientRect().height;
+      if (height > 0) grokCard.style.height = `${height}px`;
+    });
+    size.observe(mimoCard);
+  }
   let audioUrl = null, synthesisRoute = null;
   const providerNames = { yandex: "Yandex Cloud", deepseek: "DeepSeek", mimo: "MiMo", mimo_plan: "MiMo Token Plan", grok: "Grok · xAI" };
   const providerReady = provider => provider === "yandex" ? settings.configured : provider === "deepseek" ? settings.deepseek?.configured : settings.gateways?.[provider]?.configured;
@@ -144,7 +154,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         const address = card.querySelector('.grok-proxy-saved-address'), saved = card.querySelector('.grok-proxy-saved-state'), description = card.querySelector('.grok-proxy-saved-description');
         if (address) address.value = '';
         if (card.dataset.gateway === 'grok') {
-          card.querySelector('.gateway-credentials > summary').textContent = 'API-ключ';
+          card.querySelector('.grok-key-label').textContent = 'API-ключ';
           show(card.querySelector('.grok-proxy-address'), false);
         }
         if (saved) { saved.textContent = 'Не сохранён'; saved.dataset.state = ''; }
@@ -314,7 +324,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     for (const button of card.querySelectorAll("[data-verify]")) {
       const capability = button.dataset.verify, check = item.configured ? checks[capability] : null;
       button.disabled = !item.configured || Boolean(pending);
-      button.textContent = pending === capability ? "Проверяем…" : provider === "grok" ? "Проверить подключение" : "Проверить";
+      button.textContent = pending === capability ? "Проверяем…" : "Проверить";
       const output = card.querySelector(`[data-check="${capability}"]`);
       output.dataset.state = !check ? "" : check.ok ? "active" : "error";
       output.textContent = !check ? "Не проверено" : (check.ok ? "Работает" : gatewayCheckError(provider, check.error_code));
@@ -345,10 +355,12 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     for (const card of gatewayCards) {
       const item = gateways[card.dataset.gateway] || {}, f = card.querySelector("form").elements;
       f.api_key.value = ""; f.api_key.placeholder = item.key_hint ? `Сохранён ключ …${item.key_hint}` : "Вставьте ключ";
+      if (card.dataset.gateway === 'grok' && item.configured) f.api_key.placeholder = 'Новый ключ';
       if (item.base_url) f.base_url.value = item.base_url;
       f.protocol.value = item.protocol || (card.dataset.gateway === "grok" ? "responses" : "chat");
       const details = card.querySelector(".gateway-credentials"); if (details) details.open = !item.configured;
-      if (details && card.dataset.gateway === 'grok') details.querySelector('summary').textContent = item.configured
+      const keyLabel = card.querySelector('.grok-key-label');
+      if (keyLabel) keyLabel.textContent = item.configured
         ? `API-ключ · ${item.key_hint ? '…' + item.key_hint : 'сохранён'}` : 'API-ключ';
       const diagnostic = card.querySelector(".gateway-diagnostic-result");
       if (diagnostic) { diagnostic.replaceChildren(); show(diagnostic, false); }
@@ -358,7 +370,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         const proxy = item.proxy || {};
         proxyForm.elements.enabled.checked = proxy.enabled === true;
         proxyForm.elements.protocol.value = proxy.protocol || 'socks5';
-        proxyForm.elements.proxy.placeholder = proxy.configured ? 'Прокси сохранён; пустое поле сохраняет пароль' : 'IPv4:порт:логин:пароль';
+        proxyForm.elements.proxy.placeholder = proxy.configured ? 'Пустое поле сохраняет прежний прокси' : 'IPv4:порт:логин:пароль';
         card.querySelector('.grok-route-note').textContent = proxy.enabled ? `Все агенты Grok используют ${proxy.protocol === 'http' ? 'HTTP CONNECT' : 'SOCKS5'} · ${proxy.endpoint}` : 'Все агенты Grok используют прямое подключение.';
         const stored = proxy.configured === true, enabled = stored && proxy.enabled === true;
         card.querySelector('.grok-proxy-saved-address').value = stored ? proxy.endpoint || '' : '';
