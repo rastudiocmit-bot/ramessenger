@@ -144,7 +144,7 @@ def probe(key, opener=None):
         return report('bad_response', status)
 
 
-def diagnose(service, actor, workspace, *, opener=None):
+def diagnose(service, actor, workspace, *, opener=None, proxy_data=None):
     with service.accounts.transaction(actor, snapshot=True) as db:
         service.accounts._workspace(db, actor, workspace, manage=True)
         row = service._settings(db, workspace)
@@ -153,7 +153,20 @@ def diagnose(service, actor, workspace, *, opener=None):
     if not key:
         raise AuthError(409, 'Сначала сохраните API-ключ Grok.')
     service.accounts.throttle(f'grok-access:{workspace}:{actor.user_id}', limit=5, minutes=1)
+    proxy = None
+    if proxy_data is not None:
+        from center_messenger.grok_proxy_probe import ProxyOpener, parse
+        proxy = ProxyOpener(parse(proxy_data['proxy'], proxy_data.get('protocol', 'auto')))
+        opener = proxy.open
     result = probe(key, opener)
+    if proxy is not None:
+        result.update(route='proxy', proxy=proxy.public())
+        if result['ok']:
+            result['message'] = 'Через прокси получен каталог моделей xAI. Для рабочих запросов агентов прокси пока не включён.'
+        elif result['http_status'] == 403:
+            result['message'] = 'xAI вернул HTTP 403 и через прокси. Точная причина запрета этим ответом не раскрыта.'
+        elif result['http_status'] is None:
+            result['message'] = 'Не удалось выполнить проверку xAI через прокси.'
     with service.accounts.transaction(actor, snapshot=True) as db:
         service.accounts._workspace(db, actor, workspace, manage=True)
         if ai_grok.stored(service._settings(db, workspace)).get('key_ciphertext') != original:

@@ -139,6 +139,11 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
 
   async function load() {
     if(subject!==who()){
+      for (const card of gatewayCards) {
+        card.querySelector('.grok-proxy-form')?.reset();
+        const result = card.querySelector('.grok-proxy-result');
+        if (result) { result.replaceChildren(); show(result, false); }
+      }
       subject=who();settings=null;agents=[];editing=null;baseline=null;genericBusy=false;selectedTask="voice_input";
       show(agentForm,false);agentForm.reset();list.replaceChildren();workspace?.reset();phoneAgent?.reset();editorControls();
     }
@@ -269,7 +274,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
   }
   function renderGatewayStatus(card, item) {
     const provider = card.dataset.gateway, checks = item.checks || {}, pending = verifying.get(provider)?.capability;
-    const pendingName = verifying.get(provider)?.access ? "Доступ к API" : checkNames[pending];
+    const pendingName = verifying.get(provider)?.proxy ? "Доступ через прокси" : verifying.get(provider)?.access ? "Доступ к API" : checkNames[pending];
     const capabilities = [...card.querySelectorAll('[data-check]')].map(output => output.dataset.check), total = capabilities.length;
     const passed = capabilities.filter(key => checks[key]?.ok === true).length;
     const failed = capabilities.filter(key => checks[key]?.ok === false);
@@ -288,6 +293,11 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     if (verifyAll) verifyAll.disabled = !item.configured || Boolean(pending);
     const diagnostic = card.querySelector(".gateway-diagnostic");
     if (diagnostic) diagnostic.disabled = !item.configured || Boolean(pending);
+    const proxyForm = card.querySelector('.grok-proxy-form');
+    if (proxyForm) {
+      proxyForm.querySelector('[type=submit]').disabled = !item.configured || Boolean(pending);
+      for (const field of proxyForm.querySelectorAll('input,select')) field.disabled = Boolean(pending);
+    }
     card.querySelector('button[type="submit"]').disabled = Boolean(pending);
     for (const button of card.querySelectorAll("[data-verify]")) {
       const capability = button.dataset.verify, check = item.configured ? checks[capability] : null;
@@ -328,6 +338,9 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       const details = card.querySelector(".gateway-credentials"); if (details) details.open = !item.configured;
       const diagnostic = card.querySelector(".gateway-diagnostic-result");
       if (diagnostic) { diagnostic.replaceChildren(); show(diagnostic, false); }
+      card.querySelector('.grok-proxy-form')?.reset();
+      const proxyResult = card.querySelector('.grok-proxy-result');
+      if (proxyResult) { proxyResult.replaceChildren(); show(proxyResult, false); }
       renderGatewayStatus(card, item);
     }
   }
@@ -401,6 +414,35 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       } finally {
         if (verifying.get(provider)?.token === token) verifying.delete(provider);
         if (mine === seq) renderGatewayStatus(card, settings.gateways[provider]);
+      }
+    });
+    card.querySelector('.grok-proxy-form')?.addEventListener('submit', async event => {
+      event.preventDefault();
+      const form = event.currentTarget, provider = card.dataset.gateway, mine = seq, owner = who(), token = {};
+      if (verifying.has(provider) || !settings?.gateways?.[provider]?.configured || !savedKeyReady()) return;
+      const proxy = form.elements.proxy.value.trim(), protocol = form.elements.protocol.value;
+      if (!proxy) { notice('Введите данные прокси.', errorTarget); return; }
+      const box = card.querySelector('.grok-proxy-result'), requestPath = path();
+      form.elements.proxy.value = '';
+      notice('', errorTarget); box.textContent = 'Проверяем доступ через прокси с сервера…'; show(box);
+      verifying.set(provider, { capability: 'text', access: true, proxy: true, token }); renderGatewayStatus(card, settings.gateways[provider]);
+      try {
+        const result = await api(requestPath + '/proxy-diagnostic', { method: 'POST', timeoutMs: 35000, data: { proxy, protocol } });
+        if (mine !== seq || owner !== who()) return;
+        box.replaceChildren(node('strong', result.http_status ? `Ответ xAI через прокси: HTTP ${result.http_status}` : 'Проверка через прокси'), node('p', result.message));
+        if (result.proxy) {
+          if (result.proxy.protocol) box.append(node('p', `Протокол: ${result.proxy.protocol === 'http' ? 'HTTP CONNECT' : 'SOCKS5'}`));
+          box.append(node('p', result.proxy.message));
+        }
+        if (result.account) box.append(node('strong', result.account.http_status ? `Состояние ключа: HTTP ${result.account.http_status}` : 'Состояние ключа не подтверждено'), node('p', result.account.message));
+        if (result.models?.length) box.append(node('p', `Доступные модели: ${result.models.join(', ')}`));
+        box.append(node('small', new Date(result.checked_at).toLocaleString('ru-RU') + ' · генерация текста не запускалась'));
+        box.dataset.state = result.ok ? 'active' : 'error'; show(box);
+      } catch (error) {
+        if (mine === seq && owner === who()) { box.replaceChildren(); show(box, false); if (error.name !== 'AbortError') notice(error.message, errorTarget); }
+      } finally {
+        if (verifying.get(provider)?.token === token) verifying.delete(provider);
+        if (mine === seq && owner === who()) renderGatewayStatus(card, settings.gateways[provider]);
       }
     });
   }

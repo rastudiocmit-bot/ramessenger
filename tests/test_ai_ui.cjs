@@ -9,7 +9,7 @@ async function setup(t){
    {id:'yandexgpt-5.1',title:'Yandex Pro',provider:'yandex'},{id:'deepseek-flash',title:'DeepSeek Flash',provider:'deepseek'},{id:'deepseek-v4-pro',title:'DeepSeek Pro',provider:'deepseek'},{id:'mimo-v2.6-flash',title:'MiMo Flash',provider:'mimo'},{id:'mimo-plan-v2.6-pro',title:'MiMo Pro Plan',provider:'mimo_plan'},{id:'grok-4.7',title:'Grok 4.7',provider:'grok'},{id:'grok-4.6',title:'Grok 4.6',provider:'grok'}]};
  let agents=[],failures=new Map(),checkGate=null,diagnostic={ok:false,http_status:403,code:'forbidden',message:'xAI запретил доступ с сервера.',models:[],checked_at:'2026-11-01T08:26:56Z'};
  const api=async(url,args={})=>{calls.push({url,...args});if(url.endsWith('/settings')){if(args.data)settings={...settings,...args.data};return settings;}
-  if(url.endsWith('/gateways/grok/diagnostic')){if(checkGate)await checkGate;return diagnostic;}
+  if(url.endsWith('/gateways/grok/diagnostic')||url.endsWith('/gateways/grok/proxy-diagnostic')){if(checkGate)await checkGate;return diagnostic;}
   if(url.endsWith('/gateways/routes')){settings.gateways={...settings.gateways,...args.data};return settings;}
   if(/\/gateways\/(mimo|mimo_plan|grok)(\/verify)?$/.test(url)){if(url.endsWith('/verify')&&checkGate)await checkGate;const provider=url.split('/gateways/')[1].split('/')[0];if(url.endsWith('/verify'))settings.gateways[provider].checks={...settings.gateways[provider].checks,[args.data.capability]:{ok:!failures.has(provider+':'+args.data.capability),error_code:failures.get(provider+':'+args.data.capability)||null}};else settings.gateways[provider]={...settings.gateways[provider],configured:!args.data.clear_key,key_hint:args.data.api_key?.slice(-4)||'',...args.data,api_key:undefined};return settings;}
   if(url.endsWith('/agents/test'))return {text:'Готово',cost_rub:.01};
@@ -136,6 +136,37 @@ test('a late Grok access report cannot enter a different workspace',async t=>{
  s.state.workspace.id='other';await s.app.load();release();await s.flush();
  assert.equal(card.querySelector('.gateway-diagnostic-result').hidden,true);
  assert.doesNotMatch(card.querySelector('.gateway-diagnostic-result').textContent,/403/);
+});
+
+test('one-off proxy check sends secrets only in its POST and clears the draft without verifying inference',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),keyForm=card.querySelector('.gateway-form'),form=card.querySelector('.grok-proxy-form');
+ assert.equal(form.querySelector('[type=submit]').disabled,true);
+ keyForm.elements.api_key.value='xai-synthetic-key-only';keyForm.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ assert.equal(form.querySelector('[type=submit]').disabled,false);
+ s.setDiagnostic({ok:true,http_status:200,message:'Каталог доступен через прокси. Рабочие запросы агентов пока не изменены.',proxy:{protocol:'socks5',tls_verified:true,message:'TLS проверен.'},models:['grok-4.7'],checked_at:'2026-11-01T10:00:00Z'});
+ form.elements.proxy.value='8.8.4.4:8080:synthetic:synthetic-password-only';form.elements.protocol.value='socks5';
+ const release=s.holdChecks();form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));
+ assert.equal(form.elements.proxy.value,'');assert.equal(form.elements.proxy.type,'password');
+ assert.equal(card.querySelector('.gateway-diagnostic').disabled,true);assert.equal(card.querySelector('[data-verify=text]').disabled,true);
+ release();await s.flush();
+ const request=s.calls.find(c=>c.url.endsWith('/proxy-diagnostic'));
+ assert.equal(request.method,'POST');assert.equal(request.data.protocol,'socks5');assert.match(request.data.proxy,/synthetic-password-only$/);
+ const result=card.querySelector('.grok-proxy-result');assert.match(result.textContent,/HTTP 200/);assert.match(result.textContent,/SOCKS5/);
+ assert.doesNotMatch(card.textContent,/synthetic-password-only/);assert.equal(card.querySelector('.gateway-status').dataset.state,'');
+ assert.equal(s.calls.filter(c=>c.url.endsWith('/verify')).length,0);assert.equal(s.w.localStorage.length,0);
+ form.elements.proxy.value='another-sensitive-draft';s.state.workspace.id='other';await s.app.load();
+ assert.equal(form.elements.proxy.value,'');assert.equal(result.hidden,true);assert.equal(result.textContent,'');
+});
+
+test('late proxy response is discarded and an unsaved Grok key blocks the proxy check',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),keyForm=card.querySelector('.gateway-form'),form=card.querySelector('.grok-proxy-form');
+ keyForm.elements.api_key.value='xai-synthetic-key-only';keyForm.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ keyForm.elements.api_key.value='xai-unsaved-key-only';form.elements.proxy.value='8.8.4.4:8080:u:synthetic-password';
+ form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ assert.equal(s.calls.filter(c=>c.url.endsWith('/proxy-diagnostic')).length,0);assert.match(s.notices.at(-1),/Сначала сохраните/);
+ keyForm.elements.api_key.value='';const release=s.holdChecks();form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));
+ s.state.workspace.id='other';await s.app.load();release();await s.flush();
+ assert.equal(card.querySelector('.grok-proxy-result').hidden,true);assert.equal(form.elements.proxy.value,'');
 });
 
 test('MiMo accounts expose separate cards and tests for each capability',async t=>{

@@ -7,7 +7,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Request
-from pydantic import Field
+from pydantic import Field, SecretStr
 
 from center_messenger.accounts_api import identity
 from center_messenger.ai_yandex import MAX_AUDIO_BYTES
@@ -38,6 +38,11 @@ class GatewayInput(DeepSeekInput):
 
 class GatewayCheck(InputModel):
     capability: Literal["text", "recognition", "synthesis"] = "text"
+
+
+class GrokProxyCheck(InputModel):
+    proxy: SecretStr
+    protocol: Literal["auto", "http", "socks5"] = "auto"
 
 
 class ActionRoutes(InputModel):
@@ -213,6 +218,13 @@ def verify_gateway(workspace_id: UUID, provider: str, model: GatewayCheck, reque
 def grok_access_diagnostic(workspace_id: UUID, request: Request):
     from center_messenger.grok_access import diagnose
     return diagnose(voice(request), identity(request, mutation=True), workspace_id)
+
+
+@router.post("/ai/gateways/grok/proxy-diagnostic")
+def grok_proxy_diagnostic(workspace_id: UUID, model: GrokProxyCheck, request: Request):
+    from center_messenger.grok_access import diagnose
+    return diagnose(voice(request), identity(request, mutation=True), workspace_id,
+        proxy_data={"proxy": model.proxy.get_secret_value(), "protocol": model.protocol})
 
 
 @router.post("/ai/synthesize")

@@ -102,6 +102,36 @@ Grok telephone contract remain unchanged. The existing deployment owner may
 publish it through the normal timer/service; no guard installation or worker
 pin update is required. Publication is not proof that the VPS has installed it.
 
+### One-off Grok proxy access test
+
+The Grok card also offers «Проверить доступ через прокси». An owner/admin
+enters a public IPv4, port, username and password as a single password field,
+and chooses SOCKS5, HTTP CONNECT or protocol detection. The authenticated,
+CSRF-protected POST uses the saved Grok key for the same two bounded read-only
+API checks. It does not generate text or change the working agent transport.
+The proxy string is neither saved in settings nor returned; the browser clears
+it before waiting for the response and on workspace/account/settings changes.
+
+Only numeric public unicast IPv4 proxy addresses are accepted. The tunnel's
+destination is fixed to api.x.ai:443, and requests are limited to GET
+/v1/language-models and /v1/api-key. TLS uses the standard certificate and
+hostname verification; API authorization is sent inside TLS, while proxy
+authorization is used only in the tunnel handshake. Redirects, private targets,
+paid requests and arbitrary destination URLs are not supported. Automatic
+protocol selection can negotiate SOCKS5 then HTTP before the API request; it
+never retries a completed API request. No process-wide proxy is configured.
+
+A successful proxy test establishes catalogue access from the API container,
+not a deployed proxy route for every agent. A production transport change is
+a separate protected API/telephone-worker release and still requires the
+existing exact-SHA server admission; do not bypass that guard to make the
+diagnostic route behave like a production transport.
+
+Protocol references:
+- https://docs.python.org/3.12/library/http.client.html
+- https://www.rfc-editor.org/rfc/rfc1928
+- https://www.rfc-editor.org/rfc/rfc1929
+
 ## Actions
 
 1. **Recognition:** Yandex by default; MiMo/Token Plan are explicit alternatives. Russian can be selected for MiMo, but the server passes the documented `auto` language tag because MiMo's ASR API lists only Chinese and English. Russian quality is therefore experimental and must be tested on a real recording before operational use; a successful connectivity check with silence does not prove it works. Yandex accepts `ru`; MiMo accepts `auto`, `en` or `zh` at its API boundary. An incompatible language is rejected before a provider call. Browser PCM is wrapped losslessly as a mono 16 kHz WAV; the full three-minute base64 payload stays below MiMo's 10 MB limit. Existing authenticated, cancellable background jobs handle recording requests. DeepSeek receives only already transcribed text as an AI agent model, not audio; its public API does not advertise audio input.

@@ -11,6 +11,12 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
    diagnostics++;assert.equal(route.request().method(),'POST');assert.deepEqual(route.request().postDataJSON(),{});
    return route.fulfill({contentType:'application/json',body:JSON.stringify({ok:false,http_status:403,code:'forbidden',message:'xAI запретил доступ с сервера.',account:{http_status:200,code:'recognized',message:'xAI распознал сохранённый ключ; ключ и команда не отмечены заблокированными. Проверьте разрешение на каталог моделей в настройках ключа.'},models:[],checked_at:'2026-11-01T08:26:56Z',inference_requested:false})});
   });
+  let proxyChecks=0;
+  await context.route('**/api/workspaces/*/ai/gateways/grok/proxy-diagnostic',route=>{
+   const request=route.request();proxyChecks++;assert.equal(request.method(),'POST');
+   assert.equal(request.postDataJSON().protocol,'socks5');assert.equal(request.postDataJSON().proxy,'8.8.4.4:8080:synthetic:synthetic-password-only');
+   return route.fulfill({contentType:'application/json',body:JSON.stringify({ok:true,http_status:200,message:'Через прокси получен каталог моделей xAI. Для рабочих запросов агентов прокси пока не включён.',proxy:{protocol:'socks5',tunnel:true,tls_verified:true,message:'Соединение с xAI через прокси проверено с проверкой TLS-сертификата.'},models:['grok-4.7'],checked_at:'2026-11-01T10:00:00Z',inference_requested:false})});
+  });
   data.ai.settings.tasks.push({id:'tasks',title:'Задачи из сообщений'});
   for(const task of ['voice_input','text_processing','tasks'])data.ai.agents.push({id:'agent-'+task,name:'Synthetic '+task,task,task_title:task,model:'yandexgpt-5.1',model_title:'Yandex',prompt:'Сохраняй факты.',temperature:.1,enabled:true,is_default:true,version:1});
   const phone={name:'Телефонные разговоры',version:1,model:'yandexgpt-5.1',recognition_provider:'yandex',temperature:.1,prompt:'Кратко опиши разговор.',history:[],models:data.ai.settings.models,recognizers:[{id:'yandex',title:'Yandex Cloud',configured:true}]},phoneWrites=[];
@@ -25,7 +31,7 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   });
   const page=await context.newPage();page.setDefaultTimeout(10000);await page.goto('https://cabinet.example.test/');await page.locator('.chat-row').first().waitFor();
   await page.locator('#connections-tab').evaluate(e=>e.click());await page.locator('#connections-voice-tab').click();
-  const card=page.locator('[data-gateway=grok]');await card.waitFor();await card.locator('[name=api_key]').fill('xai-synthetic-browser-key-only');await card.locator('[type=submit]').click();
+  const card=page.locator('[data-gateway=grok]');await card.waitFor();await card.locator('[name=api_key]').fill('xai-synthetic-browser-key-only');await card.locator('.gateway-form [type=submit]').click();
   await page.waitForFunction(()=>!document.querySelector('[data-gateway=grok] [data-verify=text]').disabled);
   assert.equal(await card.locator('[name=api_key]').inputValue(),'');
   assert.equal(data.mutations.filter(c=>c.path.endsWith('/grok/verify')).length,0);
@@ -36,6 +42,13 @@ const assert=require('node:assert/strict'),{chromium}=require('playwright'),{fix
   assert.ok(await card.evaluate(e=>e.scrollWidth<=e.clientWidth+1),'diagnostic overflow at '+width);
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'diagnostic page overflow');
   assert.equal(diagnostics,1);assert.equal(data.mutations.filter(c=>c.path.endsWith('/grok/verify')).length,0);
+  await card.locator('.grok-proxy-check > summary').click();
+  await card.locator('.grok-proxy-form [name=proxy]').fill('8.8.4.4:8080:synthetic:synthetic-password-only');
+  await card.locator('.grok-proxy-submit').click();await card.locator('.grok-proxy-result strong').waitFor();
+  assert.equal(await card.locator('.grok-proxy-form [name=proxy]').inputValue(),'');
+  assert.match(await card.locator('.grok-proxy-result').textContent(),/HTTP 200/);assert.match(await card.locator('.grok-proxy-result').textContent(),/SOCKS5/);
+  assert.ok(await card.evaluate(e=>e.scrollWidth<=e.clientWidth+1),'proxy form overflow at '+width);
+  assert.equal(proxyChecks,1);assert.equal(data.mutations.filter(c=>c.path.endsWith('/grok/verify')).length,0);
   await card.locator('[data-verify=text]').click();await page.waitForFunction(()=>document.querySelector('[data-gateway=grok] .gateway-status').dataset.state==='active');
   assert.match(await card.locator('[data-grok-models]').textContent(),/grok-4.7/);
   assert.ok(await card.evaluate(e=>e.scrollWidth<=e.clientWidth+1),'gateway card overflow at '+width);
