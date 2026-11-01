@@ -81,7 +81,7 @@
     document.querySelectorAll('input[type="password"], .password-field input').forEach(input => { input.value = ""; input.type = "password"; });
     document.querySelectorAll(".reveal").forEach(button => { button.textContent = "Показать"; button.setAttribute("aria-label", "Показать пароль"); button.setAttribute("aria-pressed", "false"); });
   }
-  async function api(path, { method = "GET", data, track = true, timeoutMs = 0, signal } = {}) {
+  async function api(path, { method = "GET", data, track = true, timeoutMs = method === "GET" ? 12000 : 0, signal } = {}) {
     const epoch = state.epoch;
     const headers = { "Accept": "application/json" };
     if (method !== "GET") {
@@ -216,17 +216,19 @@
     form.elements.name.disabled = !manage;
     show($("button[type=submit]", form), Boolean(manage));
     show($("#workspace-readonly"), !manage);
+    if (state.pane === "connections" && !state.connectionsView) state.connectionsView = "wizard";
     if (state.pane === "connections" && state.connectionsView === "wizard") syncMaster.enter();
-    if (state.pane === "connections") await Promise.allSettled([ai.load(), cardLoader.load(), loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }), loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
-    if (state.pane === "connections" && state.connectionsView === "novofon") await novofon.load();
-    if (state.pane === "messages") { chat.setView(state.chatView || "all", false); await chat.enter(); }
-    if (state.pane === "tasks") await tasks?.enter();
-    if (state.pane === "telephony") await phoneCare?.enter();
-    if (state.pane === "summary") await cabinet.summary();
-    if (state.pane === "clients") await directory.enter();
-    if (["profile", "overview"].includes(state.pane) && sections.messages) await cabinet.metadata();
-    if (state.pane === "team") await team.load();
-    if (state.pane === "security") await loadSessions();
+    // Each navigation owns one load. A late reply must not start the next
+    // pane's loader again, or make Novofon wait for unrelated settings.
+    if (state.pane === "connections") return loadConnectionView(state.connectionsView || "wizard");
+    if (state.pane === "messages") { chat.setView(state.chatView || "all", false); return chat.enter(); }
+    if (state.pane === "tasks") return tasks?.enter();
+    if (state.pane === "telephony") return phoneCare?.enter();
+    if (state.pane === "summary") return cabinet.summary();
+    if (state.pane === "clients") return directory.enter();
+    if (["profile", "overview"].includes(state.pane) && sections.messages) return cabinet.metadata();
+    if (state.pane === "team") return team.load();
+    if (state.pane === "security") return loadSessions();
   }
   const team = window.CenterTeam({ $, state, api, node, show, roles, initials, confirm });
   async function loadSessions() {
@@ -380,19 +382,28 @@
     const label = $(selector); label.textContent = text; label.closest(".connection-tile").dataset.state = mode;
     syncMaster.render();
   }
+  function loadConnectionView(view, { refresh = false } = {}) {
+    if (!state.workspace || state.pane !== "connections") return Promise.resolve();
+    if (view === "novofon") return Promise.allSettled([novofon.load({ refreshSip: refresh })]);
+    if (view === "voice" || view === "agents") return Promise.allSettled([ai.load()]);
+    if (view === "settings") return Promise.allSettled([chat.connections()]);
+    return Promise.allSettled([cardLoader.load(),
+      loadAlfa().catch(error => { notice(error.message, $("#alfa-notice")); }),
+      loadAlfaMax().catch(error => { notice(error.message, $("#alfa-max-error")); }), chat.connections()]);
+  }
   function connectionView(view) {
     if (!["wizard", "novofon", "settings", "voice", "agents"].includes(view)) view = "wizard";
     const previous = state.connectionsView;
     if (previous === "wizard" && view !== "wizard") syncMaster.leave();
+    if (view !== "wizard") { clearTimeout(alfaSessionTimer); alfaMaxProgress.pause?.(); }
     state.connectionsView = view;
-    if (view === "wizard") void cardLoader.load();
     for (const name of ["wizard", "novofon", "settings", "voice", "agents"]) {
       show($("#connections-" + name + "-view"), name === view);
       $("#connections-" + name + "-tab").setAttribute("aria-selected", String(name === view));
       $("#connections-" + name + "-tab").tabIndex = name === view ? 0 : -1;
     }
     if (view === "wizard") syncMaster.enter();
-    if (view === "novofon") void novofon.load();
+    void loadConnectionView(view, { refresh: previous === view });
   }
   for (const button of document.querySelectorAll("[data-connection-view]")) button.addEventListener("click", () => connectionView(button.dataset.connectionView));
   $(".connection-tabs").addEventListener("keydown", event => {
@@ -514,7 +525,6 @@
     const workspace = state.workspace, loadEpoch = state.epoch;
     const payload = await api("/workspaces/" + workspace.id + "/integrations/alfa-max");
     if (workspace.id !== state.workspace?.id || loadEpoch !== state.epoch) return;
-    const previousState = state.alfaMax?.state;
     state.alfaMax = payload;
     notices?.refreshServices();
     const recovery = payload.recovery || {};
@@ -558,14 +568,14 @@
     alfaMaxButtons();
     const hasSession = payload.configured && payload.state !== "not_configured";
     show($("#history-monitor-empty"), !hasSession);
-    if (previousState !== payload.state && payload.state !== "active" && !["voice", "agents", "wizard"].includes(state.connectionsView)) connectionView("wizard");
     if (hasSession) alfaMaxProgress.start();
     else { alfaMaxProgress.reset(); connectionSummary("#alfa-history-summary", "Сначала подключите MAX", "waiting"); }
     clearTimeout(alfaSessionTimer);
+    if (state.pane !== "connections" || state.connectionsView !== "wizard") return;
     const epoch = state.epoch;
     alfaSessionTimer = setTimeout(() => {
       const poll = () => {
-        if (epoch !== state.epoch || state.pane !== "connections") return;
+        if (epoch !== state.epoch || state.pane !== "connections" || state.connectionsView !== "wizard") return;
         loadAlfaMax().catch(() => { alfaSessionTimer = setTimeout(poll, 5000); });
       };
       poll();

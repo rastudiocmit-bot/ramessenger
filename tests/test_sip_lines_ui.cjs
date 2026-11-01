@@ -100,3 +100,13 @@ test('unavailable vault does not lock cancel or the password visibility control'
  assert.equal(u.$('#sip-password-show').disabled,false);u.$('#sip-password-show').click();assert.equal(u.fields.password.type,'password');
  assert.equal(u.$('#sip-lines-cancel').disabled,false);u.$('#sip-lines-cancel').click();assert.equal(u.$('#sip-lines-form').hidden,true);assert.equal(u.fields.password.value,'');
 });
+test('automatic tab returns reuse the current SIP list without locking an open draft',async t=>{
+ const u=setup(t);await u.ui.load();u.$('#sip-lines-add').click();u.fields.sip_number.value='000123';u.fields.password.value='synthetic-draft';u.fields.password.dispatchEvent(new u.w.Event('input',{bubbles:true}));
+ await u.ui.load({cached:true});assert.equal(u.calls.length,1);assert.equal(u.fields.password.value,'synthetic-draft');assert.equal(u.fields.sip_number.disabled,false);
+ await u.ui.load();assert.equal(u.calls.length,2);
+});
+test('the short SIP cache is scoped to the session and workspace and expires',async t=>{
+ const u=setup(t);let now=1000;u.w.Date.now=()=>now;await u.ui.load();await u.ui.load({cached:true});assert.equal(u.calls.length,1);
+ now+=30001;await u.ui.load({cached:true});assert.equal(u.calls.length,2);u.state.epoch++;await u.ui.load({cached:true});assert.equal(u.calls.length,3);
+ u.state.workspace={id:'org-two',role:'owner'};await u.ui.load({cached:true});assert.equal(u.calls.length,4);assert.match(u.calls[3].url,/org-two/);
+});

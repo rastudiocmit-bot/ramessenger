@@ -131,6 +131,7 @@ async function fixture(context, role = 'owner', sections = ['overview', 'message
           .sort((a, b) => a.due_at.localeCompare(b.due_at)) };
       } else { unexpected.push(method + ' ' + p); return route.fulfill({ status: 501, contentType: 'application/json', body: '{"detail":"Unmocked request"}' }); }
     }
+    else if (/\/(chats|directory)\/[^/]+\/calls$/.test(p)) payload = {calls:[],connected:false,has_more:false,next:null};
     else if (p.endsWith('/chats/context')) payload = { preferences, channels, branches, can_write: role !== 'observer', send_attachments: false,
       voice_input: Boolean(options.voice) && role !== 'observer' };
     else if (p.endsWith('/chats/bootstrap')) payload = {context:{version:'1:2026-10-26',preferences,channels,branches,can_write:role!=='observer',voice_input:Boolean(options.voice)&&role!=='observer'},

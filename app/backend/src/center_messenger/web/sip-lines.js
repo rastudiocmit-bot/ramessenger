@@ -3,7 +3,7 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
   const root = $("#sip-lines-card"); if (!root) return { load() {}, reset() {} };
   const form = $("#sip-lines-form"), list = $("#sip-lines-list"), error = $("#sip-lines-error"), message = $("#sip-lines-message");
   const fields = form.elements;
-  let saved = null, editing = null, busy = false, generation = 0, dirty = false;
+  let saved = null, editing = null, busy = false, generation = 0, dirty = false, savedAt = 0, savedContext = null;
   const context = () => ({ generation, workspace: state.workspace?.id, user: state.user?.id, epoch: state.epoch });
   const current = ctx => ctx.generation === generation && ctx.workspace === state.workspace?.id && ctx.user === state.user?.id && ctx.epoch === state.epoch;
   const endpoint = ctx => `/workspaces/${ctx.workspace}/integrations/novofon/sip-lines`;
@@ -67,7 +67,7 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
   }
   function render(value) {
     if (!Array.isArray(value.lines) || !Array.isArray(value.members) || !Number.isInteger(value.version)) throw new Error("Не удалось получить настройки SIP-линий.");
-    saved = value; list.replaceChildren();
+    saved = value; savedAt = Date.now(); savedContext = context(); list.replaceChildren();
     if (!value.members.length) list.append(node("p", "Сначала добавьте сотрудников в разделе «Сотрудники».", "form-note"));
     if (!value.lines.length) list.append(node("p", "SIP-линии ещё не добавлены. Назначьте каждому сотруднику его SIP-номер и пароль.", "form-note"));
     for (const line of value.lines) {
@@ -88,7 +88,8 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
     catch (e) { if (current(ctx)) notice(e.message || "Не удалось сохранить SIP-линии.", error); }
     finally { if (current(ctx)) { busy = false; controls(); } }
   }
-  async function load() {
+  async function load({ cached = false } = {}) {
+    if (cached && saved && savedContext && current(savedContext) && Date.now() - savedAt < 30000) return;
     return run(async ctx => {
       const value = await api(endpoint(ctx), { timeoutMs: 10000 }); if (!current(ctx)) return;
       if (!form.hidden && saved && value.version !== saved.version) { notice("SIP-линии изменились. Данные формы сохранены. Обновите список перед сохранением.", error); return; }
@@ -96,7 +97,7 @@ window.CenterSipLines = ({ $, state, api, notice, confirm }) => {
     });
   }
   function reset() {
-    generation++; saved = null; busy = false; clearForm(); fields.member_id.replaceChildren(); list.replaceChildren(); notice("", error); notice("", message); controls();
+    generation++; saved = null; savedContext = null; savedAt = 0; busy = false; clearForm(); fields.member_id.replaceChildren(); list.replaceChildren(); notice("", error); notice("", message); controls();
   }
   form.addEventListener("input", () => { dirty = true; if (!fields.enabled.checked) fields.primary.checked = false; controls(); });
   form.addEventListener("submit", e => {

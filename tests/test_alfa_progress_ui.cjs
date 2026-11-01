@@ -47,6 +47,16 @@ test("503 preserves counters, visibly pauses animation, and automatically recove
   assert.equal(ui.$('[data-metric="messages"] strong').dataset.count, "82770");
   assert.ok(!ui.$("#alfa-max-progress").classList.contains("is-offline"));
 });
+test('hidden MAX status does not poll while Novofon is selected',async t=>{
+ const ui=setup(t,()=>report());ui.state.pane='connections';ui.state.connectionsView='novofon';await ui.app.start();
+ ui.window.document.dispatchEvent(new ui.window.Event('visibilitychange'));await Promise.resolve();assert.equal(ui.calls.length,0);assert.equal(ui.timers.size,0);
+ ui.state.connectionsView='wizard';await ui.app.start();assert.equal(ui.calls.length,1);
+});
+test('leaving the master pauses only its report and discards an in-flight reply',async t=>{
+ let finish;const ui=setup(t,()=>new Promise(r=>finish=r));ui.state.pane='connections';ui.state.connectionsView='wizard';const pending=ui.app.start();
+ ui.state.connectionsView='novofon';ui.app.pause();finish(report({messages:999999}));await pending;
+ assert.equal(ui.timers.size,0);assert.doesNotMatch(ui.$('#alfa-max-progress-stats').textContent,/999999/);
+});
 test("live freshness shows overload and clears it after a successful read", async t => {
   let delayed = true;
   const ui = setup(t, () => report({syncing:false,

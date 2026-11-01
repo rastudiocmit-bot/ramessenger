@@ -81,6 +81,8 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
   const branchLabel = stream => stream.branch_name || "Филиал " + stream.branch_id;
   const journalLabel = stream => branchLabel(stream) + " · " + (stream.direction === "sent" ? "Исходящие" : "Входящие");
   function clearTimer() { if (timer !== null) clearTimeout(timer); timer = null; }
+  const visible = () => (!state.pane || state.pane === "connections") && (!state.connectionsView || state.connectionsView === "wizard");
+  function pause() { generation += 1; clearTimer(); pending = null; }
   function mode(value) {
     const target = $("#alfa-max-progress"); target.dataset.mode = value;
     for (const [name, enabled] of [["complete", value === "complete"], ["paused", value === "paused"], ["offline", value === "offline"]]) target.classList.toggle("is-" + name, enabled);
@@ -277,11 +279,12 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
     renderEntity(payload); renderRecent(payload); onStatus(payload, { mode: value, title });
   }
   function start() {
-    if (pending) return pending;
     const workspace = state.workspace, epoch = state.epoch, token = generation;
     if (!workspace || (state.pane && state.pane !== "connections")) { reset(); return Promise.resolve(); }
+    if (!visible()) { pause(); return Promise.resolve(); }
+    if (pending) return pending;
     clearTimer();
-    const current = () => token === generation && epoch === state.epoch && workspace.id === state.workspace?.id && (!state.pane || state.pane === "connections");
+    const current = () => token === generation && epoch === state.epoch && workspace.id === state.workspace?.id && visible();
     pending = (async () => {
       try {
         const activityOnly = Boolean(lastPayload && Date.now() - lastFullAt < 15000);
@@ -348,11 +351,11 @@ window.CenterAlfaProgress = function ({ $, state, api, show, date, onStatus = ()
   $("#alfa-loader-pause").addEventListener("click", event => requestTask(event.currentTarget, { archive_paused: !lastPayload?.archive_paused }, "pause"));
   $("#alfa-active-review").addEventListener("click", event => requestTask(event.currentTarget, { review_active: true }, "review"));
   $("#alfa-max-progress-refresh").addEventListener("click", refresh);
-  document.addEventListener("visibilitychange", () => { if (document.hidden) clearTimer(); else if (state.pane === "connections") refresh(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) clearTimer(); else if (visible()) refresh(); });
   $("#alfa-max-progress-client-back").addEventListener("click", () => { selectedEvent = null; if (lastPayload) { renderEntity(lastPayload); renderRecent(lastPayload); } });
   $("#alfa-max-progress-recent").addEventListener("click", event => {
     const id = event.target.closest("[data-event]")?.dataset.event, entry = lastPayload?.worker?.recent?.find(e => e.id === id);
     if (entry) { selectedEvent = entry; renderEntity(lastPayload); renderRecent(lastPayload); $("#alfa-max-progress-client").scrollIntoView?.({ block: "nearest" }); }
   });
-  return { start, reset };
+  return { start, reset, pause };
 };

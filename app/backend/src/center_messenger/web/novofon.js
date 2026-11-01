@@ -97,9 +97,9 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
     catch (error) { if (current(ctx)) notice(error.message || "Не удалось выполнить действие. Повторите позже.", $("#novofon-error")); }
     finally { if (current(ctx)) { busy = false; controls(); } }
   }
-  async function load() {
+  async function load({ refreshSip = false } = {}) {
     loader?.load();
-    sipLines?.load();
+    sipLines?.load({ cached: !refreshSip });
     return run(async ctx => { const value = await api(endpoint(ctx), { timeoutMs: 10000 }); if (current(ctx)) render(value); });
   }
   async function verify(ctx, audio) {
@@ -130,7 +130,7 @@ window.CenterNovofon = function ({ $, state, api, show, notice, confirm }) {
     const ctx = snapshot();
     if ((key.value || support.value) && !await confirm("Обновить настройки?", "Введённые новые реквизиты будут очищены без сохранения.", "Обновить")) return;
     if (!current(ctx) || busy) return;
-    key.value = ""; support.value = ""; await load();
+    key.value = ""; support.value = ""; await load({ refreshSip: true });
   });
   $("#novofon-disconnect").addEventListener("click", async () => {
     const ctx = snapshot();
