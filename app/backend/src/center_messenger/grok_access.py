@@ -15,6 +15,7 @@ MESSAGES = {
     'available': 'Сервер получил доступ к каталогу моделей xAI. Генерация текста проверяется отдельно кнопкой «Проверить подключение».',
     'unauthorized': 'xAI не принял сохранённый на сервере ключ. Вставьте ключ заново, сохраните и повторите проверку.',
     'forbidden': 'xAI запретил доступ с сервера. Это не подтверждает неверный ключ: проверьте права ключа и ограничения доступа в xAI.',
+    'origin_restricted': 'В ответе xAI указано ограничение на источник запроса (origin/IP). Замена ключа сама по себе может не устранить этот запрет.',
     'region_restricted': 'В ответе xAI указано ограничение по региону. Создание нового ключа само по себе его не устраняет.',
     'no_balance': 'В ответе xAI указана проблема с балансом или оплатой API. Проверьте Billing в console.x.ai.',
     'rate_limited': 'xAI ограничил частоту запросов. Повторите проверку позже.',
@@ -24,6 +25,17 @@ MESSAGES = {
     'bad_response': 'xAI вернул ответ, который не удалось разобрать. Ключ по этому ответу проверить нельзя.',
     'unavailable': 'xAI сейчас недоступен с сервера. Повторите проверку позже.',
     'stale': 'Во время проверки ключ изменился. Запустите проверку для нового сохранённого ключа.',
+}
+
+ACCOUNT_MESSAGES = {
+    'recognized': 'xAI распознал сохранённый ключ; ключ и команда не отмечены заблокированными. Проверьте разрешение на каталог моделей в настройках ключа.',
+    'team_blocked': 'xAI сообщает, что команда владельца ключа заблокирована. Обратитесь в поддержку xAI через console.x.ai.',
+    'key_blocked': 'xAI сообщает, что сохранённый ключ заблокирован. Проверьте его состояние в console.x.ai.',
+    'key_disabled': 'xAI сообщает, что сохранённый ключ отключён. Проверьте его состояние в console.x.ai.',
+    'no_permissions': 'xAI распознал ключ, но список его разрешений пуст. Разрешите необходимые API и модели в настройках ключа.',
+    'forbidden': 'Сведения о ключе тоже недоступны. Эти ответы не позволяют отличить ограничения ключа или команды от ограничения источника запросов.',
+    'unauthorized': 'При запросе сведений xAI не подтвердил сохранённый ключ. Проверьте, какой ключ сохранён в настройках шлюза.',
+    'unavailable': 'Дополнительную проверку состояния ключа выполнить не удалось. Первый ответ остаётся HTTP 403.',
 }
 
 
@@ -49,6 +61,9 @@ def denial(status, raw):
     if status in (401, 403) and any(x in message for x in ('unsupported country', 'unsupported region',
             'region restricted', 'region_restricted', 'country is not supported', 'geographic restriction')):
         return 'region_restricted'
+    if status == 403 and any(x in message for x in ('origin is not allowed', 'ip address is not allowed',
+            'source ip is not allowed')):
+        return 'origin_restricted'
     if status in (401, 402, 403) and any(x in message for x in ('insufficient credit', 'no credit',
             'out of credit', 'does not have any credits', "doesn't have any credits", 'insufficient balance')):
         return 'no_balance'
@@ -60,24 +75,59 @@ def denial(status, raw):
     return 'unavailable'
 
 
-def probe(key, opener=None):
-    opener = opener or urllib.request.build_opener(NoRedirect()).open
-    request = urllib.request.Request(ai_grok.BASE_URL + '/language-models', method='GET',
+def read_access(key, path, opener):
+    if path not in ('/language-models', '/api-key'):
+        raise ValueError('Unsupported access diagnostic')
+    request = urllib.request.Request(ai_grok.BASE_URL + path, method='GET',
         headers={'Authorization': 'Bearer ' + key, 'Accept': 'application/json'})
     try:
-        with opener(request, timeout=10) as response:
-            raw = response.read(2_000_001)
-            status = response.status
+        with opener(request, timeout=7) as response:
+            return response.status, response.read(2_000_001)
     except urllib.error.HTTPError as error:
-        try:
-            raw = error.read(65536)
-        except (OSError, TimeoutError):
-            raw = b''
-        return report(denial(error.code, raw), error.code)
+        with error:
+            try:
+                raw = error.read(65536)
+            except (OSError, TimeoutError):
+                raw = b''
+        return error.code, raw
+
+
+def account_access(key, opener):
+    status, code = None, 'unavailable'
+    try:
+        status, raw = read_access(key, '/api-key', opener)
+        if status == 200 and len(raw) <= 2_000_000:
+            value = json.loads(raw)
+            flags = ('team_blocked', 'api_key_blocked', 'api_key_disabled')
+            if (isinstance(value, dict) and not value.get('error')
+                    and all(type(value.get(flag)) is bool for flag in flags)
+                    and isinstance(value.get('acls'), list)
+                    and all(isinstance(acl, str) for acl in value['acls'])):
+                code = ('team_blocked' if value['team_blocked'] else 'key_blocked' if value['api_key_blocked']
+                        else 'key_disabled' if value['api_key_disabled'] else 'no_permissions' if not value['acls']
+                        else 'recognized')
+        elif status in (401, 403):
+            code = 'unauthorized' if status == 401 else 'forbidden'
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError):
+        pass
+    # Project fixed enums only: no IDs, ACL strings, redacted key, names or raw body.
+    return {'http_status': status, 'code': code, 'message': ACCOUNT_MESSAGES[code]}
+
+
+def probe(key, opener=None):
+    opener = opener or urllib.request.build_opener(NoRedirect()).open
+    try:
+        status, raw = read_access(key, '/language-models', opener)
     except (urllib.error.URLError, TimeoutError, OSError):
         return report('network')
+    if status != 200:
+        code = denial(status, raw)
+        result = report(code, status)
+        if status == 403 and code == 'forbidden':
+            result['account'] = account_access(key, opener)
+        return result
     try:
-        if status != 200 or len(raw) > 2_000_000:
+        if len(raw) > 2_000_000:
             raise ValueError()
         value = json.loads(raw)
         rows = value['models']

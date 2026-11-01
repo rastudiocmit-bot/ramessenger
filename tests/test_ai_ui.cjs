@@ -111,6 +111,24 @@ test('an unsaved Grok key cannot accidentally test the previously saved key',asy
  assert.match(s.notices.at(-1),/Сначала сохраните/);assert.equal(form.elements.api_key.value,'xai-new-unsaved-test-only');
 });
 
+test('legacy Grok unauthorized never falsely proves an invalid key and account diagnostics remain read only',async t=>{
+ const s=await setup(t),card=s.$('[data-gateway=grok]'),form=card.querySelector('form');
+ form.elements.api_key.value='xai-synthetic-test-only';form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ s.fail('grok','text','unauthorized');card.querySelector('[data-verify=text]').click();await s.flush();
+ assert.match(card.querySelector('[data-check=text]').textContent,/Доступ к xAI не подтверждён/);
+ assert.doesNotMatch(card.querySelector('.gateway-status').title,/Ключ отклонён/);
+ s.setDiagnostic({ok:false,http_status:403,message:'Каталог запрещён.',account:{http_status:200,code:'recognized',message:'xAI распознал сохранённый ключ.'},models:[],checked_at:'2026-11-01T09:30:00Z'});
+ card.querySelector('.gateway-diagnostic').click();await s.flush();
+ const result=card.querySelector('.gateway-diagnostic-result');
+ assert.match(result.textContent,/Ответ xAI: HTTP 403/);assert.match(result.textContent,/Состояние ключа: HTTP 200/);
+ assert.match(result.textContent,/распознал сохранённый ключ/);assert.equal(card.querySelector('.gateway-status').dataset.state,'error');
+ assert.equal(s.calls.filter(c=>c.url.endsWith('/verify')).length,1);
+ const mimo=s.$('[data-gateway=mimo]'),mimoForm=mimo.querySelector('form');
+ mimoForm.elements.api_key.value='synthetic-mimo';mimoForm.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();
+ s.fail('mimo','text','unauthorized');mimo.querySelector('[data-verify=text]').click();await s.flush();
+ assert.equal(mimo.querySelector('[data-check=text]').textContent,'Ключ отклонён');
+});
+
 test('a late Grok access report cannot enter a different workspace',async t=>{
  const s=await setup(t),card=s.$('[data-gateway=grok]'),form=card.querySelector('form');
  form.elements.api_key.value='xai-synthetic-test-only';form.dispatchEvent(new s.w.Event('submit',{cancelable:true}));await s.flush();

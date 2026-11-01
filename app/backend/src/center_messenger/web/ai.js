@@ -261,6 +261,12 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
     unavailable: "Сервис временно недоступен", network: "Нет связи с сервисом", bad_response: "Сервис вернул некорректный ответ",
     bad_request: "Сервис не принял запрос", not_connected: "Добавьте ключ", speech_language: "Язык не поддерживается",
     model_unknown: "Поддерживаемая модель недоступна для этого ключа" };
+  function gatewayCheckError(provider, code) {
+    // The installed Grok checker records both HTTP 401 and 403 as unauthorized.
+    // That legacy code alone cannot establish that a saved key is invalid.
+    if (provider === "grok" && code === "unauthorized") return "Доступ к xAI не подтверждён — уточните причину ошибки";
+    return checkErrors[code] || "Проверка не прошла";
+  }
   function renderGatewayStatus(card, item) {
     const provider = card.dataset.gateway, checks = item.checks || {}, pending = verifying.get(provider)?.capability;
     const pendingName = verifying.get(provider)?.access ? "Доступ к API" : checkNames[pending];
@@ -272,7 +278,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       : passed === total ? "Работает" : passed ? `Проверено ${passed} из ${total}` : "Не проверено";
     badge.dataset.state = pending ? "pending" : !item.configured ? "" : failed.length ? "error" : passed === total ? "active" : passed ? "partial" : "";
     badge.title = pending ? `Проверяется: ${pendingName || "возможности сервиса"}` : !item.configured ? "Сначала сохраните API-ключ."
-      : failed.length ? failed.map(key => `${checkNames[key]}: ${checkErrors[checks[key].error_code] || "Проверка не прошла"}`).join(". ")
+      : failed.length ? failed.map(key => `${checkNames[key]}: ${gatewayCheckError(provider, checks[key].error_code)}`).join(". ")
       : `Успешно проверено возможностей: ${passed} из ${total}.`;
     if (count) count.textContent = pending ? `Проверяем: ${pendingName}` : item.configured ? `Доступно ${passed} из ${total} возможностей` : "Добавьте ключ для проверки";
     const models = card.querySelector('[data-grok-models]');
@@ -289,7 +295,7 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
       button.textContent = pending === capability ? "Проверяем…" : provider === "grok" ? "Проверить подключение" : "Проверить";
       const output = card.querySelector(`[data-check="${capability}"]`);
       output.dataset.state = !check ? "" : check.ok ? "active" : "error";
-      output.textContent = !check ? "Не проверено" : (check.ok ? "Работает" : checkErrors[check.error_code] || "Проверка не прошла");
+      output.textContent = !check ? "Не проверено" : (check.ok ? "Работает" : gatewayCheckError(provider, check.error_code));
       output.title = check?.checked_at ? `Последняя проверка: ${new Date(check.checked_at).toLocaleString("ru-RU")}` : "Проверка ещё не запускалась";
       const row = output.closest(".gateway-capability");
       let time = row.querySelector("time");
@@ -383,6 +389,10 @@ window.CenterAi = ({ $, state, api, node, show, notice, toast, confirm }) => {
         if (mine !== seq) return;
         box.replaceChildren(node("strong", result.http_status ? `Ответ xAI: HTTP ${result.http_status}` : "Результат проверки доступа"),
           node("p", result.message));
+        if (result.account) {
+          box.append(node("strong", result.account.http_status ? `Состояние ключа: HTTP ${result.account.http_status}` : "Состояние ключа не подтверждено"),
+            node("p", result.account.message));
+        }
         if (result.models?.length) box.append(node("p", `Доступные модели: ${result.models.join(", ")}`));
         box.append(node("small", new Date(result.checked_at).toLocaleString("ru-RU") + " · генерация текста не запускалась"));
         box.dataset.state = result.ok ? "active" : "error"; show(box);

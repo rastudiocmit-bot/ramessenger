@@ -36,7 +36,7 @@ class GrokAccessTests(unittest.TestCase):
         self.assertEqual(self.depth,0,'provider read inside database transaction')
         self.assertEqual(request.get_method(),'GET');self.assertIsNone(request.data)
         self.assertEqual(request.full_url,'https://api.x.ai/v1/language-models')
-        self.assertEqual(request.get_header('Authorization'),'Bearer '+KEY);self.assertEqual(timeout,10)
+        self.assertEqual(request.get_header('Authorization'),'Bearer '+KEY);self.assertEqual(timeout,7)
         return Response(json.dumps({'models':[{'id':'grok-4.7','input_modalities':['text'],'output_modalities':['text']}]}).encode())
     def test_success_reads_catalogue_without_inference_usage_or_settings_writes(self):
         before=deepcopy(self.db.settings)
@@ -54,14 +54,82 @@ class GrokAccessTests(unittest.TestCase):
                 raise urllib.error.HTTPError(request.full_url,status,'private',{},io.BytesIO(json.dumps({'error':KEY}).encode()))
             result=g.diagnose(self.ai,ACTOR,WS,opener=opener)
             self.assertEqual(result['http_status'],status);self.assertEqual(result['code'],code)
-            self.assertNotIn(KEY,str(result));self.assertNotIn('private',str(result));self.assertEqual(len(calls),1)
+            self.assertNotIn(KEY,str(result));self.assertNotIn('private',str(result))
+            self.assertEqual([call.full_url for call in calls],['https://api.x.ai/v1/language-models']
+                + (['https://api.x.ai/v1/api-key'] if status==403 else []))
     def test_denial_classifies_only_bounded_json_signals(self):
         self.assertEqual(g.denial(403,b'{"error":"country is not supported"}'),'region_restricted')
+        self.assertEqual(g.denial(403,b'{"error":"Your request was blocked as your origin is not allowed"}'),'origin_restricted')
         self.assertEqual(g.denial(403,b'{"error":"team does not have any credits"}'),'no_balance')
         self.assertEqual(g.denial(403,b'<html>private denial</html>'),'forbidden')
         self.assertEqual(g.denial(429,b'{}'),'rate_limited')
         self.assertEqual(g.denial(302,b'{}'),'redirect_refused')
         self.assertIsNone(g.NoRedirect().redirect_request(None,None,None,None,None,None))
+    def test_second_read_projects_key_state_without_exposing_account_metadata(self):
+        import urllib.error
+        base={'team_blocked':False,'api_key_blocked':False,'api_key_disabled':False,
+              'acls':['api-key:endpoint:*','api-key:model:*'],'name':KEY,'team_id':'private-team',
+              'user_id':'private-user','redacted_api_key':KEY,'arbitrary_secret':KEY}
+        for changed,code in (({},'recognized'),({'team_blocked':True},'team_blocked'),
+                ({'api_key_blocked':True},'key_blocked'),({'api_key_disabled':True},'key_disabled'),
+                ({'acls':[]},'no_permissions')):
+            calls=[];before=deepcopy(self.db.settings)
+            def opener(request,timeout):
+                self.assertEqual(self.depth,0);self.assertEqual(timeout,7)
+                self.assertEqual(request.get_header('Authorization'),'Bearer '+KEY)
+                self.assertEqual(request.get_method(),'GET');self.assertIsNone(request.data)
+                calls.append(request.full_url)
+                if len(calls)==1:
+                    raise urllib.error.HTTPError(request.full_url,403,'private',{},io.BytesIO(b'{}'))
+                self.assertEqual(request.full_url,'https://api.x.ai/v1/api-key')
+                return Response(json.dumps({**base,**changed}).encode())
+            result=g.diagnose(self.ai,ACTOR,WS,opener=opener)
+            self.assertEqual(result['http_status'],403);self.assertFalse(result['ok'])
+            self.assertEqual(result['account']['code'],code);self.assertEqual(result['account']['http_status'],200)
+            for secret in (KEY,'private-team','private-user','api-key:endpoint:*'):
+                self.assertNotIn(secret,str(result))
+            self.assertEqual(self.db.settings,before);self.assertEqual(self.db.usage,[])
+            self.assertEqual(self.ai.grok.calls,[]);self.assertEqual(len(calls),2)
+    def test_second_read_failure_does_not_replace_initial_403(self):
+        import urllib.error
+        for raw in (b'bad',b'[]',b'{}',b'x'*2_000_001,
+                b'{"team_blocked":"false","api_key_blocked":false,"api_key_disabled":false,"acls":[]}'):
+            def opener(request,timeout):
+                if request.full_url.endswith('/language-models'):
+                    raise urllib.error.HTTPError(request.full_url,403,'private',{},io.BytesIO(b'{}'))
+                return Response(raw)
+            result=g.probe(KEY,opener)
+            self.assertEqual(result['http_status'],403);self.assertEqual(result['account']['code'],'unavailable')
+            self.assertFalse(result['ok'])
+        def timeout(request,**kwargs):
+            if request.full_url.endswith('/language-models'):
+                raise urllib.error.HTTPError(request.full_url,403,'private',{},io.BytesIO(b'{}'))
+            raise TimeoutError(KEY)
+        result=g.probe(KEY,timeout)
+        self.assertEqual(result['http_status'],403);self.assertIsNone(result['account']['http_status'])
+        self.assertNotIn(KEY,str(result))
+    def test_explicit_denial_does_not_request_account_or_retry(self):
+        import urllib.error
+        for status,body in ((401,b'{}'),(403,b'{"error":"unsupported country"}'),
+                (403,b'{"error":"origin is not allowed"}'),(429,b'{}'),(302,b'{}')):
+            calls=[]
+            def opener(request,timeout):
+                calls.append(request)
+                raise urllib.error.HTTPError(request.full_url,status,'private',{},io.BytesIO(body))
+            result=g.probe(KEY,opener)
+            self.assertEqual(result['http_status'],status);self.assertNotIn('account',result)
+            self.assertEqual(len(calls),1)
+        with self.assertRaises(ValueError):
+            g.read_access(KEY,'https://other.example.test/',lambda *_args,**_kw:self.fail('request'))
+    def test_key_replacement_during_account_read_makes_the_entire_report_stale(self):
+        import urllib.error
+        def opener(request,timeout):
+            if request.full_url.endswith('/language-models'):
+                raise urllib.error.HTTPError(request.full_url,403,'private',{},io.BytesIO(b'{}'))
+            self.setup.save(api_key=KEY+'replacement')
+            return Response(b'{"team_blocked":false,"api_key_blocked":false,"api_key_disabled":false,"acls":[]}')
+        result=g.diagnose(self.ai,ACTOR,WS,opener=opener)
+        self.assertEqual(result['code'],'stale');self.assertNotIn('account',result)
     def test_revoked_role_and_missing_key_block_provider_read(self):
         for role in ('operator','observer'):
             self.ai.accounts.role=role

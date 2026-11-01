@@ -70,7 +70,7 @@ Official xAI references (reviewed 2026-11-01):
 
 ### Grok access report in the gateway card
 
-«Уточнить причину ошибки» makes an explicit catalogue-only GET from the API
+«Уточнить причину ошибки» makes an explicit catalogue GET from the API
 container using the saved workspace credential. It displays the actual HTTP
 status (401 and 403 remain distinct), a fixed safe explanation and accessible
 supported models. It does not generate text, verify inference, change saved
@@ -78,6 +78,19 @@ check status, launch telephone work or expose the provider's raw response.
 Owner/admin permission and the credential snapshot are checked both before
 and after the request, outside of which no database transaction remains open.
 The existing account throttle limits this action to five checks per minute.
+
+When the catalogue returns a generic HTTP 403, one additional GET to the
+official `/api-key` endpoint checks the provider's key/team blocked and disabled
+flags and an empty permissions list. Only fixed state labels are projected;
+names, key fragments, account IDs, ACL strings and raw replies are discarded.
+Both reads use the same saved key, seven-second request timeouts, no redirects
+and no retries. An unavailable second read preserves the original HTTP 403;
+two forbidden responses do not establish a bad key or a regional block.
+Explicit JSON origin/region denials are distinguished without another read.
+The ordinary pinned checker historically combined 401/403 as `unauthorized`,
+so the Grok card now describes that stored code neutrally rather than asserting
+that the key was rejected. This does not alter the protected checker or its
+saved checks. Account information: https://docs.x.ai/developers/rest-api-reference/inference/other
 
 A non-empty unsaved Grok key now blocks both inference verification and the
 access report until it is saved. Verification never silently uses the old key
